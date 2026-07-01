@@ -1,0 +1,53 @@
+.DS_Store
+Thumbs.db
+
+# Local environment
+.env
+.env.*
+!.env.example
+*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.python-version
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
+dist/
+build/
+*.egg-info/
+
+# Node / frontend
+node_modules/
+.vite/
+.tanstack/
+frontend/dist/
+frontend/.output/
+frontend/node_modules/
+
+# Data and generated artifacts
+backend/data/raw/*
+!backend/data/raw/.gitkeep
+!backend/data/raw/prospectus/
+!backend/data/raw/company_info/
+!backend/data/raw/market_prices/
+backend/data/raw/prospectus/*
+backend/data/raw/company_info/*
+backend/data/raw/market_prices/*
+!backend/data/raw/prospectus/.gitkeep
+!backend/data/raw/company_info/.gitkeep
+!backend/data/raw/market_prices/.gitkeep
+backend/data/processed/*
+!backend/data/processed/.gitkeep
+backend/reports/generated/**
+
+# IDE
+.idea/
+.vscode/

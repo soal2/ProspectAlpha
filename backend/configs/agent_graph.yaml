@@ -1,0 +1,4 @@
+# Agent graph placeholder.
+# TODO: Define orchestration order, parallel agent steps, verifier gates, and report generation.
+agents: []
+edges: []

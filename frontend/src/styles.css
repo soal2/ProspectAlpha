@@ -1,0 +1,225 @@
+@import "tailwindcss" source(none);
+@source "../src";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+  --radius-3xl: calc(var(--radius) + 12px);
+
+  --font-serif: "Playfair Display", "Noto Serif SC", ui-serif, serif;
+  --font-sans: "Inter", "Noto Sans SC", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --color-gold: var(--gold);
+  --color-gold-soft: var(--gold-soft);
+  --color-navy: var(--navy);
+  --color-navy-deep: var(--navy-deep);
+  --color-sage: var(--gold);
+  --color-sage-soft: var(--gold-soft);
+  --color-amber-soft: var(--gold-soft);
+  --color-risk-high: var(--risk-high);
+  --color-risk-mid: var(--risk-mid);
+  --color-risk-low: var(--risk-low);
+  --color-ink: var(--ink);
+  --color-paper: var(--paper);
+
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-chart-6: var(--chart-6);
+
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+}
+
+:root {
+  --radius: 0.5rem;
+
+  /* Institutional finance terminal palette */
+  --background: #f6f8fb;
+  --foreground: #101828;
+  --paper: #ffffff;
+  --ink: #101828;
+
+  --card: #ffffff;
+  --card-foreground: #101828;
+  --popover: #ffffff;
+  --popover-foreground: #101828;
+
+  /* Deep navy primary */
+  --primary: #0b243d;
+  --primary-foreground: #ffffff;
+  --navy: #0b243d;
+  --navy-deep: #061a2f;
+
+  /* Brand gold */
+  --gold: #c9a35b;
+  --gold-soft: #f3e6c8;
+
+  --secondary: #eef2f7;
+  --secondary-foreground: #0b243d;
+  --muted: #f1f4f8;
+  --muted-foreground: #667085;
+  --accent: #c9a35b;
+  --accent-foreground: #0b243d;
+
+  --destructive: #b42318;
+  --destructive-foreground: #ffffff;
+
+  --risk-high: #b42318;
+  --risk-mid: #b54708;
+  --risk-low: #027a48;
+
+  --border: #e4e7ec;
+  --input: #e4e7ec;
+  --ring: rgba(201, 163, 91, 0.55);
+
+  --chart-1: #0b243d;
+  --chart-2: #3b6fa0;
+  --chart-3: #c9a35b;
+  --chart-4: #b42318;
+  --chart-5: #b54708;
+  --chart-6: #7b8ba1;
+
+  --sidebar: #061a2f;
+  --sidebar-foreground: #e6ecf3;
+  --sidebar-primary: #c9a35b;
+  --sidebar-primary-foreground: #061a2f;
+  --sidebar-accent: rgba(201, 163, 91, 0.10);
+  --sidebar-accent-foreground: #f1d89a;
+  --sidebar-border: rgba(255, 255, 255, 0.06);
+  --sidebar-ring: #c9a35b;
+}
+
+.dark {
+  --background: #0a1524;
+  --foreground: #e6ecf3;
+  --card: #0f1f33;
+  --card-foreground: #e6ecf3;
+  --popover: #0f1f33;
+  --popover-foreground: #e6ecf3;
+  --primary: #c9a35b;
+  --primary-foreground: #061a2f;
+  --secondary: #142b46;
+  --secondary-foreground: #e6ecf3;
+  --muted: #122238;
+  --muted-foreground: #8a99ad;
+  --accent: #c9a35b;
+  --accent-foreground: #061a2f;
+  --destructive: #b42318;
+  --destructive-foreground: #ffffff;
+  --border: rgba(255, 255, 255, 0.08);
+  --input: rgba(255, 255, 255, 0.12);
+  --ring: rgba(201, 163, 91, 0.55);
+  --sidebar: #03111f;
+  --sidebar-foreground: #e6ecf3;
+  --sidebar-primary: #c9a35b;
+  --sidebar-primary-foreground: #061a2f;
+  --sidebar-accent: rgba(201, 163, 91, 0.12);
+  --sidebar-accent-foreground: #f1d89a;
+  --sidebar-border: rgba(255, 255, 255, 0.06);
+  --sidebar-ring: #c9a35b;
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    font-family: var(--font-sans);
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11", "ss01";
+    -webkit-font-smoothing: antialiased;
+  }
+  h1, h2, h3 {
+    font-family: var(--font-serif);
+    letter-spacing: -0.015em;
+  }
+  .font-serif {
+    font-family: var(--font-serif);
+    letter-spacing: -0.01em;
+  }
+  .tabular {
+    font-variant-numeric: tabular-nums;
+    font-family: var(--font-mono);
+  }
+  .brand-mark {
+    font-family: var(--font-serif);
+    letter-spacing: -0.02em;
+    font-weight: 600;
+  }
+  .eyebrow {
+    font-family: var(--font-sans);
+    font-size: 10px;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    font-weight: 600;
+  }
+}
+
+@utility terminal-grid {
+  background-image:
+    linear-gradient(to right, rgba(11, 36, 61, 0.05) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(11, 36, 61, 0.05) 1px, transparent 1px);
+  background-size: 48px 48px;
+}
+
+@utility grid-paper {
+  background-image:
+    linear-gradient(to right, rgba(11, 36, 61, 0.04) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(11, 36, 61, 0.04) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
+
+@utility soft-ring {
+  box-shadow:
+    0 1px 2px rgba(16, 24, 40, 0.04),
+    0 8px 24px -12px rgba(11, 36, 61, 0.16);
+}
+
+@utility gold-rule {
+  height: 1px;
+  background: linear-gradient(to right, transparent, rgba(201, 163, 91, 0.6), transparent);
+}
+
+@utility gold-underline {
+  background-image: linear-gradient(to right, #c9a35b, #c9a35b);
+  background-size: 100% 1px;
+  background-repeat: no-repeat;
+  background-position: 0 100%;
+}

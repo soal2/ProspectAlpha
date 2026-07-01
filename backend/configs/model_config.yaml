@@ -1,0 +1,4 @@
+# Model configuration placeholder.
+# TODO: Define rule scorecard weights and future ML model configuration.
+scorecard:
+  weights: {}

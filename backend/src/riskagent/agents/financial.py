@@ -1,0 +1,1 @@
+"""Financial specialist agent boundary."""

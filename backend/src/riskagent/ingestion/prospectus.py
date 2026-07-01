@@ -1,0 +1,1 @@
+"""Prospectus ingestion boundary."""

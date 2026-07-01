@@ -1,0 +1,1 @@
+"""Risk report generation boundary."""

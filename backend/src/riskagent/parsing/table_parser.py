@@ -1,0 +1,1 @@
+"""Table parser boundary."""

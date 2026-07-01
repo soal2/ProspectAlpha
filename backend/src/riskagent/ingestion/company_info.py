@@ -1,0 +1,1 @@
+"""Company information ingestion boundary."""
