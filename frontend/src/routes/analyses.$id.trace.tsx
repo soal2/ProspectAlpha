@@ -14,88 +14,18 @@ import {
   GitBranch,
   Search,
 } from "lucide-react";
-import { getAgents } from "@/lib/data-service";
+import { getAgents, getTraceData } from "@/lib/data-service";
 import { type Agent } from "@/mocks";
 import { motion, AnimatePresence } from "framer-motion";
 
 export const Route = createFileRoute("/analyses/$id/trace")({
+  loader: async ({ params }) => {
+    const trace = await getTraceData(params.id);
+    return { trace };
+  },
   component: TracePage,
-  head: () => ({ meta: [{ title: "Agent 决策链路回溯 · ProspectAlpha" }] }),
+  head: () => ({ meta: [{ title: "Agent 决策链路回溯 · Verda" }] }),
 });
-
-const stages = [
-  { key: "intake", label: "需求理解", owner: "沈砚", status: "done", cost: "0.4s" },
-  { key: "dispatch", label: "编排派遣", owner: "沈砚", status: "done", cost: "0.6s" },
-  { key: "evidence", label: "证据采集", owner: "程哲", status: "done", cost: "8.2s" },
-  { key: "feature", label: "特征抽取", owner: "蔡宝", status: "done", cost: "4.1s" },
-  { key: "cross", label: "多 Agent 协同", owner: "林清越", status: "done", cost: "12.7s" },
-  { key: "predict", label: "风险预测", owner: "苏明哲", status: "done", cost: "1.2s" },
-  { key: "qa", label: "质检审裁", owner: "周翊", status: "done", cost: "5.3s" },
-  { key: "sign", label: "签发交付", owner: "沈砚", status: "done", cost: "0.8s" },
-];
-
-const flow = [
-  {
-    who: "沈砚",
-    kind: "assign",
-    text: "你是 ProspectAlpha 首席指挥官。从专家名册中为本次调研挑选最合适的团队。规则：必须含 1 位 L3 决策层统筹、1-2 位 L2 策略顾问、3-6 位 L1 执行专家。",
-    t: "00:00",
-  },
-  {
-    who: "沈砚",
-    kind: "verdict",
-    text: '组队完成：{"lead":"L3-001","members":["L2-001","L2-002","L1-001","L1-002","L1-003","L1-005","L1-006"]}',
-    t: "00:01",
-  },
-  {
-    who: "程哲",
-    kind: "execute",
-    text: "深度检索「招股书 · 风险因素」: 客户集中度、供应商集中度、关联交易、回购义务、最新动态 2026",
-    t: "00:03",
-  },
-  {
-    who: "程哲",
-    kind: "discover",
-    text: "「风险因素」聚合到 124 条候选片段，去重后保留 47 条 · 已存入证据库",
-    t: "00:11",
-  },
-  {
-    who: "蔡宝",
-    kind: "discover",
-    text: "三大报表抽取完成：净利润 +8.2% · 经营性现金流 −18.6% · 自由现金流首次为负",
-    t: "00:18",
-  },
-  {
-    who: "温叙白",
-    kind: "discover",
-    text: "发现「特殊股东权利」第 28 项 ——若上市后 12 个月内未达营收 Y，触发硬性回购",
-    t: "00:24",
-  },
-  {
-    who: "周翊",
-    kind: "challenge",
-    text: "对蔡宝的现金流结论提出存疑：是否区分了应收账款变动与真实经营恶化？",
-    t: "00:32",
-  },
-  {
-    who: "蔡宝",
-    kind: "execute",
-    text: "重新拆分：应收账款增加 41%、存货增加 27%、剩余为真实经营性恶化（32%）",
-    t: "00:41",
-  },
-  {
-    who: "苏明哲",
-    kind: "discover",
-    text: "结合行业景气与近期 IPO 表现，给出破发概率推断：0.34（Top 30% 风险分位）",
-    t: "00:48",
-  },
-  {
-    who: "林清越",
-    kind: "verdict",
-    text: "终审通过 14 章节正文 · 综合风险得分 58 · 中风险 · 主要风险：对赌赎回 + 现金流",
-    t: "00:57",
-  },
-];
 
 const kindMeta: Record<string, { label: string; cls: string }> = {
   execute: { label: "执行", cls: "bg-primary/10 text-primary" },
@@ -108,6 +38,14 @@ const kindMeta: Record<string, { label: string; cls: string }> = {
 function TracePage() {
   const api = getRouteApi("/analyses/$id");
   const { analysis } = api.useLoaderData();
+  const { trace } = Route.useLoaderData() as {
+    trace: {
+      stages: { key: string; label: string; owner: string; status: string; cost?: string }[];
+      seed: { who: string; kind: string; text: string; t: string }[];
+      flow: { who: string; kind: string; text: string; t: string }[];
+      evidenceFeed: { id: string; source: string; title: string; conf: number; time: string }[];
+    } | null;
+  };
   const [traceIdx, setTraceIdx] = useState<number | null>(1);
   const [view, setView] = useState<"chat" | "dag">("chat");
   const [playing, setPlaying] = useState(false);
@@ -122,6 +60,11 @@ function TracePage() {
       cancelled = true;
     };
   }, []);
+
+  const stages = trace?.stages ?? [];
+  const seed = trace?.seed ?? [];
+  const flow = trace?.flow ?? [];
+  const evidenceFeed = trace?.evidenceFeed ?? [];
 
   return (
     <div className="grid h-[calc(100vh-3.5rem-14.5rem)] min-h-[640px] grid-cols-[260px_1fr_360px]">

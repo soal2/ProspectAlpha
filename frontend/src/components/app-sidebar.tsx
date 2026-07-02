@@ -10,6 +10,7 @@ import {
   LineChart,
   Activity,
 } from "lucide-react";
+import { useState, useEffect } from "react";
 import {
   Sidebar,
   SidebarContent,
@@ -23,6 +24,8 @@ import {
   SidebarMenuItem,
   useSidebar,
 } from "@/components/ui/sidebar";
+import { getDashboardStats } from "@/lib/data-service";
+import type { DashboardStats } from "@/mocks/dashboard";
 
 const work = [
   { title: "工作台", url: "/", icon: Home },
@@ -46,6 +49,26 @@ export function AppSidebar() {
   const collapsed = state === "collapsed";
   const pathname = useRouterState({ select: (r) => r.location.pathname });
   const isActive = (url: string) => (url === "/" ? pathname === "/" : pathname.startsWith(url));
+
+  const [stats, setStats] = useState<DashboardStats | null>(null);
+  const [sessionTime, setSessionTime] = useState("");
+
+  useEffect(() => {
+    getDashboardStats().then(setStats);
+  }, []);
+
+  useEffect(() => {
+    const tick = () => {
+      const now = new Date();
+      const hkt = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Hong_Kong" }));
+      const hours = String(hkt.getHours()).padStart(2, "0");
+      const minutes = String(hkt.getMinutes()).padStart(2, "0");
+      setSessionTime(`${hours}:${minutes} HKT`);
+    };
+    tick();
+    const interval = setInterval(tick, 60000);
+    return () => clearInterval(interval);
+  }, []);
 
   const renderItem = (item: { title: string; url: string; icon: typeof Home }) => {
     const active = isActive(item.url);
@@ -133,16 +156,18 @@ export function AppSidebar() {
             </div>
             <div className="mt-2 flex items-baseline justify-between">
               <span className="text-xs text-sidebar-foreground/60">Analyses</span>
-              <span className="tabular text-sm text-sidebar-foreground">25</span>
+              <span className="tabular text-sm text-sidebar-foreground">{stats?.totalAnalyses ?? 0}</span>
             </div>
             <div className="mt-1 flex items-baseline justify-between">
               <span className="text-xs text-sidebar-foreground/60">Evidence</span>
-              <span className="tabular text-sm text-sidebar-foreground">4,218</span>
+              <span className="tabular text-sm text-sidebar-foreground">
+                {stats?.evidenceCount.toLocaleString() ?? "0"}
+              </span>
             </div>
             <div className="mt-3 h-px bg-white/10" />
             <div className="mt-2 flex items-center justify-between text-[10px] text-sidebar-foreground/50">
               <span>SESSION</span>
-              <span className="tabular">14:24 HKT</span>
+              <span className="tabular">{sessionTime || "--:-- HKT"}</span>
             </div>
           </div>
         )}
@@ -151,13 +176,13 @@ export function AppSidebar() {
       <SidebarFooter className="border-t border-sidebar-border bg-[color:var(--navy-deep)]">
         <div className="flex items-center gap-2 px-2 py-2">
           <div className="relative grid size-8 shrink-0 place-items-center rounded-sm bg-[color:var(--gold)] text-[11px] font-semibold text-[color:var(--navy-deep)]">
-            研
+            S
             <span className="absolute -right-0.5 -top-0.5 size-2 rounded-full border border-[color:var(--navy-deep)] bg-emerald-400" />
           </div>
           {!collapsed && (
             <div className="min-w-0 flex-1">
               <div className="truncate text-[13px] font-medium leading-tight text-sidebar-foreground">
-                林研究员
+                Soal2
               </div>
               <div className="mt-0.5 flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-sidebar-foreground/50">
                 <span>Institutional</span>

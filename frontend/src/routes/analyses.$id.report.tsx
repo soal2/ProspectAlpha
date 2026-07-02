@@ -32,74 +32,39 @@ import {
   AlertTriangle,
   ChevronRight,
 } from "lucide-react";
+import { getReportData } from "@/lib/data-service";
 import { RiskBadge } from "@/components/risk-badge";
 
 export const Route = createFileRoute("/analyses/$id/report")({
+  loader: async ({ params }) => {
+    const report = await getReportData(params.id);
+    return { report };
+  },
   component: ReportPage,
   head: () => ({ meta: [{ title: "IPO 风险报告 · Verda" }] }),
 });
 
-const toc = [
-  "执行摘要 · 风险总评",
-  "公司概览与发行信息",
-  "财务健康度 · 盈利与现金流",
-  "客户与供应商集中度",
-  "核心业务 / 管线风险",
-  "法律合规与对赌赎回",
-  "关联交易 & 特殊股东权利",
-  "行业 & 市场情绪（上市前）",
-  "估值与定价博弈",
-  "募资用途与资金压力",
-  "同业对标",
-  "风险评分卡 · 规则贡献度",
-  "ML 模型预测 · SHAP 解释",
-  "投研建议 & 人工复核意见",
-];
-
-const radar = [
-  { dim: "财务", score: 64 },
-  { dim: "经营", score: 58 },
-  { dim: "法律", score: 78 },
-  { dim: "市场", score: 42 },
-  { dim: "技术", score: 36 },
-  { dim: "治理", score: 52 },
-];
-const pie = [
-  { name: "宁德时代", value: 35 },
-  { name: "比亚迪", value: 28 },
-  { name: "LG 新能源", value: 14 },
-  { name: "松下", value: 8 },
-  { name: "三星 SDI", value: 7 },
-  { name: "其他", value: 8 },
-];
-const waterfall = [
-  { name: "基线", value: 30 },
-  { name: "+ 对赌条款", value: 12 },
-  { name: "+ 客户集中度", value: 8 },
-  { name: "+ 现金流恶化", value: 6 },
-  { name: "− 现金 runway 足", value: -4 },
-  { name: "+ 监管不确定", value: 6 },
-  { name: "= 综合得分", value: 58 },
-];
-const cashflow = [
-  { y: "2021", cfo: 410, ni: 159, cap: -180 },
-  { y: "2022", cfo: 612, ni: 307, cap: -260 },
-  { y: "2023", cfo: 875, ni: 451, cap: -320 },
-  { y: "2024", cfo: 712, ni: 489, cap: -410 },
-];
-const palette = [
-  "var(--chart-1)",
-  "var(--chart-2)",
-  "var(--chart-3)",
-  "var(--chart-4)",
-  "var(--chart-5)",
-  "var(--chart-6)",
-].map((c) => `oklch(${c})`);
-
 function ReportPage() {
   const api = getRouteApi("/analyses/$id");
   const { analysis } = api.useLoaderData();
+  const { report } = Route.useLoaderData() as {
+    report: {
+      toc: string[];
+      radar: { dim: string; score: number }[];
+      pie: { name: string; value: number }[];
+      waterfall: { name: string; value: number }[];
+      cashflow: { y: string; cfo: number; ni: number; cap: number }[];
+      palette: string[];
+    } | null;
+  };
   const [active, setActive] = useState(0);
+
+  const toc = report?.toc ?? [];
+  const radar = report?.radar ?? [];
+  const pie = report?.pie ?? [];
+  const waterfall = report?.waterfall ?? [];
+  const cashflow = report?.cashflow ?? [];
+  const palette = report?.palette ?? [];
 
   return (
     <div className="grid h-[calc(100vh-3.5rem-14.5rem)] min-h-[640px] grid-cols-[260px_1fr_360px]">

@@ -26,7 +26,7 @@ export const backtests: BacktestSummary[] = [
     recall: 0.78,
     createdAt: "2026-06-24 09:12",
     status: "完成",
-    author: "林研究员",
+    author: "Soal2",
   },
   {
     id: "bt_bio_2026",

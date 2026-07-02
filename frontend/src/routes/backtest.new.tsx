@@ -1,21 +1,26 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Check, ChevronRight, ArrowLeft } from "lucide-react";
+import { getBacktestNewData } from "@/lib/data-service";
 
 export const Route = createFileRoute("/backtest/new")({
   head: () => ({ meta: [{ title: "新建回测 · Verda" }] }),
   component: NewBacktest,
 });
 
-const steps = [
-  { key: "scope", label: "样本范围", desc: "选择回测的港股 IPO 样本时间窗口、行业、规模" },
-  { key: "model", label: "模型版本", desc: "选择 RiskAgent 模型版本与特征集" },
-  { key: "thresh", label: "风险阈值", desc: "定义高 / 中 / 低风险的判定边界" },
-  { key: "metric", label: "评估口径", desc: "选择评估窗口与指标" },
-];
-
 function NewBacktest() {
+  const [steps, setSteps] = useState<{ key: string; label: string; desc: string }[]>([]);
   const [step, setStep] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    getBacktestNewData().then((d) => {
+      if (!cancelled) setSteps(d.steps);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   return (
     <div className="px-6 py-8 sm:px-10">
       <Link

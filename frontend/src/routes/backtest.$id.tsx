@@ -15,7 +15,7 @@ import {
   Area,
 } from "recharts";
 import { ArrowLeft, Download, RefreshCw, AlertTriangle, CheckCircle2 } from "lucide-react";
-import { getBacktests } from "@/lib/data-service";
+import { getBacktests, getBacktestDetailData } from "@/lib/data-service";
 import { RiskBadge } from "@/components/risk-badge";
 
 export const Route = createFileRoute("/backtest/$id")({
@@ -23,7 +23,8 @@ export const Route = createFileRoute("/backtest/$id")({
     const backtests = await getBacktests();
     const b = backtests.find((x) => x.id === params.id);
     if (!b) throw notFound();
-    return { backtest: b };
+    const detail = await getBacktestDetailData(params.id);
+    return { backtest: b, detail };
   },
   head: ({ params }) => ({ meta: [{ title: `${params.id} · 回测报告 · Verda` }] }),
   component: BacktestDetail,
@@ -32,79 +33,51 @@ export const Route = createFileRoute("/backtest/$id")({
   ),
 });
 
-const roc = Array.from({ length: 11 }).map((_, i) => ({
-  fpr: i / 10,
-  tpr: Math.min(1, Math.pow(i / 10, 0.4) + 0.05),
-}));
-const groupRet = [
-  { d: "T", high: 0, mid: 0, low: 0, hsi: 0 },
-  { d: "T+1", high: -3.2, mid: -0.8, low: 1.4, hsi: 0.4 },
-  { d: "T+5", high: -7.6, mid: -1.4, low: 3.2, hsi: 0.9 },
-  { d: "T+20", high: -12.4, mid: -2.1, low: 5.8, hsi: 1.6 },
-  { d: "T+60", high: -18.6, mid: -3.8, low: 9.2, hsi: 2.7 },
-];
-const lift = Array.from({ length: 10 }).map((_, i) => ({
-  p: `${(i + 1) * 10}%`,
-  lift: 3.4 - i * 0.27,
-  baseline: 1,
-}));
-const cm = [
-  { label: "预测高·实际破发", n: 32, hint: "True Positive", tone: "ok" },
-  { label: "预测高·未破发", n: 9, hint: "False Positive · 误报", tone: "warn" },
-  { label: "预测低·实际破发", n: 11, hint: "False Negative · 漏报", tone: "warn" },
-  { label: "预测低·未破发", n: 134, hint: "True Negative", tone: "ok" },
-];
-const fnSamples = [
-  {
-    code: "01024.HK",
-    name: "快手生物",
-    actual: -22.4,
-    score: 38,
-    reason: "管线进展超预期被低估",
-    risk: "high" as const,
-  },
-  {
-    code: "06699.HK",
-    name: "盛源物流",
-    actual: -16.8,
-    score: 42,
-    reason: "供应商集中度信息披露不全",
-    risk: "mid" as const,
-  },
-  {
-    code: "02031.HK",
-    name: "宏元食品",
-    actual: -14.1,
-    score: 31,
-    reason: "上市前舆情未纳入特征",
-    risk: "low" as const,
-  },
-];
-const fpSamples = [
-  {
-    code: "01810.HK",
-    name: "极氪科技",
-    actual: 8.2,
-    score: 68,
-    reason: "保荐人维稳与基石锁定",
-    risk: "mid" as const,
-  },
-  {
-    code: "03996.HK",
-    name: "中国能建",
-    actual: 4.6,
-    score: 72,
-    reason: "国资背景未充分加权",
-    risk: "high" as const,
-  },
-];
-
-const palette = ["var(--chart-1)", "var(--chart-2)", "var(--chart-3)", "var(--chart-4)"].map(
-  (c) => `oklch(${c})`,
-);
-
 function BacktestDetail() {
-  const { backtest: b } = Route.useLoaderData();
+  const { backtest: b, detail } = Route.useLoaderData() as {
+    backtest: {
+      id: string;
+      name: string;
+      model: string;
+      modelVersion: string;
+      samples: number;
+      auc: number;
+      ks: number;
+      lift10: number;
+      recall: number;
+      createdAt: string;
+      status: string;
+      author: string;
+    };
+    detail: {
+      roc: { fpr: number; tpr: number }[];
+      groupRet: { d: string; high: number; mid: number; low: number; hsi: number }[];
+      lift: { p: string; lift: number; baseline: number }[];
+      cm: { label: string; n: number; hint: string; tone: string }[];
+      fnSamples: {
+        code: string;
+        name: string;
+        actual: number;
+        score: number;
+        reason: string;
+        risk: string;
+      }[];
+      fpSamples: {
+        code: string;
+        name: string;
+        actual: number;
+        score: number;
+        reason: string;
+        risk: string;
+      }[];
+      palette: string[];
+      hoursSaved: number;
+      factorContributions: { f: string; v: number }[];
+      precision: number;
+      recall: number;
+      f1: number;
+    } | null;
+  };
 
   return (
     <div className="px-6 py-8 sm:px-10">
@@ -139,7 +112,7 @@ function BacktestDetail() {
         <Kpi label="KS" value={b.ks.toFixed(3)} />
         <Kpi label="Lift@10" value={`${b.lift10.toFixed(1)}×`} />
         <Kpi label="破发召回" value={`${(b.recall * 100).toFixed(0)}%`} />
-        <Kpi label="节省工时" value="96 h" />
+        <Kpi label="节省工时" value={`${detail?.hoursSaved ?? 0} h`} />
       </div>
 
       {/* Group returns + ROC */}
@@ -150,7 +123,7 @@ function BacktestDetail() {
         >
           <div className="h-72">
             <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={groupRet}>
+              <LineChart data={detail?.groupRet ?? []}>
                 <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" vertical={false} />
                 <XAxis dataKey="d" stroke="var(--muted-foreground)" fontSize={11} />
                 <YAxis stroke="var(--muted-foreground)" fontSize={11} unit="%" />
@@ -202,7 +175,7 @@ function BacktestDetail() {
         <Card title="ROC 曲线" caption={`AUC = ${b.auc.toFixed(3)}`}>
           <div className="h-72">
             <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={roc}>
+              <AreaChart data={detail?.roc ?? []}>
                 <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" />
                 <XAxis dataKey="fpr" stroke="var(--muted-foreground)" fontSize={11} />
                 <YAxis stroke="var(--muted-foreground)" fontSize={11} />
@@ -217,8 +190,8 @@ function BacktestDetail() {
                 <Area
                   type="monotone"
                   dataKey="tpr"
-                  stroke={palette[0]}
-                  fill={palette[0]}
+                  stroke={detail?.palette?.[0] ?? "var(--chart-1)"}
+                  fill={detail?.palette?.[0] ?? "var(--chart-1)"}
                   fillOpacity={0.25}
                 />
               </AreaChart>
@@ -229,9 +202,12 @@ function BacktestDetail() {
 
       {/* Confusion + Lift */}
       <div className="mt-4 grid gap-4 lg:grid-cols-[1fr_1.4fr]">
-        <Card title="混淆矩阵" caption="样本量 186 · 阈值 0.5">
+        <Card
+          title="混淆矩阵"
+          caption={`样本量 ${detail?.cm?.reduce((s, c) => s + c.n, 0) ?? 0} · 阈值 0.5`}
+        >
           <div className="grid grid-cols-2 gap-2 text-xs">
-            {cm.map((c) => (
+            {(detail?.cm ?? []).map((c) => (
               <div
                 key={c.label}
                 className={`rounded-xl p-4 ${c.tone === "ok" ? "bg-primary/10" : "bg-[color:var(--risk-mid)]/15"}`}
@@ -243,16 +219,16 @@ function BacktestDetail() {
             ))}
           </div>
           <div className="mt-4 grid grid-cols-3 gap-2 text-center text-xs">
-            <Mini label="精确率" value="78.0%" />
-            <Mini label="召回率" value="74.4%" />
-            <Mini label="F1" value="0.762" />
+            <Mini label="精确率" value={`${((detail?.precision ?? 0) * 100).toFixed(1)}%`} />
+            <Mini label="召回率" value={`${((detail?.recall ?? 0) * 100).toFixed(1)}%`} />
+            <Mini label="F1" value={`${(detail?.f1 ?? 0).toFixed(3)}`} />
           </div>
         </Card>
 
         <Card title="Lift / Gain" caption="按预测分数分位 · baseline = 1.0">
           <div className="h-64">
             <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={lift}>
+              <BarChart data={detail?.lift ?? []}>
                 <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" vertical={false} />
                 <XAxis dataKey="p" stroke="var(--muted-foreground)" fontSize={11} />
                 <YAxis stroke="var(--muted-foreground)" fontSize={11} />
@@ -265,8 +241,12 @@ function BacktestDetail() {
                   }}
                 />
                 <Bar dataKey="lift" radius={[4, 4, 0, 0]}>
-                  {lift.map((_, i) => (
-                    <Cell key={i} fill={palette[0]} fillOpacity={1 - i * 0.07} />
+                  {(detail?.lift ?? []).map((_, i) => (
+                    <Cell
+                      key={i}
+                      fill={detail?.palette?.[0] ?? "var(--chart-1)"}
+                      fillOpacity={1 - i * 0.07}
+                    />
                   ))}
                 </Bar>
               </BarChart>
@@ -277,25 +257,21 @@ function BacktestDetail() {
 
       {/* Factor contribution */}
       <Card className="mt-4" title="风险因子贡献排行" caption="对模型 AUC 的边际贡献">
-        <div className="space-y-2">
-          {[
-            { f: "对赌赎回触发条款", v: 0.082 },
-            { f: "经营性现金流走势", v: 0.071 },
-            { f: "客户集中度 Top5", v: 0.064 },
-            { f: "关联交易比例", v: 0.052 },
-            { f: "上市前板块景气", v: 0.041 },
-            { f: "估值溢价 vs 同业", v: 0.037 },
-            { f: "现金 runway 年", v: 0.028 },
-          ].map((s) => (
-            <div key={s.f} className="flex items-center gap-3 text-xs">
-              <span className="w-44 shrink-0 text-muted-foreground">{s.f}</span>
-              <div className="h-3 flex-1 overflow-hidden rounded-full bg-muted">
-                <div className="h-full bg-primary" style={{ width: `${s.v * 100 * 8}%` }} />
+        {(detail?.factorContributions?.length ?? 0) > 0 ? (
+          <div className="space-y-2">
+            {detail!.factorContributions.map((s) => (
+              <div key={s.f} className="flex items-center gap-3 text-xs">
+                <span className="w-44 shrink-0 text-muted-foreground">{s.f}</span>
+                <div className="h-3 flex-1 overflow-hidden rounded-full bg-muted">
+                  <div className="h-full bg-primary" style={{ width: `${s.v * 100 * 8}%` }} />
+                </div>
+                <span className="w-14 text-right tabular">+{s.v.toFixed(3)}</span>
               </div>
-              <span className="w-14 text-right tabular">+{s.v.toFixed(3)}</span>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        ) : (
+          <div className="py-8 text-center text-xs text-muted-foreground">暂无风险因子数据</div>
+        )}
       </Card>
 
       {/* Misclassification */}
@@ -305,14 +281,36 @@ function BacktestDetail() {
           icon={<AlertTriangle className="size-4 text-[color:var(--risk-high)]" />}
           caption="实际破发但被模型预判为低风险，需复盘特征覆盖"
         >
-          <Errors rows={fnSamples} />
+          <Errors
+            rows={
+              detail?.fnSamples as {
+                code: string;
+                name: string;
+                actual: number;
+                score: number;
+                reason: string;
+                risk: "high" | "mid" | "low";
+              }[]
+            }
+          />
         </Card>
         <Card
           title="误报样本 · False Positive"
           icon={<CheckCircle2 className="size-4 text-[color:var(--risk-mid)]" />}
           caption="模型给出高风险但实际未破发，多源于护盘 / 基石锁定"
         >
-          <Errors rows={fpSamples} />
+          <Errors
+            rows={
+              detail?.fpSamples as {
+                code: string;
+                name: string;
+                actual: number;
+                score: number;
+                reason: string;
+                risk: "high" | "mid" | "low";
+              }[]
+            }
+          />
         </Card>
       </div>
 

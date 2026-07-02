@@ -51,10 +51,32 @@ function BacktestIndex() {
       </div>
 
       <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <Kpi label="累计回测任务" value="42" />
-        <Kpi label="覆盖样本" value="486" caption="港股 IPO · 2022 – 2026 H1" />
-        <Kpi label="平均 AUC" value="0.794" />
-        <Kpi label="高风险召回率" value="76%" caption="对破发样本的捕获率" />
+        {backtests.length > 0 && (
+          <>
+            <Kpi label="累计回测任务" value={String(backtests.length)} />
+            <Kpi
+              label="覆盖样本"
+              value={String(backtests.reduce((s, b) => s + b.samples, 0))}
+              caption="港股 IPO · 2022 – 2026 H1"
+            />
+            <Kpi
+              label="平均 AUC"
+              value={
+                backtests.filter((b) => b.auc > 0).length > 0
+                  ? (
+                      backtests.filter((b) => b.auc > 0).reduce((s, b) => s + b.auc, 0) /
+                      backtests.filter((b) => b.auc > 0).length
+                    ).toFixed(3)
+                  : "0.000"
+              }
+            />
+            <Kpi
+              label="高风险召回率"
+              value={`${backtests.filter((b) => b.recall > 0).length > 0 ? ((backtests.filter((b) => b.recall > 0).reduce((s, b) => s + b.recall, 0) / backtests.filter((b) => b.recall > 0).length) * 100).toFixed(0) : 0}%`}
+              caption="对破发样本的捕获率"
+            />
+          </>
+        )}
       </div>
 
       <div className="mt-8 overflow-hidden rounded-2xl border border-border bg-card">

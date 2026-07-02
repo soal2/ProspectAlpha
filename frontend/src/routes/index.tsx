@@ -12,9 +12,16 @@ import {
   Building2,
 } from "lucide-react";
 import { useState, useEffect } from "react";
-import { getAnalyses, getAgents } from "@/lib/data-service";
+import { getAnalyses, getAgents, getHomepageExamples } from "@/lib/data-service";
 import { type AnalysisSummary, type Agent } from "@/mocks";
 import { motion } from "framer-motion";
+
+const iconMap: Record<string, typeof Building2> = {
+  Building2,
+  ShieldAlert,
+  FileText,
+  LineChart,
+};
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -56,14 +63,18 @@ const examples = [
 function WorkspacePage() {
   const [analyses, setAnalyses] = useState<AnalysisSummary[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
+  const [examplesList, setExamplesList] = useState<{ icon: string; title: string; desc: string }[]>(
+    [],
+  );
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([getAnalyses(), getAgents()]).then(([a, ag]) => {
+    Promise.all([getAnalyses(), getAgents(), getHomepageExamples()]).then(([a, ag, ex]) => {
       if (!cancelled) {
         setAnalyses(a);
         setAgents(ag);
+        setExamplesList(ex);
         setLoading(false);
       }
     });
@@ -92,7 +103,7 @@ function WorkspacePage() {
             Live · Decision Replay v2
           </span>
           <span className="hidden text-[11px] uppercase tracking-[0.2em] text-muted-foreground sm:inline">
-            Session · 林研究员 · HKT 14:24
+            Session · Soal2 · HKT 14:24
           </span>
         </div>
 
@@ -179,7 +190,7 @@ function WorkspacePage() {
             <span className="text-[11px] tabular text-muted-foreground">04 templates</span>
           </div>
           <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            {examples.map((e, i) => (
+            {examplesList.map((e, i) => (
               <Link
                 key={e.title}
                 to="/intake"
@@ -188,7 +199,10 @@ function WorkspacePage() {
                 <span className="absolute inset-y-0 left-0 w-[2px] scale-y-0 bg-[color:var(--gold)] transition-transform duration-300 group-hover:scale-y-100" />
                 <div className="flex items-start justify-between">
                   <div className="grid size-9 place-items-center rounded-sm bg-[color:var(--navy)] ring-1 ring-[color:var(--gold)]/30">
-                    <e.icon className="size-4 text-[color:var(--gold)]" />
+                    {(() => {
+                      const Icon = iconMap[e.icon];
+                      return <Icon className="size-4 text-[color:var(--gold)]" />;
+                    })()}
                   </div>
                   <span className="tabular text-[10px] uppercase tracking-wider text-muted-foreground">
                     0{i + 1}
