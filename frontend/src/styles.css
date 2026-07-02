@@ -119,7 +119,7 @@
   --sidebar-foreground: #e6ecf3;
   --sidebar-primary: #c9a35b;
   --sidebar-primary-foreground: #061a2f;
-  --sidebar-accent: rgba(201, 163, 91, 0.10);
+  --sidebar-accent: rgba(201, 163, 91, 0.1);
   --sidebar-accent-foreground: #f1d89a;
   --sidebar-border: rgba(255, 255, 255, 0.06);
   --sidebar-ring: #c9a35b;
@@ -166,7 +166,9 @@
     font-feature-settings: "cv02", "cv03", "cv04", "cv11", "ss01";
     -webkit-font-smoothing: antialiased;
   }
-  h1, h2, h3 {
+  h1,
+  h2,
+  h3 {
     font-family: var(--font-serif);
     letter-spacing: -0.015em;
   }

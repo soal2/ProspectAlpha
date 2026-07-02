@@ -23,7 +23,10 @@ function NotFoundComponent() {
         <h2 className="mt-4 text-xl font-semibold">页面未找到</h2>
         <p className="mt-2 text-sm text-muted-foreground">您访问的页面不存在或已被移动。</p>
         <div className="mt-6">
-          <Link to="/" className="inline-flex items-center justify-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90">
+          <Link
+            to="/"
+            className="inline-flex items-center justify-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+          >
             返回工作台
           </Link>
         </div>
@@ -46,10 +49,20 @@ function ErrorComponent({ error, reset }: { error: Error; reset: () => void }) {
         <p className="mt-2 text-sm text-muted-foreground">服务端遇到问题，你可以重试或返回首页。</p>
         <div className="mt-6 flex flex-wrap justify-center gap-2">
           <button
-            onClick={() => { router.invalidate(); reset(); }}
+            onClick={() => {
+              router.invalidate();
+              reset();
+            }}
             className="inline-flex items-center justify-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
-          >重试</button>
-          <a href="/" className="inline-flex items-center justify-center rounded-md border border-input bg-background px-4 py-2 text-sm font-medium hover:bg-accent">返回首页</a>
+          >
+            重试
+          </button>
+          <a
+            href="/"
+            className="inline-flex items-center justify-center rounded-md border border-input bg-background px-4 py-2 text-sm font-medium hover:bg-accent"
+          >
+            返回首页
+          </a>
         </div>
       </div>
     </div>
@@ -62,7 +75,11 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
       { title: "ProspectAlpha · IPO Risk Intelligence" },
-      { name: "description", content: "ProspectAlpha — 面向港股 IPO 的机构级招股书解析、风险归因与上市后预警系统：证据先行、链路可追溯、回测可验证。" },
+      {
+        name: "description",
+        content:
+          "ProspectAlpha — 面向港股 IPO 的机构级招股书解析、风险归因与上市后预警系统：证据先行、链路可追溯、回测可验证。",
+      },
       { name: "author", content: "ProspectAlpha" },
       { property: "og:title", content: "ProspectAlpha · IPO Risk Intelligence" },
       { property: "og:description", content: "机构级港股 IPO 风险智能终端" },

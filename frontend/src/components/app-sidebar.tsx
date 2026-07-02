@@ -61,7 +61,9 @@ export function AppSidebar() {
             {active && (
               <span className="pointer-events-none absolute left-0 top-1 bottom-1 w-[3px] rounded-r-sm bg-[color:var(--gold)]" />
             )}
-            <item.icon className={`size-4 shrink-0 ${active ? "text-[color:var(--gold)]" : "text-sidebar-foreground/55"}`} />
+            <item.icon
+              className={`size-4 shrink-0 ${active ? "text-[color:var(--gold)]" : "text-sidebar-foreground/55"}`}
+            />
             <span className="truncate">{item.title}</span>
           </Link>
         </SidebarMenuButton>
@@ -70,10 +72,7 @@ export function AppSidebar() {
   };
 
   return (
-    <Sidebar
-      collapsible="icon"
-      className="[--sidebar-width:15.5rem]"
-    >
+    <Sidebar collapsible="icon" className="[--sidebar-width:15.5rem]">
       <SidebarHeader className="border-b border-sidebar-border bg-[color:var(--navy-deep)]">
         <Link to="/" className="flex items-center gap-3 px-2 py-3">
           <div className="relative grid size-9 shrink-0 place-items-center rounded-sm bg-[color:var(--navy)] ring-1 ring-[color:var(--gold)]/40">
@@ -85,7 +84,9 @@ export function AppSidebar() {
           </div>
           {!collapsed && (
             <div className="flex min-w-0 flex-col leading-tight">
-              <span className="brand-mark truncate text-[17px] text-sidebar-foreground">ProspectAlpha</span>
+              <span className="brand-mark truncate text-[17px] text-sidebar-foreground">
+                ProspectAlpha
+              </span>
               <span className="mt-0.5 truncate text-[9.5px] font-medium uppercase tracking-[0.22em] text-[color:var(--gold)]/75">
                 IPO Risk Intelligence
               </span>
@@ -155,7 +156,9 @@ export function AppSidebar() {
           </div>
           {!collapsed && (
             <div className="min-w-0 flex-1">
-              <div className="truncate text-[13px] font-medium leading-tight text-sidebar-foreground">林研究员</div>
+              <div className="truncate text-[13px] font-medium leading-tight text-sidebar-foreground">
+                林研究员
+              </div>
               <div className="mt-0.5 flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-sidebar-foreground/50">
                 <span>Institutional</span>
                 <span className="text-[color:var(--gold)]/70">·</span>

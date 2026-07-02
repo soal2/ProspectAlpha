@@ -1,38 +1,80 @@
+# OS / filesystem
 .DS_Store
+**/.DS_Store
 Thumbs.db
+Desktop.ini
 
 # Local environment
 .env
 .env.*
 !.env.example
 *.local
+*.secret
+*.secrets
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
 
 # Python
 __pycache__/
+**/__pycache__/
 *.py[cod]
 *.pyo
 .python-version
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+.pyre/
+.nox/
+.tox/
 .coverage
+.coverage.*
+coverage.xml
 htmlcov/
 .venv/
 venv/
 env/
+.ipynb_checkpoints/
 dist/
 build/
 *.egg-info/
 
 # Node / frontend
 node_modules/
+**/node_modules/
 .vite/
 .tanstack/
+coverage/
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+bun-debug.log*
 frontend/dist/
 frontend/.output/
+frontend/.tanstack/
+frontend/.vite/
+frontend/coverage/
 frontend/node_modules/
 
 # Data and generated artifacts
+*.sqlite
+*.sqlite3
+*.db
+*.duckdb
+*.parquet
+*.feather
+*.pkl
+*.pickle
+*.joblib
+*.onnx
+*.pt
+*.pth
+*.ckpt
+*.safetensors
 backend/data/raw/*
 !backend/data/raw/.gitkeep
 !backend/data/raw/prospectus/
@@ -46,8 +88,23 @@ backend/data/raw/market_prices/*
 !backend/data/raw/market_prices/.gitkeep
 backend/data/processed/*
 !backend/data/processed/.gitkeep
+backend/data/gold_labels/*
+!backend/data/gold_labels/.gitkeep
 backend/reports/generated/**
+
+# Logs and runtime files
+logs/
+*.log
+*.pid
+*.seed
+
+# Local tool caches
+.cache/
+.codegraph/
+.pytest_cache/
 
 # IDE
 .idea/
 .vscode/
+*.swp
+*.swo

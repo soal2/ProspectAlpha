@@ -25,7 +25,9 @@ export function AppHeader() {
       <SidebarTrigger className="-ml-1 text-muted-foreground hover:text-foreground" />
       <div className="mx-1 hidden h-5 w-px bg-border md:block" />
       <nav className="flex min-w-0 items-center gap-1.5 text-[13px]">
-        <Link to="/" className="text-muted-foreground hover:text-foreground">首页</Link>
+        <Link to="/" className="text-muted-foreground hover:text-foreground">
+          首页
+        </Link>
         {segs.map((seg, i) => {
           const path = "/" + segs.slice(0, i + 1).join("/");
           const isLast = i === segs.length - 1;
@@ -36,7 +38,9 @@ export function AppHeader() {
               {isLast ? (
                 <span className="truncate font-medium text-foreground">{label}</span>
               ) : (
-                <a href={path} className="truncate text-muted-foreground hover:text-foreground">{label}</a>
+                <a href={path} className="truncate text-muted-foreground hover:text-foreground">
+                  {label}
+                </a>
               )}
             </span>
           );
@@ -47,7 +51,9 @@ export function AppHeader() {
         <div className="hidden items-center gap-2 rounded-md border border-border bg-white px-3 py-1.5 text-xs text-muted-foreground md:flex">
           <Search className="size-3.5" />
           <span>搜索公司 / 证据 / 风险条款</span>
-          <kbd className="ml-3 rounded border border-border bg-muted px-1.5 py-0.5 text-[10px] tabular text-muted-foreground">⌘K</kbd>
+          <kbd className="ml-3 rounded border border-border bg-muted px-1.5 py-0.5 text-[10px] tabular text-muted-foreground">
+            ⌘K
+          </kbd>
         </div>
         <span className="hidden items-center gap-1.5 rounded-sm border border-[color:var(--gold)]/50 bg-[color:var(--gold)]/8 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-[color:var(--gold)] md:inline-flex">
           <span className="size-1 rounded-full bg-[color:var(--gold)]" />

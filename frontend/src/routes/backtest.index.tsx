@@ -1,26 +1,51 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { Plus, Play, CheckCircle2, Loader2 } from "lucide-react";
-import { backtests } from "@/mocks/data";
+import { useState, useEffect } from "react";
+import { getBacktests } from "@/lib/data-service";
+import { type BacktestSummary } from "@/mocks";
 
 export const Route = createFileRoute("/backtest/")({
   head: () => ({
     meta: [
       { title: "回测中心 · Verda IPO RiskAgent" },
-      { name: "description", content: "对历史 IPO 案例进行风险预警回测 · AUC / KS / Lift / TopK 全指标评估" },
+      {
+        name: "description",
+        content: "对历史 IPO 案例进行风险预警回测 · AUC / KS / Lift / TopK 全指标评估",
+      },
     ],
   }),
   component: BacktestIndex,
 });
 
 function BacktestIndex() {
+  const [backtests, setBacktests] = useState<BacktestSummary[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    getBacktests().then((data) => {
+      if (!cancelled) {
+        setBacktests(data);
+        setLoading(false);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   return (
     <div className="px-6 py-8 sm:px-10">
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <h1 className="font-serif text-3xl font-semibold">回测中心</h1>
-          <p className="mt-1 text-sm text-muted-foreground">对历史港股 IPO 案例进行风险预警回测 · 评估模型稳定性、预测准确率与业务价值</p>
+          <p className="mt-1 text-sm text-muted-foreground">
+            对历史港股 IPO 案例进行风险预警回测 · 评估模型稳定性、预测准确率与业务价值
+          </p>
         </div>
-        <Link to="/backtest/new" className="inline-flex items-center gap-1.5 rounded-full bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow-sm hover:bg-primary/90">
+        <Link
+          to="/backtest/new"
+          className="inline-flex items-center gap-1.5 rounded-full bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow-sm hover:bg-primary/90"
+        >
           <Plus className="size-4" /> 发起新回测
         </Link>
       </div>
@@ -52,25 +77,43 @@ function BacktestIndex() {
               <tr key={b.id} className="hover:bg-muted/30">
                 <td className="px-4 py-3">
                   <div className="font-medium">{b.name}</div>
-                  <div className="text-[11px] text-muted-foreground">{b.createdAt} · {b.author}</div>
+                  <div className="text-[11px] text-muted-foreground">
+                    {b.createdAt} · {b.author}
+                  </div>
                 </td>
                 <td className="px-4 py-3 text-xs text-muted-foreground">
                   <div>{b.model}</div>
                   <div className="text-[11px] tabular">{b.modelVersion}</div>
                 </td>
                 <td className="px-4 py-3 text-right tabular">{b.samples}</td>
-                <td className="px-4 py-3 text-right tabular font-medium">{b.auc ? b.auc.toFixed(3) : "—"}</td>
+                <td className="px-4 py-3 text-right tabular font-medium">
+                  {b.auc ? b.auc.toFixed(3) : "—"}
+                </td>
                 <td className="px-4 py-3 text-right tabular">{b.ks ? b.ks.toFixed(3) : "—"}</td>
-                <td className="px-4 py-3 text-right tabular">{b.lift10 ? `${b.lift10.toFixed(1)}×` : "—"}</td>
-                <td className="px-4 py-3 text-right tabular">{b.recall ? `${(b.recall * 100).toFixed(0)}%` : "—"}</td>
+                <td className="px-4 py-3 text-right tabular">
+                  {b.lift10 ? `${b.lift10.toFixed(1)}×` : "—"}
+                </td>
+                <td className="px-4 py-3 text-right tabular">
+                  {b.recall ? `${(b.recall * 100).toFixed(0)}%` : "—"}
+                </td>
                 <td className="px-4 py-3">
-                  <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] ${b.status === "完成" ? "bg-primary/10 text-primary" : b.status === "运行中" ? "bg-[color:var(--risk-mid)]/15 text-[oklch(0.45_0.12_75)]" : "bg-destructive/10 text-destructive"}`}>
-                    {b.status === "运行中" ? <Loader2 className="size-3 animate-spin" /> : <CheckCircle2 className="size-3" />}
+                  <span
+                    className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] ${b.status === "完成" ? "bg-primary/10 text-primary" : b.status === "运行中" ? "bg-[color:var(--risk-mid)]/15 text-[oklch(0.45_0.12_75)]" : "bg-destructive/10 text-destructive"}`}
+                  >
+                    {b.status === "运行中" ? (
+                      <Loader2 className="size-3 animate-spin" />
+                    ) : (
+                      <CheckCircle2 className="size-3" />
+                    )}
                     {b.status}
                   </span>
                 </td>
                 <td className="px-4 py-3 text-right">
-                  <Link to="/backtest/$id" params={{ id: b.id }} className="inline-flex items-center gap-1 text-xs text-primary hover:underline">
+                  <Link
+                    to="/backtest/$id"
+                    params={{ id: b.id }}
+                    className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+                  >
                     <Play className="size-3" /> 查看
                   </Link>
                 </td>

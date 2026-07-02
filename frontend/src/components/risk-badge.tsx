@@ -7,16 +7,36 @@ const styles: Record<string, string> = {
 };
 const labels: Record<string, string> = { high: "高风险", mid: "中风险", low: "低风险" };
 
-export function RiskBadge({ level, className, withDot = true }: { level: "high" | "mid" | "low"; className?: string; withDot?: boolean }) {
+export function RiskBadge({
+  level,
+  className,
+  withDot = true,
+}: {
+  level: "high" | "mid" | "low";
+  className?: string;
+  withDot?: boolean;
+}) {
   return (
-    <span className={cn("inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset", styles[level], className)}>
+    <span
+      className={cn(
+        "inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset",
+        styles[level],
+        className,
+      )}
+    >
       {withDot && <span className="size-1.5 rounded-full bg-current" />}
       {labels[level]}
     </span>
   );
 }
 
-export function RiskDot({ level, className }: { level: "high" | "mid" | "low"; className?: string }) {
+export function RiskDot({
+  level,
+  className,
+}: {
+  level: "high" | "mid" | "low";
+  className?: string;
+}) {
   const colors: Record<string, string> = {
     high: "bg-[color:var(--risk-high)]",
     mid: "bg-[color:var(--risk-mid)]",

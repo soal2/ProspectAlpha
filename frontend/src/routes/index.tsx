@@ -1,26 +1,77 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { ArrowRight, Paperclip, Play, Zap, GraduationCap, Cpu, FileText, ShieldAlert, LineChart, Building2 } from "lucide-react";
-import { agents, analyses } from "@/mocks/data";
+import {
+  ArrowRight,
+  Paperclip,
+  Play,
+  Zap,
+  GraduationCap,
+  Cpu,
+  FileText,
+  ShieldAlert,
+  LineChart,
+  Building2,
+} from "lucide-react";
+import { useState, useEffect } from "react";
+import { getAnalyses, getAgents } from "@/lib/data-service";
+import { type AnalysisSummary, type Agent } from "@/mocks";
 import { motion } from "framer-motion";
 
 export const Route = createFileRoute("/")({
   head: () => ({
     meta: [
       { title: "工作台 · ProspectAlpha" },
-      { name: "description", content: "ProspectAlpha — 机构级港股 IPO 风险智能终端：招股书解析、风险归因、链路回溯与上市后预警。" },
+      {
+        name: "description",
+        content:
+          "ProspectAlpha — 机构级港股 IPO 风险智能终端：招股书解析、风险归因、链路回溯与上市后预警。",
+      },
     ],
   }),
   component: WorkspacePage,
 });
 
 const examples = [
-  { icon: Building2, title: "新能源车 IPO 交叉审视", desc: "对比理想 / 极氪 / 蔚来招股书的定价博弈、现金 runway 与股东权利结构。" },
-  { icon: ShieldAlert, title: "对赌与赎回条款扫描", desc: "全量识别特殊权利、回购义务、赎回触发条款与实控人变更风险。" },
-  { icon: FileText, title: "财务健康度深度诊断", desc: "解析三大报表，量化经营现金流、造血能力与资产减值敞口。" },
-  { icon: LineChart, title: "破发概率预警建模", desc: "结合上市前情绪、同业发行表现与市场流动性估算破发概率区间。" },
+  {
+    icon: Building2,
+    title: "新能源车 IPO 交叉审视",
+    desc: "对比理想 / 极氪 / 蔚来招股书的定价博弈、现金 runway 与股东权利结构。",
+  },
+  {
+    icon: ShieldAlert,
+    title: "对赌与赎回条款扫描",
+    desc: "全量识别特殊权利、回购义务、赎回触发条款与实控人变更风险。",
+  },
+  {
+    icon: FileText,
+    title: "财务健康度深度诊断",
+    desc: "解析三大报表，量化经营现金流、造血能力与资产减值敞口。",
+  },
+  {
+    icon: LineChart,
+    title: "破发概率预警建模",
+    desc: "结合上市前情绪、同业发行表现与市场流动性估算破发概率区间。",
+  },
 ];
 
 function WorkspacePage() {
+  const [analyses, setAnalyses] = useState<AnalysisSummary[]>([]);
+  const [agents, setAgents] = useState<Agent[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([getAnalyses(), getAgents()]).then(([a, ag]) => {
+      if (!cancelled) {
+        setAnalyses(a);
+        setAgents(ag);
+        setLoading(false);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const featured = analyses.slice(0, 12);
   return (
     <div className="relative isolate">
@@ -45,9 +96,15 @@ function WorkspacePage() {
           </span>
         </div>
 
-        <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5 }} className="mt-10 text-center">
+        <motion.div
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.5 }}
+          className="mt-10 text-center"
+        >
           <h1 className="mx-auto max-w-4xl font-serif text-[40px] font-semibold leading-[1.1] tracking-tight text-[color:var(--navy)] sm:text-[52px]">
-            Institutional IPO<br className="hidden sm:block" /> Risk Intelligence
+            Institutional IPO
+            <br className="hidden sm:block" /> Risk Intelligence
           </h1>
           <div className="mx-auto mt-6 h-px w-16 bg-[color:var(--gold)]" />
           <p className="mx-auto mt-6 max-w-2xl text-[13px] leading-relaxed text-muted-foreground sm:text-sm">
@@ -56,14 +113,21 @@ function WorkspacePage() {
         </motion.div>
 
         {/* terminal composer */}
-        <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1, duration: 0.5 }} className="mx-auto mt-10 max-w-3xl">
+        <motion.div
+          initial={{ opacity: 0, y: 16 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.1, duration: 0.5 }}
+          className="mx-auto mt-10 max-w-3xl"
+        >
           <div className="soft-ring overflow-hidden rounded-md border border-border bg-white">
             <div className="flex items-center justify-between border-b border-border/80 bg-[color:var(--muted)]/60 px-4 py-2">
               <div className="flex items-center gap-2">
                 <span className="size-1.5 rounded-full bg-[color:var(--gold)]" />
                 <span className="eyebrow text-[color:var(--navy)]/70">Analysis Terminal</span>
               </div>
-              <span className="tabular text-[10px] uppercase tracking-wider text-muted-foreground">SESSION #A-24710</span>
+              <span className="tabular text-[10px] uppercase tracking-wider text-muted-foreground">
+                SESSION #A-24710
+              </span>
             </div>
             <textarea
               placeholder="输入港股代码（如 03750.HK）、公司名或粘贴招股书 URL — 例：解析宁德时代招股书之现金流与对赌条款"
@@ -108,7 +172,9 @@ function WorkspacePage() {
           <div className="flex items-end justify-between">
             <div>
               <div className="eyebrow text-muted-foreground">Institutional Scenarios</div>
-              <h2 className="mt-1 font-serif text-xl font-semibold text-[color:var(--navy)]">典型分析场景</h2>
+              <h2 className="mt-1 font-serif text-xl font-semibold text-[color:var(--navy)]">
+                典型分析场景
+              </h2>
             </div>
             <span className="text-[11px] tabular text-muted-foreground">04 templates</span>
           </div>
@@ -128,7 +194,9 @@ function WorkspacePage() {
                     0{i + 1}
                   </span>
                 </div>
-                <div className="mt-4 text-[14px] font-semibold text-[color:var(--navy)]">{e.title}</div>
+                <div className="mt-4 text-[14px] font-semibold text-[color:var(--navy)]">
+                  {e.title}
+                </div>
                 <div className="mt-1.5 line-clamp-3 text-[12px] leading-relaxed text-muted-foreground">
                   {e.desc}
                 </div>
@@ -155,7 +223,10 @@ function WorkspacePage() {
                 {a.avatar}
               </div>
             ))}
-            <Link to="/experts" className="ml-3 inline-flex items-center rounded-sm border border-[color:var(--gold)]/50 bg-white px-3 text-[11px] font-medium text-[color:var(--navy)] hover:bg-[color:var(--gold)]/10">
+            <Link
+              to="/experts"
+              className="ml-3 inline-flex items-center rounded-sm border border-[color:var(--gold)]/50 bg-white px-3 text-[11px] font-medium text-[color:var(--navy)] hover:bg-[color:var(--gold)]/10"
+            >
               查看全部 →
             </Link>
           </div>
@@ -166,9 +237,14 @@ function WorkspacePage() {
           <div className="flex items-end justify-between">
             <div>
               <div className="eyebrow text-muted-foreground">Recent Analyses</div>
-              <h2 className="mt-1 font-serif text-xl font-semibold text-[color:var(--navy)]">近期分析</h2>
+              <h2 className="mt-1 font-serif text-xl font-semibold text-[color:var(--navy)]">
+                近期分析
+              </h2>
             </div>
-            <Link to="/analyses" className="text-[12px] font-medium text-[color:var(--navy)] hover:text-[color:var(--gold)]">
+            <Link
+              to="/analyses"
+              className="text-[12px] font-medium text-[color:var(--navy)] hover:text-[color:var(--gold)]"
+            >
               查看全部 →
             </Link>
           </div>
@@ -200,7 +276,8 @@ function WorkspacePage() {
                     {a.name} <span className="text-muted-foreground">· IPO 风险报告</span>
                   </div>
                   <div className="mt-1 text-[11.5px] text-muted-foreground">
-                    {a.industry} · {a.experts} 位专家 · {a.mode === "expert" ? "专家级" : a.mode === "deep" ? "深度" : "快速"}
+                    {a.industry} · {a.experts} 位专家 ·{" "}
+                    {a.mode === "expert" ? "专家级" : a.mode === "deep" ? "深度" : "快速"}
                   </div>
                   <div className="mt-4 flex items-center justify-between border-t border-border/80 pt-3 text-[11px]">
                     <div className="flex gap-4 tabular text-muted-foreground">
@@ -225,7 +302,15 @@ function WorkspacePage() {
   );
 }
 
-function ModeChip({ icon: Icon, label, active }: { icon: typeof Zap; label: string; active?: boolean }) {
+function ModeChip({
+  icon: Icon,
+  label,
+  active,
+}: {
+  icon: typeof Zap;
+  label: string;
+  active?: boolean;
+}) {
   return (
     <button
       className={`inline-flex items-center gap-1.5 border-r border-border px-3 py-1.5 text-[12px] font-medium transition last:border-r-0 ${
