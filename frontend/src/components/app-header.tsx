@@ -4,7 +4,7 @@ import { ChevronRight, Search, Bell, HelpCircle } from "lucide-react";
 
 const labels: Record<string, string> = {
   "": "工作台",
-  intake: "招股书接入",
+  intake: "新建分析",
   analyses: "我的分析",
   evidence: "证据知识库",
   experts: "Agent 专家公会",

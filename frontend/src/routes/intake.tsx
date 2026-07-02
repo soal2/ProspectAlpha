@@ -1,20 +1,43 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { UploadCloud, Check, FileText, Loader2, ArrowRight } from "lucide-react";
+import {
+  UploadCloud,
+  Check,
+  FileText,
+  Loader2,
+  ArrowRight,
+  Search,
+  Database,
+  Settings2,
+  Users,
+} from "lucide-react";
 import { useState, useEffect } from "react";
 import { getIntakeData } from "@/lib/data-service";
 
 export const Route = createFileRoute("/intake")({
   head: () => ({
     meta: [
-      { title: "招股书接入 · ProspectAlpha IPO RiskAgent" },
+      { title: "新建 IPO 风险分析 · ProspectAlpha IPO RiskAgent" },
       {
         name: "description",
-        content: "上传招股书 PDF、绑定港股基本信息、完成元数据对齐，启动 Agent 协同分析。",
+        content: "选择标的、准备材料、配置风险规则与专家组，启动 Agent 协同分析。",
       },
     ],
   }),
   component: IntakePage,
 });
+
+const workflowSteps = [
+  { label: "标的选择", desc: "公司名称 / 申请编号 / URL", icon: Search },
+  { label: "材料准备", desc: "招股书 PDF 与基础信息", icon: FileText },
+  { label: "分析配置", desc: "规则版本 / 专家组 / 知识库", icon: Settings2 },
+  { label: "启动分析", desc: "解析后派发 Agent 协同", icon: ArrowRight },
+];
+
+const analysisConfigs = [
+  { label: "风险规则版本", value: "HK-IPO Taxonomy v2.4", icon: Settings2 },
+  { label: "Agent 专家组", value: "专家级 · 9 位核心专家", icon: Users },
+  { label: "知识库增强", value: "开启 · 招股书证据 + 历史案例", icon: Database },
+];
 
 function IntakePage() {
   const [analysisId] = useState(() => {
@@ -50,68 +73,145 @@ function IntakePage() {
   return (
     <div className="px-6 py-8 sm:px-10">
       <div>
-        <h1 className="font-serif text-3xl font-semibold">招股书接入</h1>
+        <h1 className="font-serif text-3xl font-semibold">新建 IPO 风险分析</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          三步把招股书与公司基本信息接入系统 · 自动校验元数据 · 一键启动 Agent 分析
+          选择标的、准备材料、校验元数据、配置分析方案，然后启动 Agent 协同
         </p>
       </div>
 
-      <div className="mt-8 grid gap-6 lg:grid-cols-[1.1fr_1fr]">
-        {/* Upload card */}
-        <div className="rounded-2xl border border-dashed border-primary/30 bg-gradient-to-br from-[color:var(--sage-soft)]/40 to-[color:var(--paper)] p-8">
-          <div className="grid size-12 place-items-center rounded-xl bg-primary/10 text-primary">
-            <UploadCloud className="size-6" />
+      <div className="mt-6 grid gap-3 md:grid-cols-4">
+        {workflowSteps.map((step, index) => (
+          <div key={step.label} className="rounded-xl border border-border bg-card p-4">
+            <div className="flex items-center justify-between">
+              <span className="tabular text-[11px] text-muted-foreground">
+                {String(index + 1).padStart(2, "0")}
+              </span>
+              <step.icon className="size-4 text-primary" />
+            </div>
+            <div className="mt-3 text-sm font-medium">{step.label}</div>
+            <div className="mt-1 text-xs text-muted-foreground">{step.desc}</div>
           </div>
-          <h2 className="mt-4 font-serif text-xl font-semibold">上传招股书 PDF</h2>
-          <p className="mt-1 text-sm text-muted-foreground">支持中英文版本 · 最大 200 MB</p>
-          <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:items-center">
-            <button className="inline-flex items-center justify-center gap-2 rounded-full bg-primary px-5 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90">
-              <UploadCloud className="size-4" /> 选择文件
-            </button>
-            <span className="text-xs text-muted-foreground">或拖拽 PDF 到此处</span>
-          </div>
+        ))}
+      </div>
 
-          {data?.uploadedFile.name && (
-            <div className="mt-6 rounded-xl border border-border bg-card/80 p-4">
-              <div className="flex items-center gap-3">
-                <FileText className="size-5 text-primary" />
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-sm font-medium">{data.uploadedFile.name}</div>
-                  <div className="text-xs text-muted-foreground">
-                    {data.uploadedFile.pages} 页 · {data.uploadedFile.size} · 上传于{" "}
-                    {data.uploadedFile.uploadedAt}
-                  </div>
-                </div>
-                <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary">
-                  已接入
-                </span>
+      <div className="mt-8 grid gap-6 xl:grid-cols-[1.05fr_0.95fr]">
+        <div className="space-y-6">
+          <div className="rounded-2xl border border-border bg-card p-6">
+            <div className="flex items-center gap-3">
+              <div className="grid size-10 place-items-center rounded-lg bg-primary/10 text-primary">
+                <Search className="size-5" />
+              </div>
+              <div>
+                <h2 className="font-serif text-xl font-semibold">标的选择</h2>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  输入公司名称、申请编号、招股书 URL 或拟上市代码（如已分配）
+                </p>
               </div>
             </div>
-          )}
+            <div className="mt-5 flex flex-col gap-3 sm:flex-row">
+              <input
+                defaultValue="宁德时代 · A1 申请稿"
+                className="h-10 flex-1 rounded-md border border-border bg-background px-3 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                aria-label="分析标的"
+              />
+              <button className="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-border bg-background px-4 text-sm font-medium hover:bg-accent">
+                <Search className="size-4" /> 匹配标的
+              </button>
+            </div>
+          </div>
+
+          {/* Upload card */}
+          <div className="rounded-2xl border border-dashed border-primary/30 bg-gradient-to-br from-[color:var(--sage-soft)]/40 to-[color:var(--paper)] p-8">
+            <div className="grid size-12 place-items-center rounded-xl bg-primary/10 text-primary">
+              <UploadCloud className="size-6" />
+            </div>
+            <h2 className="mt-4 font-serif text-xl font-semibold">材料准备</h2>
+            <p className="mt-1 text-sm text-muted-foreground">
+              上传招股书 PDF，系统将绑定公司基础信息并准备进入解析流程
+            </p>
+            <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:items-center">
+              <button className="inline-flex items-center justify-center gap-2 rounded-full bg-primary px-5 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90">
+                <UploadCloud className="size-4" /> 选择文件
+              </button>
+              <span className="text-xs text-muted-foreground">或拖拽 PDF 到此处</span>
+            </div>
+
+            {data?.uploadedFile.name && (
+              <div className="mt-6 rounded-xl border border-border bg-card/80 p-4">
+                <div className="flex items-center gap-3">
+                  <FileText className="size-5 text-primary" />
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm font-medium">{data.uploadedFile.name}</div>
+                    <div className="text-xs text-muted-foreground">
+                      {data.uploadedFile.pages} 页 · {data.uploadedFile.size} · 上传于{" "}
+                      {data.uploadedFile.uploadedAt}
+                    </div>
+                  </div>
+                  <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary">
+                    已接入
+                  </span>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
 
-        {/* Metadata verify */}
-        <div className="rounded-2xl border border-border bg-card p-6">
-          <div className="flex items-center justify-between">
-            <h2 className="font-serif text-xl font-semibold">元数据自动校验</h2>
-            {/* <span className="text-xs text-muted-foreground">来自港股基本信息表</span> */}
+        <div className="space-y-6">
+          {/* Metadata verify */}
+          <div className="rounded-2xl border border-border bg-card p-6">
+            <div className="flex items-center justify-between">
+              <h2 className="font-serif text-xl font-semibold">元数据自动校验</h2>
+              {/* <span className="text-xs text-muted-foreground">来自港股基本信息表</span> */}
+            </div>
+            <div className="mt-4 divide-y divide-border rounded-xl border border-border">
+              {data?.checks.map((c) => (
+                <div
+                  key={c.label}
+                  className="flex items-center justify-between px-4 py-2.5 text-sm"
+                >
+                  <span className="text-muted-foreground">{c.label}</span>
+                  <span className="flex items-center gap-2">
+                    <span className="tabular">{c.value}</span>
+                    {c.ok ? (
+                      <Check className="size-4 text-[color:var(--risk-low)]" />
+                    ) : (
+                      <span className="rounded-full bg-[color:var(--risk-mid)]/15 px-2 py-0.5 text-[10px] text-[oklch(0.45_0.12_75)]">
+                        人工核对
+                      </span>
+                    )}
+                  </span>
+                </div>
+              ))}
+            </div>
           </div>
-          <div className="mt-4 divide-y divide-border rounded-xl border border-border">
-            {data?.checks.map((c) => (
-              <div key={c.label} className="flex items-center justify-between px-4 py-2.5 text-sm">
-                <span className="text-muted-foreground">{c.label}</span>
-                <span className="flex items-center gap-2">
-                  <span className="tabular">{c.value}</span>
-                  {c.ok ? (
-                    <Check className="size-4 text-[color:var(--risk-low)]" />
-                  ) : (
-                    <span className="rounded-full bg-[color:var(--risk-mid)]/15 px-2 py-0.5 text-[10px] text-[oklch(0.45_0.12_75)]">
-                      人工核对
-                    </span>
-                  )}
-                </span>
-              </div>
-            ))}
+
+          <div className="rounded-2xl border border-border bg-card p-6">
+            <div className="flex items-center justify-between">
+              <h2 className="font-serif text-xl font-semibold">分析配置</h2>
+              <span className="rounded-full bg-primary/8 px-2.5 py-1 text-[11px] font-medium text-primary">
+                仅展示
+              </span>
+            </div>
+            <p className="mt-1 text-sm text-muted-foreground">
+              本轮分析将沿用当前风险规则、知识库与专家组设置，不新增真实配置写入
+            </p>
+            <div className="mt-4 space-y-3">
+              {analysisConfigs.map((item) => (
+                <div
+                  key={item.label}
+                  className="flex items-center gap-3 rounded-xl border border-border bg-background px-4 py-3"
+                >
+                  <div className="grid size-9 place-items-center rounded-lg bg-primary/8 text-primary">
+                    <item.icon className="size-4" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="text-xs text-muted-foreground">{item.label}</div>
+                    <div className="truncate text-sm font-medium">{item.value}</div>
+                  </div>
+                  <Check className="size-4 text-[color:var(--risk-low)]" />
+                </div>
+              ))}
+            </div>
           </div>
         </div>
       </div>
@@ -119,7 +219,7 @@ function IntakePage() {
       {/* Parsing progress */}
       <div className="mt-8 rounded-2xl border border-border bg-card p-6">
         <div className="flex items-center justify-between">
-          <h2 className="font-serif text-xl font-semibold">解析进度</h2>
+          <h2 className="font-serif text-xl font-semibold">启动分析准备</h2>
           <span className="text-xs text-muted-foreground">{data?.progressText}</span>
         </div>
         <div className="mt-4 space-y-3">
@@ -151,7 +251,7 @@ function IntakePage() {
         </div>
         <div className="mt-6 flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4">
           <p className="text-xs text-muted-foreground">
-            解析完成后可一键派发到多 Agent 协同分析。所有上市后行情仅用于回测，不会进入分析输入。
+            文档解析完成后可派发到多 Agent 协同分析。所有上市后行情仅用于回测，不会进入分析输入。
           </p>
           <Link
             to="/analyses/$id"

@@ -3,9 +3,6 @@ import {
   ArrowRight,
   Paperclip,
   Play,
-  Zap,
-  GraduationCap,
-  Cpu,
   FileText,
   ShieldAlert,
   LineChart,
@@ -60,6 +57,30 @@ const examples = [
   },
 ];
 
+type TerminalStatus = "draft" | "clarifying" | "ready";
+
+const depthOptions = ["快速", "深度", "专家级"];
+const ruleOptions = ["默认风险规则", "HK-IPO Taxonomy v2.4"];
+const agentOptions = ["默认专家组", "财务 Agent 优先", "法务 Agent 优先", "市场 Agent 优先"];
+
+function inferRequest(text: string) {
+  const trimmed = text.trim();
+  const companyMatch = trimmed.match(
+    /([\u4e00-\u9fa5A-Za-z0-9-]{2,})(?:公司|集团|科技|时代|控股|生物|健康)?/,
+  );
+  const focus = ["现金流", "对赌", "赎回", "关联交易", "法务", "市场", "估值"].filter((keyword) =>
+    trimmed.includes(keyword),
+  );
+  const hasMaterial =
+    /https?:\/\//.test(trimmed) || trimmed.includes("招股书") || trimmed.includes("A1");
+
+  return {
+    company: companyMatch?.[0] || "待确认标的公司",
+    material: hasMaterial ? "已提供招股书线索" : "未提供招股书材料",
+    focus: focus.length > 0 ? focus.join("、") : "待确认分析重点",
+  };
+}
+
 function WorkspacePage() {
   const [analyses, setAnalyses] = useState<AnalysisSummary[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -68,6 +89,12 @@ function WorkspacePage() {
   );
   const [loading, setLoading] = useState(true);
   const [sessionTime, setSessionTime] = useState("");
+  const [requestText, setRequestText] = useState("");
+  const [terminalStatus, setTerminalStatus] = useState<TerminalStatus>("draft");
+  const [prospectusMaterial, setProspectusMaterial] = useState("");
+  const [analysisDepth, setAnalysisDepth] = useState("专家级");
+  const [riskRule, setRiskRule] = useState("默认风险规则");
+  const [agentMode, setAgentMode] = useState("默认专家组");
   const [sessionId] = useState(() => {
     const now = new Date();
     const hkt = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Hong_Kong" }));
@@ -95,6 +122,24 @@ function WorkspacePage() {
   }, []);
 
   const featured = analyses.slice(0, 12);
+  const understood = inferRequest(requestText);
+  const canEnterAnalysis = prospectusMaterial.trim().length > 0;
+  const analysisTargetId = featured[0]?.id ?? "ana_j1724";
+
+  const handleStartCheck = () => {
+    setTerminalStatus(canEnterAnalysis ? "ready" : "clarifying");
+  };
+
+  const handleAttachMaterial = () => {
+    setProspectusMaterial("已选择本地招股书 PDF");
+    if (terminalStatus !== "draft") setTerminalStatus("ready");
+  };
+
+  const handleMaterialChange = (value: string) => {
+    setProspectusMaterial(value);
+    if (terminalStatus !== "draft" && value.trim()) setTerminalStatus("ready");
+  };
+
   return (
     <div className="relative isolate">
       {/* subtle navy grid backdrop, no gradient warmth */}
@@ -152,31 +197,151 @@ function WorkspacePage() {
               </span>
             </div>
             <textarea
-              placeholder="输入港股代码（如 03750.HK）、公司名或粘贴招股书 URL — 例：解析宁德时代招股书之现金流与对赌条款"
+              value={requestText}
+              onChange={(event) => setRequestText(event.target.value)}
+              placeholder="告诉 AI 你要分析的 IPO 项目、关注风险或招股书线索。AI 会自动判断是否需要补充材料、规则或专家组配置。"
               rows={3}
               className="w-full resize-none bg-transparent px-5 py-4 text-[13.5px] leading-relaxed text-foreground placeholder:text-muted-foreground focus:outline-none"
             />
             <div className="flex flex-wrap items-center gap-3 border-t border-border bg-white px-4 py-3">
-              {/* <span className="eyebrow text-muted-foreground">Mode</span> */}
-              {/* <div className="inline-flex overflow-hidden rounded-sm border border-border">
-                <ModeChip icon={Zap} label="快速" />
-                <ModeChip icon={Cpu} label="深度" />
-                <ModeChip icon={GraduationCap} label="专家级" active />
-              </div> */}
-              {/* <span className="hidden text-[11px] text-muted-foreground sm:inline">
-                12+ 章节 · ~6-8 min · 全量证据 + 回测
-              </span> */}
+              <span className="text-[11px] text-muted-foreground">
+                先描述问题，AI 会识别缺失信息并生成补充问答
+              </span>
               <div className="ml-auto flex items-center gap-2">
-                <button className="grid size-9 place-items-center rounded-sm text-muted-foreground hover:bg-muted hover:text-foreground">
+                <button
+                  onClick={handleAttachMaterial}
+                  className="grid size-9 place-items-center rounded-sm text-muted-foreground hover:bg-muted hover:text-foreground"
+                  aria-label="选择招股书材料"
+                >
                   <Paperclip className="size-4" />
                 </button>
-                <button className="inline-flex h-9 items-center gap-2 rounded-sm bg-[color:var(--gold)] px-4 text-[13px] font-semibold text-[color:var(--navy-deep)] transition hover:bg-[#b8934b]">
+                <button
+                  onClick={handleStartCheck}
+                  className="inline-flex h-9 items-center gap-2 rounded-sm bg-[color:var(--gold)] px-4 text-[13px] font-semibold text-[color:var(--navy-deep)] transition hover:bg-[#b8934b]"
+                >
                   <Play className="size-3.5 fill-current" />
                   启动分析
                 </button>
               </div>
             </div>
           </div>
+          {terminalStatus !== "draft" && (
+            <motion.div
+              initial={{ opacity: 0, y: 12 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.28 }}
+              className="mt-4 overflow-hidden rounded-md border border-border bg-white text-left soft-ring"
+            >
+              <div className="grid gap-0 lg:grid-cols-[0.9fr_1.1fr]">
+                <div className="border-b border-border bg-[color:var(--muted)]/35 p-4 lg:border-b-0 lg:border-r">
+                  <div className="eyebrow text-[color:var(--navy)]/60">AI 已理解</div>
+                  <div className="mt-3 space-y-3 text-sm">
+                    <div>
+                      <div className="text-[11px] text-muted-foreground">分析对象</div>
+                      <div className="mt-0.5 font-medium text-[color:var(--navy)]">
+                        {understood.company}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[11px] text-muted-foreground">材料线索</div>
+                      <div className="mt-0.5 font-medium text-[color:var(--navy)]">
+                        {prospectusMaterial || understood.material}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[11px] text-muted-foreground">关注重点</div>
+                      <div className="mt-0.5 font-medium text-[color:var(--navy)]">
+                        {understood.focus}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <div className="eyebrow text-[color:var(--navy)]/60">还需要补充</div>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        只补必要信息；未选择项将使用系统默认方案
+                      </p>
+                    </div>
+                    <span
+                      className={`rounded-sm px-2 py-1 text-[11px] font-medium ${
+                        canEnterAnalysis
+                          ? "bg-[color:var(--risk-low)]/10 text-[color:var(--risk-low)]"
+                          : "bg-[color:var(--risk-mid)]/12 text-[oklch(0.45_0.12_75)]"
+                      }`}
+                    >
+                      {canEnterAnalysis ? "信息已补齐" : "等待材料"}
+                    </span>
+                  </div>
+
+                  <div className="mt-4 space-y-4">
+                    <div>
+                      <label className="text-[11px] font-medium text-muted-foreground">
+                        招股书材料
+                      </label>
+                      <div className="mt-2 flex flex-col gap-2 sm:flex-row">
+                        <input
+                          value={prospectusMaterial}
+                          onChange={(event) => handleMaterialChange(event.target.value)}
+                          placeholder="粘贴招股书链接，或点击附件选择 PDF"
+                          className="h-9 flex-1 rounded-sm border border-border bg-background px-3 text-xs focus:outline-none focus:ring-2 focus:ring-ring"
+                        />
+                        <button
+                          onClick={handleAttachMaterial}
+                          className="inline-flex h-9 items-center justify-center gap-1.5 rounded-sm border border-border bg-background px-3 text-xs font-medium hover:bg-muted"
+                        >
+                          <Paperclip className="size-3.5" /> 选择 PDF
+                        </button>
+                      </div>
+                    </div>
+
+                    <QuestionOptions
+                      label="分析深度"
+                      value={analysisDepth}
+                      options={depthOptions}
+                      onChange={setAnalysisDepth}
+                    />
+                    <QuestionOptions
+                      label="风险规则"
+                      value={riskRule}
+                      options={ruleOptions}
+                      onChange={setRiskRule}
+                    />
+                    <QuestionOptions
+                      label="Agent 使用"
+                      value={agentMode}
+                      options={agentOptions}
+                      onChange={setAgentMode}
+                    />
+                  </div>
+
+                  <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4">
+                    <span className="text-[11px] text-muted-foreground">
+                      当前方案：{analysisDepth} · {riskRule} · {agentMode}
+                    </span>
+                    {canEnterAnalysis ? (
+                      <Link
+                        to="/analyses/$id"
+                        params={{ id: analysisTargetId }}
+                        className="inline-flex h-9 items-center gap-2 rounded-sm bg-[color:var(--navy)] px-4 text-xs font-semibold text-white hover:bg-[color:var(--navy-deep)]"
+                      >
+                        进入分析流程 <ArrowRight className="size-3.5" />
+                      </Link>
+                    ) : (
+                      <button
+                        disabled
+                        className="inline-flex h-9 items-center rounded-sm bg-muted px-4 text-xs font-semibold text-muted-foreground"
+                      >
+                        进入分析流程
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </motion.div>
+          )}
           <div className="mt-3 flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
             <span>12 位 Agent 专家协同</span>
             <span className="text-[color:var(--gold)]/60">|</span>
@@ -326,24 +491,35 @@ function WorkspacePage() {
   );
 }
 
-function ModeChip({
-  icon: Icon,
+function QuestionOptions({
   label,
-  active,
+  value,
+  options,
+  onChange,
 }: {
-  icon: typeof Zap;
   label: string;
-  active?: boolean;
+  value: string;
+  options: string[];
+  onChange: (value: string) => void;
 }) {
   return (
-    <button
-      className={`inline-flex items-center gap-1.5 border-r border-border px-3 py-1.5 text-[12px] font-medium transition last:border-r-0 ${
-        active
-          ? "bg-[color:var(--navy)] text-white"
-          : "bg-white text-[color:var(--navy)] hover:bg-muted"
-      }`}
-    >
-      <Icon className="size-3.5" /> {label}
-    </button>
+    <div>
+      <div className="text-[11px] font-medium text-muted-foreground">{label}</div>
+      <div className="mt-2 flex flex-wrap gap-2">
+        {options.map((option) => (
+          <button
+            key={option}
+            onClick={() => onChange(option)}
+            className={`rounded-sm border px-3 py-1.5 text-xs transition ${
+              value === option
+                ? "border-[color:var(--gold)] bg-[color:var(--gold)]/10 text-[color:var(--navy)]"
+                : "border-border bg-background text-muted-foreground hover:bg-muted"
+            }`}
+          >
+            {option}
+          </button>
+        ))}
+      </div>
+    </div>
   );
 }

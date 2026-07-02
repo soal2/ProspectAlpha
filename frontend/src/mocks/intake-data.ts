@@ -26,7 +26,8 @@ export interface IntakeData {
 
 export const intakeData: IntakeData = {
   checks: [
-    { label: "股票代码", value: "03750.HK", ok: true },
+    { label: "申请编号", value: "A1-2025-03750", ok: true },
+    { label: "拟上市代码", value: "03750.HK（待分配）", ok: true },
     { label: "公司名称", value: "宁德时代", ok: true },
     { label: "上市日期", value: "2025-05-20", ok: true },
     { label: "行业分类", value: "新能源 · 动力电池", ok: true },

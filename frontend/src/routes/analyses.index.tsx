@@ -46,7 +46,7 @@ function AnalysesIndex() {
           </p>
         </div>
         <Link
-          to="/intake"
+          to="/"
           className="inline-flex items-center gap-2 rounded-full bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow-sm transition hover:bg-primary/90"
         >
           <Plus className="size-4" /> 发起新分析
@@ -57,7 +57,7 @@ function AnalysesIndex() {
         <div className="relative">
           <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
           <input
-            placeholder="搜索公司、股票代码或行业"
+            placeholder="搜索公司、申请编号、拟上市代码或行业"
             className="h-9 w-72 rounded-full border border-border bg-card pl-9 pr-3 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
           />
         </div>

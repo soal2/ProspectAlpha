@@ -1,15 +1,5 @@
 import { Link, useRouterState } from "@tanstack/react-router";
-import {
-  Home,
-  FileSearch,
-  ListChecks,
-  FileBarChart,
-  Database,
-  Users,
-  Settings2,
-  LineChart,
-  Activity,
-} from "lucide-react";
+import { Home, ListChecks, Database, Users, Settings2, LineChart, Activity } from "lucide-react";
 import { useState, useEffect } from "react";
 import {
   Sidebar,
@@ -29,7 +19,6 @@ import type { DashboardStats } from "@/mocks/dashboard";
 
 const work = [
   { title: "工作台", url: "/", icon: Home },
-  { title: "招股书接入", url: "/intake", icon: FileSearch },
   { title: "我的分析", url: "/analyses", icon: ListChecks },
 ];
 
@@ -156,7 +145,9 @@ export function AppSidebar() {
             </div>
             <div className="mt-2 flex items-baseline justify-between">
               <span className="text-xs text-sidebar-foreground/60">Analyses</span>
-              <span className="tabular text-sm text-sidebar-foreground">{stats?.totalAnalyses ?? 0}</span>
+              <span className="tabular text-sm text-sidebar-foreground">
+                {stats?.totalAnalyses ?? 0}
+              </span>
             </div>
             <div className="mt-1 flex items-baseline justify-between">
               <span className="text-xs text-sidebar-foreground/60">Evidence</span>
