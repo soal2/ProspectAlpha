@@ -26,7 +26,7 @@ export const Route = createFileRoute("/backtest/$id")({
     const detail = await getBacktestDetailData(params.id);
     return { backtest: b, detail };
   },
-  head: ({ params }) => ({ meta: [{ title: `${params.id} · 回测报告 · Verda` }] }),
+  head: ({ params }) => ({ meta: [{ title: `${params.id} · 回测报告 · ProspectAlpha` }] }),
   component: BacktestDetail,
   notFoundComponent: () => (
     <div className="p-8 text-sm text-muted-foreground">没有找到这个回测</div>

@@ -41,7 +41,7 @@ export const Route = createFileRoute("/analyses/$id/report")({
     return { report };
   },
   component: ReportPage,
-  head: () => ({ meta: [{ title: "IPO 风险报告 · Verda" }] }),
+  head: () => ({ meta: [{ title: "IPO 风险报告 · ProspectAlpha" }] }),
 });
 
 function ReportPage() {

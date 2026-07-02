@@ -6,7 +6,7 @@ import { getRiskRulesData } from "@/lib/data-service";
 export const Route = createFileRoute("/risk-rules")({
   head: () => ({
     meta: [
-      { title: "风险体系配置 · Verda IPO RiskAgent" },
+      { title: "风险体系配置 · ProspectAlpha IPO RiskAgent" },
       { name: "description", content: "金融专家定义风险分类、阈值、权重 · 技术团队负责工程化抽取" },
     ],
   }),

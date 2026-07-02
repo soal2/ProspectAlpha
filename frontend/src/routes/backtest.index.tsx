@@ -7,7 +7,7 @@ import { type BacktestSummary } from "@/mocks";
 export const Route = createFileRoute("/backtest/")({
   head: () => ({
     meta: [
-      { title: "回测中心 · Verda IPO RiskAgent" },
+      { title: "回测中心 · ProspectAlpha IPO RiskAgent" },
       {
         name: "description",
         content: "对历史 IPO 案例进行风险预警回测 · AUC / KS / Lift / TopK 全指标评估",

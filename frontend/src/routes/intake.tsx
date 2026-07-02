@@ -6,7 +6,7 @@ import { getIntakeData } from "@/lib/data-service";
 export const Route = createFileRoute("/intake")({
   head: () => ({
     meta: [
-      { title: "招股书接入 · Verda IPO RiskAgent" },
+      { title: "招股书接入 · ProspectAlpha IPO RiskAgent" },
       {
         name: "description",
         content: "上传招股书 PDF、绑定港股基本信息、完成元数据对齐，启动 Agent 协同分析。",

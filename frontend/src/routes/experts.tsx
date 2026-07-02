@@ -7,7 +7,7 @@ import { type Agent } from "@/mocks";
 export const Route = createFileRoute("/experts")({
   head: () => ({
     meta: [
-      { title: "Agent 专家公会 · Verda IPO RiskAgent" },
+      { title: "Agent 专家公会 · ProspectAlpha IPO RiskAgent" },
       {
         name: "description",
         content: "12 位 IPO 风险分析专家 · 三层协作架构 · 决策 / 策略 / 执行",

@@ -100,7 +100,7 @@ export const traceData: Record<string, TraceData> = {
       {
         who: "沈砚",
         kind: "assign",
-        text: "你是 Verda 首席指挥官。从专家名册中为本次调研挑选最合适的团队。规则：必须含 1 位 L3 决策层统筹、1-2 位 L2 策略顾问、3-6 位 L1 执行专家。",
+        text: "你是 ProspectAlpha 首席指挥官。从专家名册中为本次调研挑选最合适的团队。规则：必须含 1 位 L3 决策层统筹、1-2 位 L2 策略顾问、3-6 位 L1 执行专家。",
         t: "00:00",
       },
       {

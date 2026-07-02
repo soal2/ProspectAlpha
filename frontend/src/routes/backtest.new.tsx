@@ -4,7 +4,7 @@ import { Check, ChevronRight, ArrowLeft } from "lucide-react";
 import { getBacktestNewData } from "@/lib/data-service";
 
 export const Route = createFileRoute("/backtest/new")({
-  head: () => ({ meta: [{ title: "新建回测 · Verda" }] }),
+  head: () => ({ meta: [{ title: "新建回测 · ProspectAlpha" }] }),
   component: NewBacktest,
 });
 

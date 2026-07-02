@@ -8,7 +8,7 @@ import { RiskBadge } from "@/components/risk-badge";
 export const Route = createFileRoute("/analyses/")({
   head: () => ({
     meta: [
-      { title: "我的分析 · Verda IPO RiskAgent" },
+      { title: "我的分析 · ProspectAlpha IPO RiskAgent" },
       {
         name: "description",
         content: "全部已完成的港股 IPO 风险分析报告，结论可溯源，证据可沉淀。",

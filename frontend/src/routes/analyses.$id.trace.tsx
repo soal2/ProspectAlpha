@@ -24,7 +24,7 @@ export const Route = createFileRoute("/analyses/$id/trace")({
     return { trace };
   },
   component: TracePage,
-  head: () => ({ meta: [{ title: "Agent 决策链路回溯 · Verda" }] }),
+  head: () => ({ meta: [{ title: "Agent 决策链路回溯 · ProspectAlpha" }] }),
 });
 
 const kindMeta: Record<string, { label: string; cls: string }> = {
@@ -265,7 +265,7 @@ function TracePage() {
                 <div className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
                   Prompt
                 </div>
-                <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap rounded-md bg-muted/50 p-3 leading-relaxed">{`[system] 你是 Verda 首席指挥官，从专家名册中挑选团队。
+                <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap rounded-md bg-muted/50 p-3 leading-relaxed">{`[system] 你是 ProspectAlpha 首席指挥官，从专家名册中挑选团队。
 规则：必须含 1 位 L3 决策层统筹、1-2 位 L2 策略顾问、3-6 位 L1 执行专家。为每位被选专家给出 ≤ 30 字的具体指派理由。只输出 JSON：{"lead":"专家id","members":[...]}
 
 [user] 任务：${flow[traceIdx].text}`}</pre>

@@ -8,7 +8,7 @@ type SortBy = "time" | "confidence";
 export const Route = createFileRoute("/evidence")({
   head: () => ({
     meta: [
-      { title: "证据知识库 · Verda IPO RiskAgent" },
+      { title: "证据知识库 · ProspectAlpha IPO RiskAgent" },
       {
         name: "description",
         content: "全量招股书原文证据 · 跨公司、跨章节、跨风险类别的检索与复用",

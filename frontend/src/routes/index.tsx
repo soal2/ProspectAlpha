@@ -67,6 +67,7 @@ function WorkspacePage() {
     [],
   );
   const [loading, setLoading] = useState(true);
+  const [sessionTime, setSessionTime] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -81,6 +82,19 @@ function WorkspacePage() {
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  useEffect(() => {
+    const tick = () => {
+      const now = new Date();
+      const hkt = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Hong_Kong" }));
+      const hours = String(hkt.getHours()).padStart(2, "0");
+      const minutes = String(hkt.getMinutes()).padStart(2, "0");
+      setSessionTime(`${hours}:${minutes}`);
+    };
+    tick();
+    const interval = setInterval(tick, 60000);
+    return () => clearInterval(interval);
   }, []);
 
   const featured = analyses.slice(0, 12);
@@ -103,7 +117,7 @@ function WorkspacePage() {
             Live · Decision Replay v2
           </span>
           <span className="hidden text-[11px] uppercase tracking-[0.2em] text-muted-foreground sm:inline">
-            Session · Soal2 · HKT 14:24
+            Session · Soal2 · HKT {sessionTime || "--:--"}
           </span>
         </div>
 
@@ -179,7 +193,7 @@ function WorkspacePage() {
         </motion.div>
 
         {/* scenario dashboard cards */}
-        <div className="mt-16">
+        {/* <div className="mt-16">
           <div className="flex items-end justify-between">
             <div>
               <div className="eyebrow text-muted-foreground">Institutional Scenarios</div>
@@ -221,7 +235,7 @@ function WorkspacePage() {
               </Link>
             ))}
           </div>
-        </div>
+        </div> */}
 
         {/* expert bar */}
         <div className="mt-14 flex flex-col items-center gap-3">
