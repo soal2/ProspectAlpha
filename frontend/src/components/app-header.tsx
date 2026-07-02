@@ -48,13 +48,13 @@ export function AppHeader() {
       </nav>
 
       <div className="ml-auto flex items-center gap-2">
-        <div className="hidden items-center gap-2 rounded-md border border-border bg-white px-3 py-1.5 text-xs text-muted-foreground md:flex">
+        {/* <div className="hidden items-center gap-2 rounded-md border border-border bg-white px-3 py-1.5 text-xs text-muted-foreground md:flex">
           <Search className="size-3.5" />
           <span>搜索公司 / 证据 / 风险条款</span>
-          {/* <kbd className="ml-3 rounded border border-border bg-muted px-1.5 py-0.5 text-[10px] tabular text-muted-foreground">
+          <kbd className="ml-3 rounded border border-border bg-muted px-1.5 py-0.5 text-[10px] tabular text-muted-foreground">
             ⌘K
-          </kbd> */}
-        </div>
+          </kbd>
+        </div> */}
         {/* <span className="hidden items-center gap-1.5 rounded-sm border border-[color:var(--gold)]/50 bg-[color:var(--gold)]/8 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-[color:var(--gold)] md:inline-flex">
           <span className="size-1 rounded-full bg-[color:var(--gold)]" />
           Institutional

@@ -68,21 +68,18 @@ function WorkspacePage() {
   );
   const [loading, setLoading] = useState(true);
   const [sessionTime, setSessionTime] = useState("");
-
-  useEffect(() => {
-    let cancelled = false;
-    Promise.all([getAnalyses(), getAgents(), getHomepageExamples()]).then(([a, ag, ex]) => {
-      if (!cancelled) {
-        setAnalyses(a);
-        setAgents(ag);
-        setExamplesList(ex);
-        setLoading(false);
-      }
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  const [sessionId] = useState(() => {
+    const now = new Date();
+    const hkt = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Hong_Kong" }));
+    const dateKey = `${hkt.getFullYear()}${hkt.getMonth()}${hkt.getDate()}`;
+    const stored = sessionStorage.getItem(`sid-${dateKey}`);
+    if (stored) return stored;
+    const prefix = String.fromCharCode(65 + Math.floor(Math.random() * 26));
+    const num = String(hkt.getHours()).padStart(2, "0") + String(hkt.getMinutes()).padStart(2, "0");
+    const id = `#${prefix}-${num}`;
+    sessionStorage.setItem(`sid-${dateKey}`, id);
+    return id;
+  });
 
   useEffect(() => {
     const tick = () => {
@@ -151,7 +148,7 @@ function WorkspacePage() {
                 <span className="eyebrow text-[color:var(--navy)]/70">Analysis Terminal</span>
               </div>
               <span className="tabular text-[10px] uppercase tracking-wider text-muted-foreground">
-                SESSION #A-24710
+                SESSION {sessionId}
               </span>
             </div>
             <textarea
@@ -160,16 +157,15 @@ function WorkspacePage() {
               className="w-full resize-none bg-transparent px-5 py-4 text-[13.5px] leading-relaxed text-foreground placeholder:text-muted-foreground focus:outline-none"
             />
             <div className="flex flex-wrap items-center gap-3 border-t border-border bg-white px-4 py-3">
-              <span className="eyebrow text-muted-foreground">Mode</span>
-              {/* segmented control */}
-              <div className="inline-flex overflow-hidden rounded-sm border border-border">
+              {/* <span className="eyebrow text-muted-foreground">Mode</span> */}
+              {/* <div className="inline-flex overflow-hidden rounded-sm border border-border">
                 <ModeChip icon={Zap} label="快速" />
                 <ModeChip icon={Cpu} label="深度" />
                 <ModeChip icon={GraduationCap} label="专家级" active />
-              </div>
-              <span className="hidden text-[11px] text-muted-foreground sm:inline">
+              </div> */}
+              {/* <span className="hidden text-[11px] text-muted-foreground sm:inline">
                 12+ 章节 · ~6-8 min · 全量证据 + 回测
-              </span>
+              </span> */}
               <div className="ml-auto flex items-center gap-2">
                 <button className="grid size-9 place-items-center rounded-sm text-muted-foreground hover:bg-muted hover:text-foreground">
                   <Paperclip className="size-4" />

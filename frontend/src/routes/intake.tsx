@@ -17,6 +17,20 @@ export const Route = createFileRoute("/intake")({
 });
 
 function IntakePage() {
+  const [analysisId] = useState(() => {
+    const now = new Date();
+    const hkt = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Hong_Kong" }));
+    const dateKey = `${hkt.getFullYear()}${hkt.getMonth()}${hkt.getDate()}`;
+    const stored = sessionStorage.getItem(`sid-${dateKey}`);
+    if (stored) {
+      const m = stored.match(/#([A-Z])-(\d{4})/);
+      if (m) return `ana_${m[1].toLowerCase()}${m[2]}`;
+    }
+    const prefix = String.fromCharCode(65 + Math.floor(Math.random() * 26));
+    const num = String(hkt.getHours()).padStart(2, "0") + String(hkt.getMinutes()).padStart(2, "0");
+    return `ana_${prefix.toLowerCase()}${num}`;
+  });
+
   const [data, setData] = useState<{
     checks: { label: string; value: string; ok: boolean }[];
     parsing: { label: string; pct: number; status: string }[];
@@ -80,7 +94,7 @@ function IntakePage() {
         <div className="rounded-2xl border border-border bg-card p-6">
           <div className="flex items-center justify-between">
             <h2 className="font-serif text-xl font-semibold">元数据自动校验</h2>
-            <span className="text-xs text-muted-foreground">来自港股基本信息表</span>
+            {/* <span className="text-xs text-muted-foreground">来自港股基本信息表</span> */}
           </div>
           <div className="mt-4 divide-y divide-border rounded-xl border border-border">
             {data?.checks.map((c) => (
@@ -141,7 +155,7 @@ function IntakePage() {
           </p>
           <Link
             to="/analyses/$id"
-            params={{ id: "ana_03750" }}
+            params={{ id: analysisId }}
             className="inline-flex items-center gap-1.5 rounded-full bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
           >
             派发到 Agent 协同 <ArrowRight className="size-4" />
