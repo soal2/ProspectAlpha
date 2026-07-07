@@ -9,9 +9,10 @@ import {
   Database,
   Settings2,
   Users,
+  ShieldAlert,
 } from "lucide-react";
 import { useState, useEffect } from "react";
-import { getIntakeData } from "@/lib/data-service";
+import { createAnalysisRun, getIntakeData, type AnalysisRun } from "@/lib/data-service";
 
 export const Route = createFileRoute("/intake")({
   head: () => ({
@@ -34,10 +35,16 @@ const workflowSteps = [
 ];
 
 const analysisConfigs = [
-  { label: "风险规则版本", value: "HK-IPO Taxonomy v2.4", icon: Settings2 },
-  { label: "Agent 专家组", value: "专家级 · 9 位核心专家", icon: Users },
+  { label: "风险规则版本", value: "hk_ipo_prospectus_risk_framework_v1", icon: Settings2 },
+  { label: "Agent 专家组", value: "rule_agent · 规则快照驱动", icon: Users },
   { label: "知识库增强", value: "开启 · 招股书证据 + 历史案例", icon: Database },
 ];
+
+const sampleText =
+  "招股书披露公司存在关联交易及对赌/赎回安排，前五大供应商采购占比较高。" +
+  "报告期内经营活动现金流持续为负，且部分章节存在前瞻性陈述和免责声明。";
+
+const sampleStructuredData = "供应商集中度=Top5 采购占比 80%\n经营活动现金流=连续两期为负";
 
 function IntakePage() {
   const [analysisId] = useState(() => {
@@ -60,6 +67,12 @@ function IntakePage() {
     uploadedFile: { name: string; pages: number; size: string; uploadedAt: string };
     progressText: string;
   } | null>(null);
+  const [companyName, setCompanyName] = useState("宁德时代 · A1 申请稿");
+  const [documentText, setDocumentText] = useState(sampleText);
+  const [structuredDataText, setStructuredDataText] = useState(sampleStructuredData);
+  const [analysisRun, setAnalysisRun] = useState<AnalysisRun | null>(null);
+  const [analysisError, setAnalysisError] = useState<string | null>(null);
+  const [analyzing, setAnalyzing] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -110,7 +123,8 @@ function IntakePage() {
             </div>
             <div className="mt-5 flex flex-col gap-3 sm:flex-row">
               <input
-                defaultValue="宁德时代 · A1 申请稿"
+                value={companyName}
+                onChange={(event) => setCompanyName(event.target.value)}
                 className="h-10 flex-1 rounded-md border border-border bg-background px-3 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
                 aria-label="分析标的"
               />
@@ -262,6 +276,176 @@ function IntakePage() {
           </Link>
         </div>
       </div>
+
+      <div className="mt-8 grid gap-6 xl:grid-cols-[0.95fr_1.05fr]">
+        <div className="rounded-2xl border border-border bg-card p-6">
+          <div className="flex items-center gap-3">
+            <div className="grid size-10 place-items-center rounded-lg bg-primary/10 text-primary">
+              <ShieldAlert className="size-5" />
+            </div>
+            <div>
+              <h2 className="font-serif text-xl font-semibold">规则 Agent 试运行</h2>
+              <p className="mt-1 text-sm text-muted-foreground">
+                使用当前 active 规则快照，对招股书摘录和结构化数据生成可回溯 finding
+              </p>
+            </div>
+          </div>
+
+          <div className="mt-5 space-y-4">
+            <label className="block text-xs font-medium text-muted-foreground">
+              招股书文本 / 解析片段
+              <textarea
+                value={documentText}
+                onChange={(event) => setDocumentText(event.target.value)}
+                rows={7}
+                className="field-input mt-1 resize-none"
+              />
+            </label>
+            <label className="block text-xs font-medium text-muted-foreground">
+              结构化数据（每行 key=value）
+              <textarea
+                value={structuredDataText}
+                onChange={(event) => setStructuredDataText(event.target.value)}
+                rows={4}
+                className="field-input mt-1 resize-none"
+              />
+            </label>
+          </div>
+
+          {analysisError ? (
+            <div className="mt-4 rounded-md border border-destructive/30 bg-destructive/8 px-3 py-2 text-xs text-destructive">
+              {analysisError}
+            </div>
+          ) : null}
+
+          <button
+            onClick={() => void runRuleAgent()}
+            disabled={analyzing || !documentText.trim()}
+            className="mt-5 inline-flex items-center gap-2 rounded-full bg-primary px-5 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {analyzing ? (
+              <Loader2 className="size-4 animate-spin" />
+            ) : (
+              <ArrowRight className="size-4" />
+            )}
+            启动规则 Agent
+          </button>
+        </div>
+
+        <div className="rounded-2xl border border-border bg-card p-6">
+          <div className="flex items-center justify-between">
+            <div>
+              <h2 className="font-serif text-xl font-semibold">分析结果</h2>
+              <p className="mt-1 text-sm text-muted-foreground">
+                {analysisRun
+                  ? `${analysisRun.run_id} · ${analysisRun.findings.length} 条 finding`
+                  : "等待规则 Agent 输出"}
+              </p>
+            </div>
+            {analysisRun ? (
+              <span className="rounded-full bg-[color:var(--risk-low)]/10 px-2.5 py-1 text-[11px] font-medium text-[color:var(--risk-low)]">
+                {analysisRun.status}
+              </span>
+            ) : null}
+          </div>
+
+          {analysisRun ? (
+            <div className="mt-4 space-y-3">
+              <div className="grid grid-cols-3 gap-2 text-center text-[11px]">
+                <MiniStat label="规则快照" value={analysisRun.rule_snapshot.totals.rule_count} />
+                <MiniStat label="输入字数" value={analysisRun.input_summary.document_text_chars} />
+                <MiniStat
+                  label="结构化项"
+                  value={analysisRun.input_summary.structured_data_keys.length}
+                />
+              </div>
+              <div className="max-h-[520px] space-y-3 overflow-y-auto pr-1">
+                {analysisRun.findings.map((finding) => (
+                  <div
+                    key={finding.finding_id}
+                    className="rounded-xl border border-border bg-background p-4"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
+                          <span className="tabular">{finding.rule_id}</span>
+                          <span>{finding.dimension_code}</span>
+                          <span>{finding.category}</span>
+                        </div>
+                        <div className="mt-1 font-medium leading-snug">{finding.title}</div>
+                      </div>
+                      <span
+                        className={`rounded-full px-2 py-0.5 text-[11px] ${
+                          finding.severity === "high"
+                            ? "bg-[color:var(--risk-high)]/10 text-[color:var(--risk-high)]"
+                            : finding.severity === "medium"
+                              ? "bg-[color:var(--risk-mid)]/12 text-[oklch(0.45_0.12_75)]"
+                              : "bg-[color:var(--risk-low)]/10 text-[color:var(--risk-low)]"
+                        }`}
+                      >
+                        {finding.severity}
+                      </span>
+                    </div>
+                    <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                      {finding.reasoning_summary}
+                    </p>
+                    {finding.evidence_snippets[0] ? (
+                      <blockquote className="mt-3 border-l-2 border-primary/40 pl-3 text-xs leading-relaxed">
+                        {finding.evidence_snippets[0]}
+                      </blockquote>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div className="mt-12 text-center text-xs text-muted-foreground">
+              Agent 输出会展示规则编号、触发条件、证据片段和置信度。
+            </div>
+          )}
+        </div>
+      </div>
     </div>
+  );
+
+  async function runRuleAgent() {
+    setAnalyzing(true);
+    setAnalysisError(null);
+    try {
+      const run = await createAnalysisRun({
+        company_name: companyName,
+        document_text: documentText,
+        structured_data: parseStructuredData(structuredDataText),
+        max_findings: 20,
+      });
+      setAnalysisRun(run);
+    } catch (err) {
+      setAnalysisError(err instanceof Error ? err.message : "规则 Agent 分析失败");
+    } finally {
+      setAnalyzing(false);
+    }
+  }
+}
+
+function MiniStat({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="rounded-lg bg-muted px-3 py-2">
+      <div className="tabular text-base font-semibold">{value}</div>
+      <div className="text-muted-foreground">{label}</div>
+    </div>
+  );
+}
+
+function parseStructuredData(text: string): Record<string, string> {
+  return Object.fromEntries(
+    text
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const [key, ...rest] = line.split("=");
+        return [key.trim(), rest.join("=").trim()];
+      })
+      .filter(([key, value]) => key && value),
   );
 }

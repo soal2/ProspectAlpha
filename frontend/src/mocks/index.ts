@@ -29,5 +29,5 @@ export type { EvidenceDetailItem } from "./evidence-detail";
 export type { KnowledgeData, KnowledgeFacet, KnowledgeEvidence } from "./evidence-knowledge";
 export type { BacktestDetailData } from "./backtest-detail-data";
 export type { IntakeData, IntakeCheck, IntakeParsing } from "./intake-data";
-export type { RiskRulesData, RiskGroup, RiskRule } from "./risk-rules-data";
+export type { RiskRulesData, RiskDimension, RiskRule } from "./risk-rules-data";
 export type { BacktestNewData, BacktestNewStep } from "./backtest-new-data";

@@ -1,4 +1,4 @@
-import { USE_MOCK } from "./env";
+import { API_BASE_URL, USE_MOCK } from "./env";
 import {
   analyses as mockAnalyses,
   agents as mockAgents,
@@ -20,6 +20,46 @@ import type {
   KnowledgeData,
   BacktestDetailData,
 } from "@/mocks";
+
+export interface AnalysisFinding {
+  finding_id: string;
+  agent_name: string;
+  rule_set_id: string;
+  rule_version: string;
+  rule_id: string;
+  dimension_code: string;
+  rule_type: string;
+  category: string;
+  title: string;
+  severity: "low" | "medium" | "high";
+  confidence: number;
+  trigger_condition: string;
+  evaluation_result: string;
+  reasoning_summary: string;
+  evidence_snippets: string[];
+  matched_terms: string[];
+  requires_human_review: boolean;
+}
+
+export interface AnalysisRun {
+  run_id: string;
+  company_name: string;
+  status: string;
+  current_stage: string;
+  created_at: string;
+  completed_at: string | null;
+  rule_snapshot: {
+    rule_set_id: string;
+    version: string;
+    totals: { dimension_count: number; category_count: number; rule_count: number };
+  };
+  input_summary: {
+    document_text_chars: number;
+    structured_data_keys: string[];
+  };
+  findings: AnalysisFinding[];
+  events: { event_type: string; actor_name: string; title: string; summary: string }[];
+}
 
 // Mock data fetchers (replace with real API calls when backend is ready)
 async function fetchAnalyses(): Promise<typeof mockAnalyses> {
@@ -100,15 +140,24 @@ async function fetchIntakeData(): Promise<typeof intakeData> {
   };
 }
 
+async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    ...init,
+    headers: {
+      "content-type": "application/json",
+      ...(init?.headers ?? {}),
+    },
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `Request failed: ${response.status}`);
+  }
+  if (response.status === 204) return undefined as T;
+  return response.json() as Promise<T>;
+}
+
 async function fetchRiskRulesData(): Promise<typeof riskRulesData> {
-  return {
-    taxonomy: [
-      { key: "financial", label: "财务风险", color: "var(--chart-1)", rules: [] },
-      { key: "business", label: "经营风险", color: "var(--chart-2)", rules: [] },
-      { key: "legal", label: "法律合规风险", color: "var(--chart-4)", rules: [] },
-      { key: "market", label: "市场风险", color: "var(--chart-5)", rules: [] },
-    ],
-  };
+  return apiRequest<typeof riskRulesData>("/risk-rules");
 }
 
 async function fetchBacktestNewData(): Promise<typeof backtestNewData> {
@@ -188,10 +237,66 @@ export async function getIntakeData() {
   return fetchIntakeData();
 }
 
+export async function createAnalysisRun(payload: {
+  company_name: string;
+  document_text: string;
+  structured_data?: Record<string, string>;
+  max_findings?: number;
+}) {
+  if (USE_MOCK) {
+    return {
+      run_id: `mock_${Date.now()}`,
+      company_name: payload.company_name,
+      status: "completed",
+      current_stage: "completed",
+      created_at: new Date().toISOString(),
+      completed_at: new Date().toISOString(),
+      rule_snapshot: {
+        rule_set_id: riskRulesData.rule_set_id,
+        version: riskRulesData.version,
+        totals: riskRulesData.totals,
+      },
+      input_summary: {
+        document_text_chars: payload.document_text.length,
+        structured_data_keys: Object.keys(payload.structured_data ?? {}),
+      },
+      findings: [],
+      events: [],
+    } satisfies AnalysisRun;
+  }
+  return apiRequest<AnalysisRun>("/analysis-runs", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
 // Risk Rules
 export async function getRiskRulesData() {
   if (USE_MOCK) return riskRulesData;
   return fetchRiskRulesData();
+}
+
+export type RiskRulePayload = Omit<(typeof riskRulesData.rules)[number], "rule_id">;
+
+export async function createRiskRule(payload: RiskRulePayload) {
+  if (USE_MOCK) return { ...payload, rule_id: `MOCK-${Date.now()}` };
+  return apiRequest<(typeof riskRulesData.rules)[number]>("/risk-rules", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateRiskRule(ruleId: string, payload: Partial<RiskRulePayload>) {
+  if (USE_MOCK) return { ...riskRulesData.rules[0], ...payload, rule_id: ruleId };
+  return apiRequest<(typeof riskRulesData.rules)[number]>(`/risk-rules/${ruleId}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteRiskRule(ruleId: string) {
+  if (USE_MOCK) return;
+  return apiRequest<void>(`/risk-rules/${ruleId}`, { method: "DELETE" });
 }
 
 // Backtest New
