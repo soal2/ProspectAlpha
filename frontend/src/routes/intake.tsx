@@ -9,15 +9,19 @@ import {
   Settings2,
   Users,
   ShieldAlert,
+  Send,
+  Sparkles,
 } from "lucide-react";
 import { useRef, useState, useEffect } from "react";
 import {
+  askDocument,
   createAnalysisRun,
   getAnalysisOptions,
   getIntakeData,
   uploadDocument,
   type AnalysisRun,
   type AnalysisOptions,
+  type AskCitation,
 } from "@/lib/data-service";
 
 export const Route = createFileRoute("/intake")({
@@ -71,6 +75,12 @@ function IntakePage() {
     file_size_bytes: number;
     created_at: string;
   } | null>(null);
+  const [pdfQuestion, setPdfQuestion] = useState("");
+  const [pdfAnswer, setPdfAnswer] = useState("");
+  const [pdfCitations, setPdfCitations] = useState<AskCitation[]>([]);
+  const [pdfAsking, setPdfAsking] = useState(false);
+  const [pdfError, setPdfError] = useState<string | null>(null);
+  const pdfAbortRef = useRef<AbortController | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
@@ -188,6 +198,96 @@ function IntakePage() {
                 </div>
               </div>
             )}
+          </div>
+
+          {/* PDF Q&A card */}
+          <div className="rounded-2xl border border-border bg-card p-6">
+            <div className="flex items-center gap-3">
+              <div className="grid size-10 place-items-center rounded-lg bg-primary/10 text-primary">
+                <Sparkles className="size-5" />
+              </div>
+              <div>
+                <h2 className="font-serif text-xl font-semibold">PDF 自由提问</h2>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  基于已上传的招股书实时调用大模型，回答流式输出
+                </p>
+              </div>
+            </div>
+            <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:items-start">
+              <textarea
+                value={pdfQuestion}
+                onChange={(event) => setPdfQuestion(event.target.value)}
+                placeholder={
+                  uploadedDocument
+                    ? "例如：这家公司有哪些核心风险因素？经营性现金流如何？"
+                    : "请先上传招股书 PDF 后再提问"
+                }
+                rows={3}
+                disabled={pdfAsking || !uploadedDocument}
+                className="field-input flex-1 resize-none disabled:cursor-not-allowed disabled:opacity-60"
+              />
+              <button
+                onClick={() => void askPdf()}
+                disabled={pdfAsking || !uploadedDocument || !pdfQuestion.trim()}
+                className="inline-flex items-center justify-center gap-2 rounded-full bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {pdfAsking ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <Send className="size-4" />
+                )}
+                提问
+              </button>
+            </div>
+
+            {pdfError ? (
+              <div className="mt-3 rounded-md border border-destructive/30 bg-destructive/8 px-3 py-2 text-xs text-destructive">
+                {pdfError}
+              </div>
+            ) : null}
+
+            {pdfAnswer || pdfAsking ? (
+              <div className="mt-4 rounded-xl border border-border bg-background p-4">
+                <div className="mb-2 flex items-center justify-between text-[11px] text-muted-foreground">
+                  <span className="inline-flex items-center gap-1.5 font-medium">
+                    <Sparkles className="size-3 text-primary" /> 大模型回答
+                  </span>
+                  {pdfAsking ? (
+                    <span className="inline-flex items-center gap-1 tabular">
+                      <Loader2 className="size-3 animate-spin" /> 生成中
+                    </span>
+                  ) : (
+                    <span className="tabular">{pdfAnswer.length} 字</span>
+                  )}
+                </div>
+                <pre className="max-h-72 overflow-y-auto whitespace-pre-wrap font-sans text-[13px] leading-relaxed text-foreground/90">
+                  {pdfAnswer}
+                  {pdfAsking ? (
+                    <span className="ml-0.5 inline-block h-3 w-0.5 animate-pulse bg-primary align-middle" />
+                  ) : null}
+                </pre>
+
+                {pdfCitations.length > 0 ? (
+                  <div className="mt-3 border-t border-border/60 pt-3">
+                    <div className="text-[10.5px] font-medium uppercase tracking-wider text-muted-foreground">
+                      引用证据（{pdfCitations.length}）
+                    </div>
+                    <div className="mt-1.5 flex flex-wrap gap-1.5">
+                      {pdfCitations.map((c) => (
+                        <span
+                          key={c.block_id}
+                          title={c.snippet}
+                          className="inline-flex items-center gap-1 rounded-full border border-border bg-muted/40 px-2 py-0.5 text-[10.5px] text-muted-foreground"
+                        >
+                          <FileText className="size-3 text-primary" />
+                          P.{c.page_number} · {c.section_path}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
           </div>
         </div>
 
@@ -504,7 +604,7 @@ function IntakePage() {
       });
       setAnalysisRun(run);
       if (openAfterComplete) {
-        await navigate({ to: "/analyses/$id", params: { id: run.run_id } });
+        await navigate({ to: "/analyses/$id/orchestra", params: { id: run.run_id } });
       }
     } catch (err) {
       setAnalysisError(err instanceof Error ? err.message : "规则 Agent 分析失败");
@@ -518,8 +618,38 @@ function IntakePage() {
     try {
       const document = await uploadDocument(file);
       setUploadedDocument(document);
+      // reset prior Q&A when a new doc is uploaded
+      setPdfAnswer("");
+      setPdfCitations([]);
+      setPdfError(null);
     } catch (err) {
       setAnalysisError(err instanceof Error ? err.message : "PDF 上传失败");
+    }
+  }
+
+  async function askPdf() {
+    if (!uploadedDocument || !pdfQuestion.trim()) return;
+    setPdfAsking(true);
+    setPdfError(null);
+    setPdfAnswer("");
+    setPdfCitations([]);
+    const controller = new AbortController();
+    pdfAbortRef.current = controller;
+    try {
+      const result = await askDocument(
+        uploadedDocument.document_id,
+        pdfQuestion.trim(),
+        (_delta, full) => setPdfAnswer(full),
+        { signal: controller.signal },
+      );
+      setPdfAnswer(result.answer);
+      setPdfCitations(result.citations);
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      setPdfError(err instanceof Error ? err.message : "PDF 问答失败");
+    } finally {
+      setPdfAsking(false);
+      pdfAbortRef.current = null;
     }
   }
 }

@@ -24,6 +24,7 @@ import { Route as AnalysesIdRouteImport } from './routes/analyses.$id'
 import { Route as AnalysesIdIndexRouteImport } from './routes/analyses.$id.index'
 import { Route as AnalysesIdTraceRouteImport } from './routes/analyses.$id.trace'
 import { Route as AnalysesIdReportRouteImport } from './routes/analyses.$id.report'
+import { Route as AnalysesIdOrchestraRouteImport } from './routes/analyses.$id.orchestra'
 import { Route as AnalysesIdEvidenceRouteImport } from './routes/analyses.$id.evidence'
 
 const RiskRulesRoute = RiskRulesRouteImport.update({
@@ -101,6 +102,11 @@ const AnalysesIdReportRoute = AnalysesIdReportRouteImport.update({
   path: '/report',
   getParentRoute: () => AnalysesIdRoute,
 } as any)
+const AnalysesIdOrchestraRoute = AnalysesIdOrchestraRouteImport.update({
+  id: '/orchestra',
+  path: '/orchestra',
+  getParentRoute: () => AnalysesIdRoute,
+} as any)
 const AnalysesIdEvidenceRoute = AnalysesIdEvidenceRouteImport.update({
   id: '/evidence',
   path: '/evidence',
@@ -121,6 +127,7 @@ export interface FileRoutesByFullPath {
   '/analyses/': typeof AnalysesIndexRoute
   '/backtest/': typeof BacktestIndexRoute
   '/analyses/$id/evidence': typeof AnalysesIdEvidenceRoute
+  '/analyses/$id/orchestra': typeof AnalysesIdOrchestraRoute
   '/analyses/$id/report': typeof AnalysesIdReportRoute
   '/analyses/$id/trace': typeof AnalysesIdTraceRoute
   '/analyses/$id/': typeof AnalysesIdIndexRoute
@@ -138,6 +145,7 @@ export interface FileRoutesByTo {
   '/analyses': typeof AnalysesIndexRoute
   '/backtest': typeof BacktestIndexRoute
   '/analyses/$id/evidence': typeof AnalysesIdEvidenceRoute
+  '/analyses/$id/orchestra': typeof AnalysesIdOrchestraRoute
   '/analyses/$id/report': typeof AnalysesIdReportRoute
   '/analyses/$id/trace': typeof AnalysesIdTraceRoute
   '/analyses/$id': typeof AnalysesIdIndexRoute
@@ -157,6 +165,7 @@ export interface FileRoutesById {
   '/analyses/': typeof AnalysesIndexRoute
   '/backtest/': typeof BacktestIndexRoute
   '/analyses/$id/evidence': typeof AnalysesIdEvidenceRoute
+  '/analyses/$id/orchestra': typeof AnalysesIdOrchestraRoute
   '/analyses/$id/report': typeof AnalysesIdReportRoute
   '/analyses/$id/trace': typeof AnalysesIdTraceRoute
   '/analyses/$id/': typeof AnalysesIdIndexRoute
@@ -177,6 +186,7 @@ export interface FileRouteTypes {
     | '/analyses/'
     | '/backtest/'
     | '/analyses/$id/evidence'
+    | '/analyses/$id/orchestra'
     | '/analyses/$id/report'
     | '/analyses/$id/trace'
     | '/analyses/$id/'
@@ -194,6 +204,7 @@ export interface FileRouteTypes {
     | '/analyses'
     | '/backtest'
     | '/analyses/$id/evidence'
+    | '/analyses/$id/orchestra'
     | '/analyses/$id/report'
     | '/analyses/$id/trace'
     | '/analyses/$id'
@@ -212,6 +223,7 @@ export interface FileRouteTypes {
     | '/analyses/'
     | '/backtest/'
     | '/analyses/$id/evidence'
+    | '/analyses/$id/orchestra'
     | '/analyses/$id/report'
     | '/analyses/$id/trace'
     | '/analyses/$id/'
@@ -338,6 +350,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AnalysesIdReportRouteImport
       parentRoute: typeof AnalysesIdRoute
     }
+    '/analyses/$id/orchestra': {
+      id: '/analyses/$id/orchestra'
+      path: '/orchestra'
+      fullPath: '/analyses/$id/orchestra'
+      preLoaderRoute: typeof AnalysesIdOrchestraRouteImport
+      parentRoute: typeof AnalysesIdRoute
+    }
     '/analyses/$id/evidence': {
       id: '/analyses/$id/evidence'
       path: '/evidence'
@@ -361,6 +380,7 @@ const ExpertsRouteWithChildren =
 
 interface AnalysesIdRouteChildren {
   AnalysesIdEvidenceRoute: typeof AnalysesIdEvidenceRoute
+  AnalysesIdOrchestraRoute: typeof AnalysesIdOrchestraRoute
   AnalysesIdReportRoute: typeof AnalysesIdReportRoute
   AnalysesIdTraceRoute: typeof AnalysesIdTraceRoute
   AnalysesIdIndexRoute: typeof AnalysesIdIndexRoute
@@ -368,6 +388,7 @@ interface AnalysesIdRouteChildren {
 
 const AnalysesIdRouteChildren: AnalysesIdRouteChildren = {
   AnalysesIdEvidenceRoute: AnalysesIdEvidenceRoute,
+  AnalysesIdOrchestraRoute: AnalysesIdOrchestraRoute,
   AnalysesIdReportRoute: AnalysesIdReportRoute,
   AnalysesIdTraceRoute: AnalysesIdTraceRoute,
   AnalysesIdIndexRoute: AnalysesIdIndexRoute,

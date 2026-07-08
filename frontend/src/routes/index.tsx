@@ -1,15 +1,24 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import {
   ArrowRight,
   Paperclip,
-  Play,
   FileText,
   ShieldAlert,
   LineChart,
   Building2,
+  Loader2,
+  Send,
 } from "lucide-react";
-import { useState, useEffect } from "react";
-import { getAnalyses, getAgents, getHomepageExamples } from "@/lib/data-service";
+import { useState, useEffect, useRef } from "react";
+import {
+  getAnalyses,
+  getAgents,
+  getHomepageExamples,
+  chatWithAssistant,
+  createAnalysisRun,
+  type ChatMessage,
+  type ChatUnderstanding,
+} from "@/lib/data-service";
 import { type AnalysisSummary, type Agent } from "@/mocks";
 import { motion } from "framer-motion";
 
@@ -82,6 +91,7 @@ function inferRequest(text: string) {
 }
 
 function WorkspacePage() {
+  const navigate = useNavigate();
   const [analyses, setAnalyses] = useState<AnalysisSummary[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [examplesList, setExamplesList] = useState<{ icon: string; title: string; desc: string }[]>(
@@ -95,6 +105,12 @@ function WorkspacePage() {
   const [analysisDepth, setAnalysisDepth] = useState("专家级");
   const [riskRule, setRiskRule] = useState("默认风险规则");
   const [agentMode, setAgentMode] = useState("默认专家组");
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [chatting, setChatting] = useState(false);
+  const [chatError, setChatError] = useState<string | null>(null);
+  const [understanding, setUnderstanding] = useState<ChatUnderstanding | null>(null);
+  const [dispatching, setDispatching] = useState(false);
+  const abortRef = useRef<AbortController | null>(null);
   const [sessionId] = useState(() => {
     const now = new Date();
     const hkt = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Hong_Kong" }));
@@ -123,11 +139,81 @@ function WorkspacePage() {
 
   const featured = analyses.slice(0, 12);
   const understood = inferRequest(requestText);
-  const canEnterAnalysis = prospectusMaterial.trim().length > 0;
-  const analysisTargetId = featured[0]?.id ?? "ana_j1724";
+  const companyDisplay = understanding?.company ?? understood.company;
+  const materialDisplay =
+    understanding?.material_hints ?? (prospectusMaterial || understood.material);
+  const focusDisplay = understanding?.focus?.length
+    ? understanding.focus.join("、")
+    : understood.focus;
+  const canEnterAnalysis = messages.length > 0 && !chatting && !dispatching;
 
-  const handleStartCheck = () => {
-    setTerminalStatus(canEnterAnalysis ? "ready" : "clarifying");
+  const handleStartCheck = async () => {
+    const trimmed = requestText.trim();
+    if (!trimmed || chatting) return;
+    const userMsg: ChatMessage = { role: "user", content: trimmed };
+    const prevMessages = messages;
+    const nextMessages = [...prevMessages, userMsg];
+    const assistantIdx = nextMessages.length;
+    setMessages([...nextMessages, { role: "assistant", content: "" }]);
+    setRequestText("");
+    setChatting(true);
+    setChatError(null);
+    const controller = new AbortController();
+    abortRef.current = controller;
+    try {
+      const result = await chatWithAssistant(
+        trimmed,
+        prevMessages,
+        (_delta, full) => {
+          setMessages((cur) => {
+            const cp = [...cur];
+            cp[assistantIdx] = { role: "assistant", content: full };
+            return cp;
+          });
+        },
+        { signal: controller.signal },
+      );
+      setMessages((cur) => {
+        const cp = [...cur];
+        cp[assistantIdx] = { role: "assistant", content: result.reply };
+        return cp;
+      });
+      if (result.understanding) setUnderstanding(result.understanding);
+      setTerminalStatus("clarifying");
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      setChatError(err instanceof Error ? err.message : "对话失败");
+      // 回滚占位消息
+      setMessages((cur) => cur.filter((_, i) => i !== assistantIdx));
+    } finally {
+      setChatting(false);
+      abortRef.current = null;
+    }
+  };
+
+  const handleDispatchAnalysis = async () => {
+    if (!canEnterAnalysis) return;
+    setDispatching(true);
+    setChatError(null);
+    try {
+      const documentText = messages
+        .map((m) => `${m.role === "user" ? "[用户]" : "[沈北辰]"} ${m.content}`)
+        .join("\n\n");
+      const run = await createAnalysisRun({
+        company_name: companyDisplay || "未命名标的",
+        document_text: documentText,
+        structured_data: {
+          focus_areas: understanding?.focus?.join("、") ?? "",
+          material_hints: understanding?.material_hints ?? "",
+          clarifying_questions: understanding?.clarifying_questions?.join("；") ?? "",
+          conversation_turns: String(messages.length),
+        },
+      });
+      navigate({ to: "/analyses/$id/orchestra", params: { id: run.run_id } });
+    } catch (err) {
+      setDispatching(false);
+      setChatError(err instanceof Error ? err.message : "派发分析失败");
+    }
   };
 
   const handleAttachMaterial = () => {
@@ -217,10 +303,15 @@ function WorkspacePage() {
                 </button>
                 <button
                   onClick={handleStartCheck}
-                  className="inline-flex h-9 items-center gap-2 rounded-sm bg-[color:var(--gold)] px-4 text-[13px] font-semibold text-[color:var(--navy-deep)] transition hover:bg-[#b8934b]"
+                  disabled={chatting || !requestText.trim()}
+                  className="inline-flex h-9 items-center gap-2 rounded-sm bg-[color:var(--gold)] px-4 text-[13px] font-semibold text-[color:var(--navy-deep)] transition hover:bg-[#b8934b] disabled:cursor-not-allowed disabled:opacity-60"
                 >
-                  <Play className="size-3.5 fill-current" />
-                  启动分析
+                  {chatting ? (
+                    <Loader2 className="size-3.5 animate-spin" />
+                  ) : (
+                    <Send className="size-3.5" />
+                  )}
+                  {chatting ? "沈北辰思考中…" : "启动分析"}
                 </button>
               </div>
             </div>
@@ -239,21 +330,36 @@ function WorkspacePage() {
                     <div>
                       <div className="text-[11px] text-muted-foreground">分析对象</div>
                       <div className="mt-0.5 font-medium text-[color:var(--navy)]">
-                        {understood.company}
+                        {companyDisplay || "待确认标的公司"}
                       </div>
                     </div>
                     <div>
                       <div className="text-[11px] text-muted-foreground">材料线索</div>
                       <div className="mt-0.5 font-medium text-[color:var(--navy)]">
-                        {prospectusMaterial || understood.material}
+                        {materialDisplay}
                       </div>
                     </div>
                     <div>
                       <div className="text-[11px] text-muted-foreground">关注重点</div>
                       <div className="mt-0.5 font-medium text-[color:var(--navy)]">
-                        {understood.focus}
+                        {focusDisplay}
                       </div>
                     </div>
+                    {understanding?.clarifying_questions?.length ? (
+                      <div>
+                        <div className="text-[11px] text-muted-foreground">待澄清</div>
+                        <div className="mt-1.5 flex flex-wrap gap-1.5">
+                          {understanding.clarifying_questions.map((q) => (
+                            <span
+                              key={q}
+                              className="rounded-sm bg-white px-2 py-1 text-[11px] text-[color:var(--navy)] ring-1 ring-[color:var(--gold)]/30"
+                            >
+                              {q}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
                   </div>
                 </div>
 
@@ -272,7 +378,11 @@ function WorkspacePage() {
                           : "bg-[color:var(--risk-mid)]/12 text-[oklch(0.45_0.12_75)]"
                       }`}
                     >
-                      {canEnterAnalysis ? "信息已补齐" : "等待材料"}
+                      {canEnterAnalysis
+                        ? "可派发 Agent 协同"
+                        : chatting
+                          ? "沈北辰思考中…"
+                          : "等待对话"}
                     </span>
                   </div>
 
@@ -321,26 +431,74 @@ function WorkspacePage() {
                     <span className="text-[11px] text-muted-foreground">
                       当前方案：{analysisDepth} · {riskRule} · {agentMode}
                     </span>
-                    {canEnterAnalysis ? (
-                      <Link
-                        to="/analyses/$id"
-                        params={{ id: analysisTargetId }}
-                        className="inline-flex h-9 items-center gap-2 rounded-sm bg-[color:var(--navy)] px-4 text-xs font-semibold text-white hover:bg-[color:var(--navy-deep)]"
-                      >
-                        进入分析流程 <ArrowRight className="size-3.5" />
-                      </Link>
-                    ) : (
-                      <button
-                        disabled
-                        className="inline-flex h-9 items-center rounded-sm bg-muted px-4 text-xs font-semibold text-muted-foreground"
-                      >
-                        进入分析流程
-                      </button>
-                    )}
+                    <button
+                      onClick={handleDispatchAnalysis}
+                      disabled={!canEnterAnalysis}
+                      className="inline-flex h-9 items-center gap-2 rounded-sm bg-[color:var(--navy)] px-4 text-xs font-semibold text-white transition hover:bg-[color:var(--navy-deep)] disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground"
+                    >
+                      {dispatching ? (
+                        <>
+                          <Loader2 className="size-3.5 animate-spin" /> 派发中…
+                        </>
+                      ) : (
+                        <>
+                          进入分析流程 <ArrowRight className="size-3.5" />
+                        </>
+                      )}
+                    </button>
                   </div>
                 </div>
               </div>
             </motion.div>
+          )}
+          {messages.length > 0 && (
+            <motion.div
+              initial={{ opacity: 0, y: 12 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.28 }}
+              className="mt-4 overflow-hidden rounded-md border border-border bg-white text-left soft-ring"
+            >
+              <div className="flex items-center justify-between border-b border-border bg-[color:var(--muted)]/40 px-4 py-2.5">
+                <div className="flex items-center gap-2">
+                  <span className="size-1.5 rounded-full bg-[color:var(--gold)]" />
+                   <span className="eyebrow text-[color:var(--navy)]/70">对话历史 · 沈北辰</span>
+                </div>
+                <span className="tabular text-[10px] uppercase tracking-wider text-muted-foreground">
+                  {messages.length} turn{messages.length > 1 ? "s" : ""}
+                </span>
+              </div>
+              <div className="max-h-80 space-y-2.5 overflow-y-auto px-4 py-3">
+                {messages.map((m, i) => (
+                  <div
+                    key={i}
+                    className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}
+                  >
+                    <div
+                      className={`max-w-[80%] whitespace-pre-wrap rounded-md px-3 py-2 text-[12.5px] leading-relaxed ${
+                        m.role === "user"
+                          ? "bg-[color:var(--navy)] text-white"
+                          : "bg-[color:var(--muted)] text-foreground"
+                      }`}
+                    >
+                      {m.content || "…"}
+                    </div>
+                  </div>
+                ))}
+                {chatting && (
+                  <div className="flex justify-start">
+                    <div className="flex items-center gap-1.5 rounded-md bg-[color:var(--muted)] px-3 py-2 text-[11px] text-muted-foreground">
+                      <span className="size-1.5 animate-pulse rounded-full bg-primary" />
+                      生成中…
+                    </div>
+                  </div>
+                )}
+              </div>
+            </motion.div>
+          )}
+          {chatError && (
+            <div className="mt-3 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-[11.5px] text-destructive">
+              {chatError}
+            </div>
           )}
           <div className="mt-3 flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
             <span>12 位 Agent 专家协同</span>

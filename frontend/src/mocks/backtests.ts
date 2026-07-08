@@ -40,7 +40,7 @@ export const backtests: BacktestSummary[] = [
     recall: 0.72,
     createdAt: "2026-06-22 16:30",
     status: "完成",
-    author: "蔡宝",
+    author: "秦秉文",
   },
   {
     id: "bt_2025_all",
@@ -54,7 +54,7 @@ export const backtests: BacktestSummary[] = [
     recall: 0.74,
     createdAt: "2026-06-20 11:08",
     status: "完成",
-    author: "沈砚",
+    author: "沈北辰",
   },
   {
     id: "bt_running",
@@ -68,6 +68,6 @@ export const backtests: BacktestSummary[] = [
     recall: 0,
     createdAt: "2026-06-25 08:40",
     status: "运行中",
-    author: "苏明哲",
+    author: "苏知几",
   },
 ];

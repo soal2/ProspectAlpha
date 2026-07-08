@@ -1,5 +1,14 @@
 import { Link, useRouterState } from "@tanstack/react-router";
-import { Home, ListChecks, Database, Users, Settings2, LineChart, Activity } from "lucide-react";
+import {
+  Home,
+  ListChecks,
+  Database,
+  Users,
+  Settings2,
+  LineChart,
+  Activity,
+  Sparkles,
+} from "lucide-react";
 import { useState, useEffect } from "react";
 import {
   Sidebar,
@@ -19,6 +28,7 @@ import type { DashboardStats } from "@/mocks/dashboard";
 
 const work = [
   { title: "工作台", url: "/", icon: Home },
+  { title: "新建分析", url: "/intake", icon: Sparkles },
   { title: "我的分析", url: "/analyses", icon: ListChecks },
 ];
 

@@ -455,7 +455,7 @@ function ReportPage() {
               需要拆分会计政策口径与真实现金转化。
             </p>
             <span className="mt-2 inline-flex items-center gap-1 text-[10px] text-muted-foreground">
-              — 周翊 · 红队 · 待复核
+              — 周慎言 · 红队 · 待复核
             </span>
           </Note>
           <Note tone="info">
@@ -464,13 +464,13 @@ function ReportPage() {
               前需解除，但本次披露文件中保留了 12 个月观察期。
             </p>
             <span className="mt-2 inline-flex items-center gap-1 text-[10px] text-muted-foreground">
-              — 温叙白 · 法务
+              — 温守正 · 法务
             </span>
           </Note>
           <Note tone="ok">
             <p>现金 runway 6.4 年远超 1.5 年高风险线，可对冲短期现金流压力。</p>
             <span className="mt-2 inline-flex items-center gap-1 text-[10px] text-muted-foreground">
-              — 蔡宝 · 财务
+              — 秦秉文 · 财务
             </span>
           </Note>
         </div>

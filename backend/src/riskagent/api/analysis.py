@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+
 from fastapi import APIRouter, HTTPException, status
+from fastapi.responses import StreamingResponse
 
 from riskagent.analysis_runs import (
     AnalysisRun,
@@ -70,6 +74,37 @@ def get_analysis_events(run_id: str, after: int = 0) -> dict[str, object]:
         return {"run_id": run_id, "events": _repo().events(run_id, after)}
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found") from exc
+
+
+@router.get("/{run_id}/stream")
+async def stream_analysis_run(run_id: str) -> StreamingResponse:
+    try:
+        _repo().get(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found") from exc
+
+    async def event_source():
+        after = 0
+        while True:
+            try:
+                run = _repo().get(run_id)
+            except KeyError:
+                yield f"data: {json.dumps({'type': 'error', 'message': 'Run not found'}, ensure_ascii=False)}\n\n"
+                return
+            new_events = _repo().events(run_id, after)
+            for event in new_events:
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+            after += len(new_events)
+            if run.status in {"completed", "failed"}:
+                yield f"data: {json.dumps({'type': 'done', 'run': run.model_dump()}, ensure_ascii=False)}\n\n"
+                return
+            await asyncio.sleep(0.5)
+
+    return StreamingResponse(
+        event_source(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.get("/{run_id}/evidence", response_model=list[RunEvidence])

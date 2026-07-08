@@ -46,6 +46,43 @@ export interface AnalysisFinding {
   requires_human_review: boolean;
 }
 
+export interface OrchestraStage {
+  key: string;
+  label: string;
+  agent: string;
+  goal: string;
+  depends_on: string[];
+  expected_outputs: string[];
+}
+
+export interface OrchestraPlan {
+  summary: string;
+  focus_areas: string[];
+  stages: OrchestraStage[];
+}
+
+export interface AskCitation {
+  block_id: string;
+  page_number: number;
+  section_path: string;
+  snippet: string;
+}
+
+export interface AskResult {
+  answer: string;
+  citations: AskCitation[];
+}
+
+export type OrchestraStageStatus = "queued" | "running" | "done" | "failed";
+
+export interface AnalysisRunEvent {
+  event_type: string;
+  actor_name: string;
+  title: string;
+  summary: string;
+  created_at?: string;
+}
+
 export interface AnalysisRun {
   run_id: string;
   company_name: string;
@@ -71,6 +108,7 @@ export interface AnalysisRun {
   };
   findings: AnalysisFinding[];
   events: { event_type: string; actor_name: string; title: string; summary: string }[];
+  orchestra_plan?: OrchestraPlan;
 }
 
 type BackendReport = {
@@ -547,6 +585,252 @@ export async function uploadDocument(file: File) {
     method: "POST",
     body: form,
   });
+}
+
+// PDF Q&A — SSE stream from POST /documents/{id}/ask
+// EventSource doesn't support POST, so we use fetch + ReadableStream reader.
+export async function askDocument(
+  documentId: string,
+  question: string,
+  onDelta: (delta: string, full: string) => void,
+  options: { topK?: number; signal?: AbortSignal } = {},
+): Promise<AskResult> {
+  if (USE_MOCK) {
+    // simulate streaming
+    const answer = `（mock 模式）基于已上传的文档「${documentId}」，对问题「${question}」的样例回答：本招股书披露了关联交易、对赌安排与现金流压力等风险因素。`;
+    let acc = "";
+    for (const ch of answer) {
+      await new Promise((r) => setTimeout(r, 12));
+      acc += ch;
+      onDelta(ch, acc);
+    }
+    return {
+      answer,
+      citations: [
+        {
+          block_id: "mock_block_1",
+          page_number: 92,
+          section_path: "风险因素 · 关联交易",
+          snippet: "报告期内，公司与关联方存在持续性的采购与销售交易安排……",
+        },
+      ],
+    };
+  }
+  const response = await fetch(`${API_BASE_URL}/documents/${documentId}/ask`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ question, top_k: options.topK ?? 6 }),
+    signal: options.signal,
+  });
+  if (!response.ok || !response.body) {
+    const text = await response.text().catch(() => "");
+    throw new Error(text || `Request failed: ${response.status}`);
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let answer = "";
+  const citations: AskCitation[] = [];
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let idx: number;
+    while ((idx = buffer.indexOf("\n\n")) >= 0) {
+      const raw = buffer.slice(0, idx).trim();
+      buffer = buffer.slice(idx + 2);
+      if (!raw.startsWith("data:")) continue;
+      const payload = raw.slice(5).trim();
+      if (!payload) continue;
+      let evt: { type: string; delta?: string; citations?: AskCitation[]; message?: string };
+      try {
+        evt = JSON.parse(payload);
+      } catch {
+        continue;
+      }
+      if (evt.type === "delta" && evt.delta) {
+        answer += evt.delta;
+        onDelta(evt.delta, answer);
+      } else if (evt.type === "done" && evt.citations) {
+        citations.push(...evt.citations);
+      } else if (evt.type === "error") {
+        throw new Error(evt.message || "LLM stream error");
+      }
+    }
+  }
+  return { answer, citations };
+}
+
+// General LLM chat — SSE stream from POST /chat (no document required)
+export interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export interface ChatUnderstanding {
+  company?: string | null;
+  focus?: string[];
+  material_hints?: string | null;
+  clarifying_questions?: string[];
+}
+
+export interface ChatResult {
+  reply: string;
+  understanding?: ChatUnderstanding;
+}
+
+export async function chatWithAssistant(
+  message: string,
+  history: ChatMessage[],
+  onDelta: (delta: string, full: string) => void,
+  options: { signal?: AbortSignal } = {},
+): Promise<ChatResult> {
+  if (USE_MOCK) {
+    const reply = `（mock 模式）已收到你的问题：「${message}」。我会基于港股 IPO 风险分析框架，从财务、法律、业务和市场四个维度切入，先确认标的公司和招股书来源，然后再派发到 Agent 协同。`;
+    let acc = "";
+    for (const ch of reply) {
+      await new Promise((r) => setTimeout(r, 12));
+      acc += ch;
+      onDelta(ch, acc);
+    }
+    return {
+      reply,
+      understanding: {
+        company: message.slice(0, 6) || null,
+        focus: ["对赌", "现金流"],
+        material_hints: null,
+        clarifying_questions: ["请提供招股书 PDF 或链接"],
+      },
+    };
+  }
+  const response = await fetch(`${API_BASE_URL}/chat`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message, history }),
+    signal: options.signal,
+  });
+  if (!response.ok || !response.body) {
+    const text = await response.text().catch(() => "");
+    throw new Error(text || `Request failed: ${response.status}`);
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let reply = "";
+  let understanding: ChatUnderstanding | undefined;
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let idx: number;
+    while ((idx = buffer.indexOf("\n\n")) >= 0) {
+      const raw = buffer.slice(0, idx).trim();
+      buffer = buffer.slice(idx + 2);
+      if (!raw.startsWith("data:")) continue;
+      const payload = raw.slice(5).trim();
+      if (!payload) continue;
+      let evt: {
+        type: string;
+        delta?: string;
+        reply?: string;
+        understanding?: ChatUnderstanding;
+        message?: string;
+      };
+      try {
+        evt = JSON.parse(payload);
+      } catch {
+        continue;
+      }
+      if (evt.type === "delta" && evt.delta) {
+        reply += evt.delta;
+        onDelta(evt.delta, reply);
+      } else if (evt.type === "done") {
+        if (evt.reply) reply = evt.reply;
+        if (evt.understanding) understanding = evt.understanding;
+      } else if (evt.type === "error") {
+        throw new Error(evt.message || "LLM stream error");
+      }
+    }
+  }
+  return { reply, understanding };
+}
+
+// Live analysis-run SSE stream — GET /analysis-runs/{id}/stream
+export async function streamAnalysisRun(
+  runId: string,
+  onEvent: (event: AnalysisRunEvent) => void,
+  onDone: (run: AnalysisRun) => void,
+  options: { signal?: AbortSignal } = {},
+): Promise<void> {
+  if (USE_MOCK) {
+    // simulate a few events then done
+    const fakeEvents: AnalysisRunEvent[] = [
+      {
+        event_type: "stage_started",
+        actor_name: "orchestrator",
+        title: "Orchestra 编排分析计划",
+        summary: "生成多阶段编队…",
+      },
+      {
+        event_type: "orchestra_plan_generated",
+        actor_name: "orchestrator",
+        title: "Orchestra 计划已生成",
+        summary: "4 个阶段",
+      },
+      {
+        event_type: "stage_completed",
+        actor_name: "orchestrator",
+        title: "Orchestra 编排完成",
+        summary: "进入解析阶段",
+      },
+    ];
+    for (const ev of fakeEvents) {
+      await new Promise((r) => setTimeout(r, 600));
+      onEvent(ev);
+    }
+    const run = await apiRequest<AnalysisRun>(`/analysis-runs/${runId}`);
+    onDone(run);
+    return;
+  }
+  const response = await fetch(`${API_BASE_URL}/analysis-runs/${runId}/stream`, {
+    method: "GET",
+    headers: { accept: "text/event-stream" },
+    signal: options.signal,
+  });
+  if (!response.ok || !response.body) {
+    const text = await response.text().catch(() => "");
+    throw new Error(text || `Request failed: ${response.status}`);
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let idx: number;
+    while ((idx = buffer.indexOf("\n\n")) >= 0) {
+      const raw = buffer.slice(0, idx).trim();
+      buffer = buffer.slice(idx + 2);
+      if (!raw.startsWith("data:")) continue;
+      const payload = raw.slice(5).trim();
+      if (!payload) continue;
+      let evt: { type: string; event?: AnalysisRunEvent; run?: AnalysisRun; message?: string };
+      try {
+        evt = JSON.parse(payload);
+      } catch {
+        continue;
+      }
+      if (evt.type === "event" && evt.event) {
+        onEvent(evt.event);
+      } else if (evt.type === "done" && evt.run) {
+        onDone(evt.run);
+        return;
+      } else if (evt.type === "error") {
+        throw new Error(evt.message || "stream error");
+      }
+    }
+  }
 }
 
 // Risk Rules

@@ -7,7 +7,7 @@ import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from riskagent.api import agents, analysis, analysis_options, documents, risk_rules
+from riskagent.api import agents, analysis, analysis_options, chat, documents, risk_rules
 
 
 def _cors_origins() -> list[str]:
@@ -40,7 +40,14 @@ def create_app() -> FastAPI:
     app.include_router(agents.router)
     app.include_router(analysis_options.router)
     app.include_router(documents.router)
+    app.include_router(chat.router)
+    app.include_router(chat.general_router)
     app.include_router(analysis.router)
+    for route in app.routes:
+        if not hasattr(route, "path") and hasattr(route, "effective_candidates"):
+            candidates = list(route.effective_candidates())
+            if candidates:
+                route.path = candidates[0].path
     return app
 
 

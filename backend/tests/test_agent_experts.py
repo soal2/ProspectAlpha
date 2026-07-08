@@ -23,7 +23,7 @@ def test_agent_experts_returns_database_rows_in_display_order(tmp_path):
         session.add(
             AgentExpertRow(
                 agent_id="L3-001",
-                name="沈砚",
+                name="沈北辰",
                 role="首席指挥官 · 总监",
                 layer="L3",
                 description="统筹全局，拆解风险维度，组建专家队、终审报告并签发。",
@@ -42,7 +42,7 @@ def test_agent_experts_returns_database_rows_in_display_order(tmp_path):
     assert repo.list_agents() == [
         {
             "id": "L3-001",
-            "name": "沈砚",
+            "name": "沈北辰",
             "role": "首席指挥官 · 总监",
             "layer": "L3",
             "desc": "统筹全局，拆解风险维度，组建专家队、终审报告并签发。",

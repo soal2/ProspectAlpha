@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
 import re
@@ -14,6 +15,7 @@ import yaml
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
+from riskagent.agents.orchestrator import orchestrate
 from riskagent.agents.supervisor import AgentTeamSupervisor
 from riskagent.common.cache import TTLCache
 from riskagent.database import SessionLocal, init_db
@@ -176,6 +178,7 @@ class AnalysisRun(BaseModel):
     optional_questions: list[str] = Field(default_factory=list)
     assumed_defaults: dict[str, str] = Field(default_factory=dict)
     inputs_frozen: bool = False
+    orchestra_plan: dict[str, Any] = Field(default_factory=dict)
     frozen_rule_snapshot: dict[str, Any] = Field(default_factory=dict, exclude=True)
     document_blocks: list[DocumentBlock] = Field(default_factory=list, exclude=True)
     findings: list[RiskFinding] = Field(default_factory=list)
@@ -334,6 +337,37 @@ class AnalysisRunRepository:
 
     def _execute_pipeline(self, run: AnalysisRun, payload: AnalysisRunCreate) -> AnalysisRun:
         try:
+            run = self._transition(run, "orchestra_planning", "stage_started", "Orchestra 编排分析计划", "基于用户需求和招股书摘要生成多阶段分析编队。")
+            try:
+                payload_for_orchestra = _payload_from_run(run)
+                doc_summary = payload_for_orchestra.document_text[:2000]
+                if not doc_summary and payload_for_orchestra.document_id:
+                    try:
+                        doc_summary = self.document_repository.get_text(payload_for_orchestra.document_id)[:2000]
+                    except Exception:
+                        doc_summary = ""
+                plan = asyncio.run(
+                    orchestrate(
+                        user_requirement=payload_for_orchestra.ipo_project_hint
+                        or payload_for_orchestra.company_name
+                        or "对招股书进行风险分析",
+                        company_name=run.company_name,
+                        document_summary=doc_summary,
+                        available_agents=self.agent_supervisor.agent_options(),
+                    )
+                )
+                run.orchestra_plan = plan.model_dump()
+                run.events.append(
+                    _event("orchestra_plan_generated", "orchestrator", "Orchestra 编排完成", "已生成多阶段分析计划。")
+                )
+            except Exception as exc:
+                run.events.append(
+                    _event("stage_failed", "orchestrator", "Orchestra 编排失败（降级运行）", str(exc)[:200])
+                )
+            finally:
+                run.events.append(_event("stage_completed", "orchestrator", "Orchestra 编排完成", "继续执行固定分析流水线。"))
+                self._save_run(run)
+
             run = self._transition(run, "parsing", "stage_started", "解析招股书材料", "开始完整解析并切分原文块。")
             parsed_blocks = self._document_blocks(payload)
             run.document_blocks = _run_blocks_from_document(run.run_id, payload, parsed_blocks)
@@ -878,6 +912,7 @@ def _build_report(run: AnalysisRun) -> ReportDraft:
 
 def _build_trace_view(run: AnalysisRun) -> AnalysisTrace:
     stages = [
+        TraceStage(key="orchestra_planning", label="Orchestra 编排", owner="orchestrator", status=_stage_status(run, "orchestra_planning")),
         TraceStage(key="ready", label="输入确认", owner="analysis_run", status=_stage_status(run, "ready")),
         TraceStage(key="queued", label="任务投递", owner="worker_dispatcher", status=_stage_status(run, "queued")),
         TraceStage(key="parsing", label="PDF 解析", owner="pdf_parser", status=_stage_status(run, "parsing")),
@@ -902,7 +937,7 @@ def _build_trace_view(run: AnalysisRun) -> AnalysisTrace:
 
 
 def _stage_status(run: AnalysisRun, key: str) -> str:
-    order = ["ready", "queued", "parsing", "indexing", "agent_running", "verifying", "reporting", "completed"]
+    order = ["orchestra_planning", "ready", "queued", "parsing", "indexing", "agent_running", "verifying", "reporting", "completed"]
     if run.current_stage == key and run.status not in {"completed", "failed"}:
         return "running"
     try:

@@ -332,14 +332,14 @@ function TracePage() {
 function DagView() {
   // simple SVG dag
   const nodes = [
-    { id: "intake", x: 90, y: 220, label: "需求", owner: "沈砚" },
-    { id: "evd", x: 260, y: 120, label: "证据采集", owner: "程哲" },
-    { id: "fin", x: 260, y: 230, label: "财务", owner: "蔡宝" },
-    { id: "legal", x: 260, y: 340, label: "法务", owner: "温叙白" },
-    { id: "cross", x: 460, y: 220, label: "交叉协同", owner: "林清越" },
-    { id: "pred", x: 640, y: 160, label: "风险预测", owner: "苏明哲" },
-    { id: "qa", x: 640, y: 280, label: "质检红队", owner: "周翊" },
-    { id: "sign", x: 830, y: 220, label: "签发", owner: "沈砚" },
+    { id: "intake", x: 90, y: 220, label: "需求", owner: "沈北辰" },
+    { id: "evd", x: 260, y: 120, label: "证据采集", owner: "程徵" },
+    { id: "fin", x: 260, y: 230, label: "财务", owner: "秦秉文" },
+    { id: "legal", x: 260, y: 340, label: "法务", owner: "温守正" },
+    { id: "cross", x: 460, y: 220, label: "交叉协同", owner: "萧则明" },
+    { id: "pred", x: 640, y: 160, label: "风险预测", owner: "苏知几" },
+    { id: "qa", x: 640, y: 280, label: "质检红队", owner: "周慎言" },
+    { id: "sign", x: 830, y: 220, label: "签发", owner: "沈北辰" },
   ];
   const edges = [
     ["intake", "evd"],
