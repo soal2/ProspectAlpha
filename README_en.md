@@ -5,9 +5,11 @@ and post-listing downside risk warning. It is designed to turn IPO documents,
 company metadata, and pre-listing market signals into evidence-grounded risk
 features, multi-agent review logs, prediction results, and reviewable reports.
 
-> Current status: architecture skeleton. The repository defines the intended
-> system boundaries and collaboration rules; production risk analysis features
-> are not implemented yet.
+> Current status: backend runtime in early shape. The FastAPI service,
+> SQLAlchemy persistence, document ingestion, risk-rule system, analysis-run
+> orchestration, and RQ worker can all run locally (see `START.md` and
+> `backend/README.md`). Specialist agents, scorecard, backtesting, and report
+> generation are still skeletons.
 
 ![Project architecture](assets/项目全景图.png)
 
@@ -46,17 +48,25 @@ The backend skeleton mirrors this architecture under `backend/src/riskagent/`:
 
 ```text
 backend/src/riskagent/
-├── ingestion/     # Source data intake
-├── parsing/       # Prospectus structure extraction
-├── retrieval/     # Evidence store and hybrid retrieval
-├── features/      # Risk feature extraction
-├── agents/        # Multi-agent orchestration boundaries
-├── skills/        # Reusable agent skills
-├── prediction/    # Scorecard and future model service
-├── backtesting/   # Evaluation and historical validation
-├── reporting/     # Markdown / HTML / PDF report generation
-├── api/           # FastAPI route boundaries
-└── common/        # Shared config, logging, exceptions, and stable types
+├── api/              # FastAPI app and routes (main + risk_rules/agents/analysis_options/documents/analysis)
+├── ingestion/        # Source data intake
+├── parsing/          # Prospectus structure extraction
+├── retrieval/        # Evidence store and hybrid retrieval
+├── features/         # Risk feature extraction
+├── agents/           # Multi-agent collaboration (incl. supervisor orchestration)
+├── skills/           # Reusable agent skills
+├── prediction/       # Scorecard and future model service
+├── backtesting/      # Evaluation and historical validation
+├── reporting/        # Markdown / HTML / PDF report generation
+├── providers/        # embedding / object_store / vector_store abstractions
+├── workers/          # Analysis task execution (inline + RQ worker)
+├── database.py       # SQLAlchemy engine / session / Base
+├── models.py         # ORM for 6 runtime tables
+├── documents.py      # Document asset ingestion
+├── analysis_runs.py  # Analysis-run state machine
+├── risk_rules.py     # Risk-rule loading and CRUD
+├── agent_experts.py  # Agent expert directory
+└── common/           # Shared config, logging, cache, exceptions, stable types
 ```
 
 ## Why ProspectAlpha
@@ -114,31 +124,32 @@ without stepping on each other:
 
 See `AGENTS.md` for repository-wide collaboration rules.
 
-## Intended Technology Stack
+## Technology Stack
 
-| Area | Planned stack |
-| --- | --- |
-| API service | FastAPI |
-| Structured data | PostgreSQL |
-| Vector retrieval | Qdrant |
-| Object storage | MinIO or local filesystem |
-| Async tasks | Celery or RQ |
-| PDF parsing | PyMuPDF, pdfplumber, optional OCR |
-| Agent orchestration | LangGraph-style state graph |
-| Structured outputs | Pydantic |
-| Prediction | Rule scorecard first, future LightGBM/XGBoost support |
-| Reports | Markdown, Jinja2, HTML, future PDF export |
-| Deployment | Docker Compose |
+| Area | Status | Choice |
+| --- | --- | --- |
+| API service | Adopted | FastAPI |
+| Structured data | Adopted | PostgreSQL (prod) / SQLite (default) + SQLAlchemy |
+| Vector retrieval | Adopted | Qdrant (default in-memory, switchable) |
+| Object storage | Adopted | MinIO or local filesystem |
+| Async tasks | Adopted | RQ + Redis |
+| PDF parsing | Adopted | PyMuPDF, pdfplumber, optional OCR |
+| Agent orchestration | Adopted | LangGraph-style state graph |
+| Structured outputs | Adopted | Pydantic |
+| Deployment | Adopted | Docker Compose |
+| Prediction | Planned | Rule scorecard first, future LightGBM/XGBoost |
+| Reports | Partial | Markdown, Jinja2, HTML; PDF export still planned |
 
 ## Repository Layout
 
 ```text
 .
 ├── assets/                         # Architecture diagrams and visual assets
-├── backend/                        # RiskAgent backend skeleton
+├── backend/                        # RiskAgent backend (FastAPI + SQLAlchemy + RQ)
 ├── frontend/                       # Frontend application
 ├── AGENTS.md                       # Repository-wide collaboration rules
-└── HK-IPO RiskAgent 项目全链路设计说明.md
+├── START.md                        # Local and Docker startup commands
+└── README.md / README_en.md        # Project README (Chinese / English)
 ```
 
 ## Project Principle

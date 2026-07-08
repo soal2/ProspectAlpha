@@ -2,7 +2,7 @@
 
 ProspectAlpha 是一个面向港股 IPO 的可解释 RiskAgent 系统，用于招股书解析与上市后下行风险预警。项目目标是将 IPO 招股书、公司基础信息和上市前市场信号转化为有证据支撑的风险特征、多智能体分析日志、预测结果和可复核报告。
 
-> 当前状态：架构骨架阶段。本仓库已经定义目标系统边界、后端模块划分和协作规则；生产级风险分析能力尚未实现。
+> 当前状态：后端运行时初具雏形。FastAPI 服务、SQLAlchemy 持久化、文档入库、风险规则体系、分析运行编排与 RQ worker 已可本地启动（详见 `START.md` 与 `backend/README.md`）；specialist agents、评分卡、回测与报告生成仍为骨架。
 
 ![项目全景图](assets/项目全景图.png)
 
@@ -38,17 +38,25 @@ ProspectAlpha 采用从数据源到风险报告的分层流水线架构。
 
 ```text
 backend/src/riskagent/
-├── ingestion/     # 数据接入
-├── parsing/       # 招股书结构化解析
-├── retrieval/     # 证据库与混合检索
-├── features/      # 风险特征抽取
-├── agents/        # 多智能体协同边界
-├── skills/        # 可复用 Agent Skill
-├── prediction/    # 规则评分卡与后续模型服务
-├── backtesting/   # 回测评估与历史验证
-├── reporting/     # Markdown / HTML / PDF 报告生成
-├── api/           # FastAPI 路由边界
-└── common/        # 配置、日志、异常和稳定类型
+├── api/              # FastAPI 应用与路由（main + risk_rules/agents/analysis_options/documents/analysis）
+├── ingestion/        # 数据接入
+├── parsing/          # 招股书结构化解析
+├── retrieval/        # 证据库与混合检索
+├── features/         # 风险特征抽取
+├── agents/           # 多智能体协同（含 supervisor 编排）
+├── skills/           # 可复用 Agent Skill
+├── prediction/       # 规则评分卡与后续模型服务
+├── backtesting/      # 回测评估与历史验证
+├── reporting/        # Markdown / HTML / PDF 报告生成
+├── providers/        # embedding / object_store / vector_store 抽象
+├── workers/          # 分析任务执行（inline + RQ worker）
+├── database.py       # SQLAlchemy 引擎 / 会话 / Base
+├── models.py         # 6 张运行时表的 ORM
+├── documents.py      # 文档资产入库
+├── analysis_runs.py  # 分析运行状态机
+├── risk_rules.py     # 风险规则加载与 CRUD
+├── agent_experts.py  # Agent 专家目录
+└── common/           # 配置、日志、缓存、异常、稳定类型
 ```
 
 ## 项目优势
@@ -96,31 +104,32 @@ IPO 风险结论只有在复核人员能看到原始依据时才有价值。Pros
 
 仓库级协作规则见 `AGENTS.md`。
 
-## 计划技术栈
+## 技术栈
 
-| 方向 | 计划技术 |
-| --- | --- |
-| API 服务 | FastAPI |
-| 结构化数据 | PostgreSQL |
-| 向量检索 | Qdrant |
-| 对象存储 | MinIO 或本地文件系统 |
-| 异步任务 | Celery 或 RQ |
-| PDF 解析 | PyMuPDF、pdfplumber、可选 OCR |
-| Agent 编排 | LangGraph 风格状态图 |
-| 结构化输出 | Pydantic |
-| 风险预测 | 规则评分卡优先，后续支持 LightGBM/XGBoost |
-| 报告生成 | Markdown、Jinja2、HTML，后续支持 PDF 导出 |
-| 部署 | Docker Compose |
+| 方向 | 状态 | 选型 |
+| --- | --- | --- |
+| API 服务 | 已采用 | FastAPI |
+| 结构化数据 | 已采用 | PostgreSQL（生产）/ SQLite（默认）+ SQLAlchemy |
+| 向量检索 | 已采用 | Qdrant（默认 in-memory，可切换） |
+| 对象存储 | 已采用 | MinIO 或本地文件系统 |
+| 异步任务 | 已采用 | RQ + Redis |
+| PDF 解析 | 已采用 | PyMuPDF、pdfplumber、可选 OCR |
+| Agent 编排 | 已采用 | LangGraph 风格状态图 |
+| 结构化输出 | 已采用 | Pydantic |
+| 部署 | 已采用 | Docker Compose |
+| 风险预测 | 计划 | 规则评分卡优先，后续支持 LightGBM/XGBoost |
+| 报告生成 | 部分 | Markdown、Jinja2、HTML；PDF 导出仍计划中 |
 
 ## 仓库结构
 
 ```text
 .
 ├── assets/                         # 架构图与视觉资产
-├── backend/                        # RiskAgent 后端骨架
+├── backend/                        # RiskAgent 后端（FastAPI + SQLAlchemy + RQ）
 ├── frontend/                       # 前端应用
 ├── AGENTS.md                       # 仓库级协作规则
-└── HK-IPO RiskAgent 项目全链路设计说明.md
+├── START.md                        # 本地与 Docker 启动命令
+└── README.md / README_en.md        # 项目说明（中 / 英）
 ```
 
 ## 项目原则
