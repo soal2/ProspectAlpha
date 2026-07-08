@@ -34,6 +34,13 @@ class RiskRule(BaseModel):
 
 
 class RiskRuleSet(BaseModel):
+    rule_set_id: str = "hk_ipo_prospectus_risk_framework_v1"
+    version: str = "v1.0"
+    name: str = "港股IPO招股书风险识别框架"
+    source_workbook: str | None = None
+    source_main_sheet: str | None = None
+    source_summary_sheet: str | None = None
+    scope: str | None = None
     usage_notes: list[str] = Field(default_factory=list)
     totals: dict[str, int] = Field(default_factory=dict)
     dimensions: list[dict[str, Any]] = Field(default_factory=list)
@@ -86,7 +93,7 @@ class RiskRuleRepository:
                 "dimensions": [],
                 "rules": [],
             }
-        # self._write_data(data)
+        self._write_data(data)
 
     def list_rule_sets(self) -> list[dict[str, Any]]:
         rule_set = self.load()

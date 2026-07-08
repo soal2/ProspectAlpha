@@ -1,4 +1,39 @@
-# Agent graph placeholder.
-# TODO: Define orchestration order, parallel agent steps, verifier gates, and report generation.
-agents: []
-edges: []
+graph_id: hk_ipo_risk_agent_team_v1
+mode: fixed_supervisor_dag
+supervisor: orchestrator
+agents:
+  - name: financial_agent
+    title: Financial specialist
+    rule_types:
+      - quantitative_financial
+  - name: legal_agent
+    title: Legal and compliance specialist
+    categories:
+      - 关联交易
+      - 对赌/赎回条款
+      - 政策监管
+      - 诉讼与纠纷
+      - 担保与质押
+      - 税务风险
+  - name: market_agent
+    title: Market and industry specialist
+    categories:
+      - 行业竞争
+  - name: business_agent
+    title: Business and disclosure specialist
+    default: true
+edges:
+  - from: orchestrator
+    to:
+      - financial_agent
+      - legal_agent
+      - business_agent
+      - market_agent
+  - from:
+      - financial_agent
+      - legal_agent
+      - business_agent
+      - market_agent
+    to: verifier
+  - from: verifier
+    to: reporter

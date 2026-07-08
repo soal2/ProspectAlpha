@@ -19,7 +19,7 @@ export const Route = createFileRoute("/analyses/$id/")({
     const [agentsList, trace, feed] = await Promise.all([
       getAgents(),
       getTraceData(params.id),
-      getEvidenceFeed(),
+      getEvidenceFeed(params.id),
     ]);
     return { agents: agentsList, trace, evidenceFeed: feed };
   },

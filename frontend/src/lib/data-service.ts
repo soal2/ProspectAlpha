@@ -12,6 +12,7 @@ import {
   intakeData,
   riskRulesData,
   backtestNewData,
+  knowledgeData,
 } from "@/mocks";
 import type {
   ReportData,
@@ -19,6 +20,9 @@ import type {
   EvidenceDetailItem,
   KnowledgeData,
   BacktestDetailData,
+  Agent,
+  DashboardStats,
+  HomepageExample,
 } from "@/mocks";
 
 export interface AnalysisFinding {
@@ -36,6 +40,7 @@ export interface AnalysisFinding {
   trigger_condition: string;
   evaluation_result: string;
   reasoning_summary: string;
+  evidence_ids?: string[];
   evidence_snippets: string[];
   matched_terms: string[];
   requires_human_review: boolean;
@@ -48,10 +53,17 @@ export interface AnalysisRun {
   current_stage: string;
   created_at: string;
   completed_at: string | null;
+  data_cutoff_date: string;
   rule_snapshot: {
     rule_set_id: string;
     version: string;
     totals: { dimension_count: number; category_count: number; rule_count: number };
+  };
+  analysis_config: {
+    risk_rule_set_id: string;
+    analysis_depth: "quick" | "standard" | "deep";
+    selected_agents: { agent_name: string; title: string }[];
+    max_findings: number;
   };
   input_summary: {
     document_text_chars: number;
@@ -61,63 +73,226 @@ export interface AnalysisRun {
   events: { event_type: string; actor_name: string; title: string; summary: string }[];
 }
 
+type BackendReport = {
+  report_id: string;
+  status: string;
+  review_status: string;
+  markdown: string;
+  html: string;
+  created_at: string;
+};
+
+type UploadedDocument = {
+  document_id: string;
+  filename: string;
+  content_type: string;
+  file_sha256: string;
+  storage_uri: string;
+  file_size_bytes: number;
+  page_count: number;
+  text_chars: number;
+  block_count: number;
+  source_url: string | null;
+  created_at: string;
+};
+
+type BackendEvidence = {
+  evidence_id: string;
+  finding_id: string;
+  document_block_id: string;
+  page_number: number;
+  section_path: string;
+  text: string;
+  bbox: number[];
+  char_start: number;
+  char_end: number;
+  source_hash: string;
+  confidence: number;
+  verifier_status: string;
+};
+
+type BackendAgent = Agent;
+
+export type AnalysisOptions = {
+  risk_rule_sets: {
+    rule_set_id: string;
+    version: string;
+    name: string;
+    rule_count: number;
+    active: boolean;
+  }[];
+  agents: {
+    agent_name: string;
+    title: string;
+    default: boolean;
+  }[];
+  analysis_depths: {
+    depth: "quick" | "standard" | "deep";
+    label: string;
+    max_findings: number;
+  }[];
+};
+
 // Mock data fetchers (replace with real API calls when backend is ready)
 async function fetchAnalyses(): Promise<typeof mockAnalyses> {
-  return [];
+  const runs = await apiRequest<AnalysisRun[]>("/analysis-runs");
+  return runs.map(toAnalysisSummary);
 }
 
 async function fetchAnalysis(id: string): Promise<(typeof mockAnalyses)[number] | null> {
-  return null;
+  try {
+    return toAnalysisSummary(await apiRequest<AnalysisRun>(`/analysis-runs/${id}`));
+  } catch (err) {
+    if (isNotFound(err)) return null;
+    throw err;
+  }
 }
 
 async function fetchAgents(): Promise<typeof mockAgents> {
-  return [];
+  return apiRequest<BackendAgent[]>("/agents");
 }
 
 async function fetchBacktests(): Promise<typeof mockBacktests> {
   return [];
 }
 
-async function fetchDashboardStats(): Promise<typeof mockDashboardStats> {
+async function fetchDashboardStats(): Promise<DashboardStats> {
+  const runs = await apiRequest<AnalysisRun[]>("/analysis-runs");
+  const totalAnalyses = runs.length;
+  const conclusions = runs.reduce((total, run) => total + run.findings.length, 0);
+  const evidenceCount = runs.reduce((total, run) => total + countRunEvidence(run), 0);
+  const crossValidated = runs.reduce(
+    (total, run) =>
+      total +
+      run.findings.filter(
+        (finding) => (finding.evidence_ids?.length ?? finding.evidence_snippets.length) >= 2,
+      ).length,
+    0,
+  );
   return {
-    totalAnalyses: 0,
-    evidenceCount: 0,
-    conclusions: 0,
-    crossValidationRate: 0,
-    hoursSaved: 0,
-    efficiency: 0,
-    avgSources: 0,
-    tokenK: 0,
+    totalAnalyses,
+    evidenceCount,
+    conclusions,
+    crossValidationRate: conclusions ? Math.round((crossValidated / conclusions) * 100) : 0,
+    hoursSaved: totalAnalyses * 4,
+    efficiency: totalAnalyses ? 6 : 0,
+    avgSources: conclusions ? Number((evidenceCount / conclusions).toFixed(1)) : 0,
+    tokenK: Math.round(
+      runs.reduce((total, run) => total + run.events.length * 1.2 + run.findings.length * 0.8, 0),
+    ),
   };
 }
 
-async function fetchHomepageExamples(): Promise<typeof homepageExamples> {
-  return [];
+async function fetchHomepageExamples(): Promise<HomepageExample[]> {
+  const ruleSet = await fetchRiskRulesData();
+  const icons = ["ShieldAlert", "FileText", "LineChart", "Building2"];
+  return ruleSet.dimensions.slice(0, 4).map((dimension, index) => ({
+    icon: icons[index] ?? "Building2",
+    title: dimension.dimension,
+    desc:
+      dimension.categories.length > 0
+        ? `覆盖 ${dimension.categories.map((item) => item.name).join("、")}，共 ${dimension.rule_count} 条规则。`
+        : `覆盖 ${dimension.rule_count} 条风险规则。`,
+  }));
 }
 
 async function fetchReportData(id: string): Promise<ReportData | null> {
-  return null;
+  try {
+    const [run, report] = await Promise.all([
+      apiRequest<AnalysisRun>(`/analysis-runs/${id}`),
+      apiRequest<BackendReport>(`/analysis-runs/${id}/report`),
+    ]);
+    return toReportData(run, report);
+  } catch (err) {
+    if (isNotFound(err)) return null;
+    throw err;
+  }
 }
 
 async function fetchTraceData(id: string): Promise<TraceData | null> {
-  return null;
+  try {
+    return apiRequest<TraceData>(`/analysis-runs/${id}/trace`);
+  } catch (err) {
+    if (isNotFound(err)) return null;
+    throw err;
+  }
 }
 
 async function fetchEvidenceDetailItems(id: string): Promise<EvidenceDetailItem[]> {
-  return [];
+  try {
+    const [run, evidence] = await Promise.all([
+      apiRequest<AnalysisRun>(`/analysis-runs/${id}`),
+      apiRequest<BackendEvidence[]>(`/analysis-runs/${id}/evidence`),
+    ]);
+    const riskByFinding = Object.fromEntries(
+      run.findings.map((finding) => [finding.finding_id, finding.category]),
+    );
+    return evidence.map((item) => ({
+      id: item.evidence_id,
+      section: item.section_path,
+      page: item.page_number,
+      conf: item.confidence,
+      snippet: item.text,
+      risk: riskByFinding[item.finding_id] ?? "风险证据",
+    }));
+  } catch (err) {
+    if (isNotFound(err)) return [];
+    throw err;
+  }
 }
 
 async function fetchKnowledgeData(): Promise<KnowledgeData> {
+  const runs = await apiRequest<AnalysisRun[]>("/analysis-runs");
+  const perRunEvidence = await Promise.all(
+    runs.map(async (run) => {
+      try {
+        return {
+          run,
+          evidence: await apiRequest<BackendEvidence[]>(`/analysis-runs/${run.run_id}/evidence`),
+        };
+      } catch (err) {
+        if (isNotFound(err)) return { run, evidence: [] };
+        throw err;
+      }
+    }),
+  );
+  const evidence = perRunEvidence.flatMap(({ run, evidence: items }) => {
+    const riskByFinding = Object.fromEntries(
+      run.findings.map((finding) => [finding.finding_id, finding.category]),
+    );
+    return items.map((item) => ({
+      id: item.evidence_id,
+      code: String(
+        (run as AnalysisRun & { structured_data?: Record<string, unknown> }).structured_data
+          ?.code ?? "IPO",
+      ),
+      name: run.company_name,
+      section: item.section_path,
+      page: item.page_number,
+      conf: item.confidence,
+      snippet: item.text,
+      risk: riskByFinding[item.finding_id] ?? item.verifier_status,
+    }));
+  });
+  const companies = [...new Set(runs.map((run) => run.company_name).filter(Boolean))];
+  const sections = [...new Set(evidence.map((item) => item.section).filter(Boolean))];
+  const risks = [...new Set(evidence.map((item) => item.risk).filter(Boolean))];
+  const preview = evidence[0];
   return {
-    facets: [],
-    evidence: [],
-    stats: { totalEvidence: 0, totalCompanies: 0 },
+    facets: [
+      { label: "公司", items: ["全部", ...companies] },
+      { label: "招股书章节", items: ["全部", ...sections] },
+      { label: "风险类别", items: ["全部", ...risks] },
+      { label: "置信度", items: ["全部", "≥ 0.9 高", "0.7–0.9 中", "< 0.7 低"] },
+    ],
+    evidence,
+    stats: { totalEvidence: evidence.length, totalCompanies: companies.length },
     preview: {
-      evidenceId: "",
-      code: "",
-      section: "",
-      page: 0,
-      linkedConclusions: [],
+      evidenceId: preview?.id ?? "",
+      code: preview?.code ?? "",
+      section: preview?.section ?? "",
+      page: preview?.page ?? 0,
+      linkedConclusions: preview ? [preview.risk] : [],
     },
   };
 }
@@ -127,24 +302,54 @@ async function fetchBacktestDetailData(id: string): Promise<BacktestDetailData |
 }
 
 async function fetchIntakeData(): Promise<typeof intakeData> {
+  const options = await fetchAnalysisOptions();
+  const activeRuleSet = options.risk_rule_sets.find((item) => item.active);
   return {
-    checks: [],
-    parsing: [],
+    checks: [
+      {
+        label: "后端 API",
+        value: API_BASE_URL,
+        ok: true,
+      },
+      {
+        label: "风险规则",
+        value: activeRuleSet
+          ? `${activeRuleSet.version} · ${activeRuleSet.rule_count} 条`
+          : "未配置",
+        ok: Boolean(activeRuleSet),
+      },
+      {
+        label: "Agent 配置",
+        value: `${options.agents.length} 个可选 Agent`,
+        ok: options.agents.length > 0,
+      },
+    ],
+    parsing: [
+      { label: "上传文档", pct: 0, status: "等待 PDF" },
+      { label: "解析原文块", pct: 0, status: "等待启动" },
+      { label: "建立检索索引", pct: 0, status: "等待启动" },
+      { label: "Agent 分析", pct: 0, status: "等待启动" },
+    ],
     uploadedFile: {
       name: "",
       pages: 0,
       size: "",
       uploadedAt: "",
     },
-    progressText: "",
+    progressText: "等待上传招股书并创建分析任务",
   };
 }
 
+async function fetchAnalysisOptions(): Promise<AnalysisOptions> {
+  return apiRequest<AnalysisOptions>("/analysis-options");
+}
+
 async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  const isFormData = init?.body instanceof FormData;
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...init,
     headers: {
-      "content-type": "application/json",
+      ...(isFormData ? {} : { "content-type": "application/json" }),
       ...(init?.headers ?? {}),
     },
   });
@@ -156,14 +361,16 @@ async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+function isNotFound(err: unknown) {
+  return err instanceof Error && err.message.includes("404");
+}
+
 async function fetchRiskRulesData(): Promise<typeof riskRulesData> {
   return apiRequest<typeof riskRulesData>("/risk-rules");
 }
 
 async function fetchBacktestNewData(): Promise<typeof backtestNewData> {
-  return {
-    steps: [],
-  };
+  return backtestNewData;
 }
 
 // Analyses
@@ -221,7 +428,7 @@ export async function getEvidenceDetailItems(id: string) {
 
 // Evidence Knowledge
 export async function getKnowledgeData() {
-  if (USE_MOCK) return fetchKnowledgeData();
+  if (USE_MOCK) return knowledgeData;
   return fetchKnowledgeData();
 }
 
@@ -237,9 +444,45 @@ export async function getIntakeData() {
   return fetchIntakeData();
 }
 
+export async function getAnalysisOptions() {
+  if (USE_MOCK) {
+    return {
+      risk_rule_sets: [
+        {
+          rule_set_id: riskRulesData.rule_set_id,
+          version: riskRulesData.version,
+          name: riskRulesData.name,
+          rule_count: riskRulesData.totals.rule_count,
+          active: true,
+        },
+      ],
+      agents: [
+        { agent_name: "financial_agent", title: "Financial specialist", default: false },
+        { agent_name: "legal_agent", title: "Legal and compliance specialist", default: false },
+        { agent_name: "market_agent", title: "Market and industry specialist", default: false },
+        {
+          agent_name: "business_agent",
+          title: "Business and disclosure specialist",
+          default: true,
+        },
+      ],
+      analysis_depths: [
+        { depth: "quick", label: "快速", max_findings: 8 },
+        { depth: "standard", label: "标准", max_findings: 20 },
+        { depth: "deep", label: "深度", max_findings: 40 },
+      ],
+    } satisfies AnalysisOptions;
+  }
+  return fetchAnalysisOptions();
+}
+
 export async function createAnalysisRun(payload: {
   company_name: string;
   document_text: string;
+  document_id?: string;
+  risk_rule_set_id?: string;
+  selected_agent_names?: string[];
+  analysis_depth?: "quick" | "standard" | "deep";
   structured_data?: Record<string, string>;
   max_findings?: number;
 }) {
@@ -260,13 +503,49 @@ export async function createAnalysisRun(payload: {
         document_text_chars: payload.document_text.length,
         structured_data_keys: Object.keys(payload.structured_data ?? {}),
       },
+      analysis_config: {
+        risk_rule_set_id: payload.risk_rule_set_id ?? riskRulesData.rule_set_id,
+        analysis_depth: payload.analysis_depth ?? "standard",
+        selected_agents: [],
+        max_findings: payload.max_findings ?? 20,
+      },
       findings: [],
       events: [],
     } satisfies AnalysisRun;
   }
-  return apiRequest<AnalysisRun>("/analysis-runs", {
+  const draft = await apiRequest<AnalysisRun>("/analysis-runs", {
     method: "POST",
     body: JSON.stringify(payload),
+  });
+  if (draft.status !== "ready") return draft;
+  const started = await apiRequest<AnalysisRun>(`/analysis-runs/${draft.run_id}/start`, {
+    method: "POST",
+  });
+  if (started.status !== "queued") return started;
+  return pollAnalysisRun(started.run_id);
+}
+
+export async function uploadDocument(file: File) {
+  if (USE_MOCK) {
+    return {
+      document_id: `mock_doc_${Date.now()}`,
+      filename: file.name,
+      content_type: file.type || "application/pdf",
+      file_sha256: "",
+      storage_uri: "",
+      file_size_bytes: file.size,
+      page_count: 0,
+      text_chars: 0,
+      block_count: 0,
+      source_url: null,
+      created_at: new Date().toISOString(),
+    } satisfies UploadedDocument;
+  }
+  const form = new FormData();
+  form.append("file", file);
+  return apiRequest<UploadedDocument>("/documents/upload", {
+    method: "POST",
+    body: form,
   });
 }
 
@@ -338,11 +617,120 @@ const evidenceFeed = [
   },
 ];
 
-async function fetchEvidenceFeed(): Promise<typeof evidenceFeed> {
-  return [];
+async function fetchEvidenceFeed(id?: string): Promise<typeof evidenceFeed> {
+  if (!id) return [];
+  const trace = await fetchTraceData(id);
+  return trace?.evidenceFeed ?? [];
 }
 
-export async function getEvidenceFeed() {
+export async function getEvidenceFeed(id?: string) {
   if (USE_MOCK) return evidenceFeed;
-  return fetchEvidenceFeed();
+  return fetchEvidenceFeed(id);
+}
+
+function toAnalysisSummary(run: AnalysisRun): (typeof mockAnalyses)[number] {
+  const structured =
+    (run as AnalysisRun & { structured_data?: Record<string, unknown> }).structured_data ?? {};
+  const evidenceCount = run.findings.reduce(
+    (total, finding) => total + finding.evidence_snippets.length,
+    0,
+  );
+  const highConfidence = run.findings.filter((finding) => finding.confidence >= 0.75).length;
+  const riskScore = scoreRun(run);
+  return {
+    id: run.run_id,
+    code: String(structured.code ?? structured.ticker ?? "IPO"),
+    name: run.company_name,
+    industry: String(structured.industry ?? "港股 IPO"),
+    listingDate: String(structured.listing_date ?? run.data_cutoff_date),
+    offerPrice: Number(structured.offer_price ?? 0),
+    offerSize: String(structured.offer_size ?? "待确认"),
+    riskLevel: riskScore >= 70 ? "high" : riskScore >= 40 ? "mid" : "low",
+    riskScore,
+    evidenceCount,
+    highConfidence,
+    mode: "expert",
+    createdAt: run.created_at,
+    experts: new Set(run.findings.map((finding) => finding.agent_name)).size || 4,
+  };
+}
+
+async function pollAnalysisRun(runId: string) {
+  const deadline = Date.now() + 90_000;
+  let latest = await apiRequest<AnalysisRun>(`/analysis-runs/${runId}`);
+  while (
+    latest.status === "queued" ||
+    latest.status === "parsing" ||
+    latest.status === "indexing" ||
+    latest.status === "agent_running" ||
+    latest.status === "verifying" ||
+    latest.status === "reporting"
+  ) {
+    if (Date.now() > deadline) return latest;
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    latest = await apiRequest<AnalysisRun>(`/analysis-runs/${runId}`);
+  }
+  return latest;
+}
+
+function countRunEvidence(run: AnalysisRun) {
+  return run.findings.reduce(
+    (total, finding) =>
+      total + Math.max(finding.evidence_ids?.length ?? 0, finding.evidence_snippets.length),
+    0,
+  );
+}
+
+function scoreRun(run: AnalysisRun) {
+  if (!run.findings.length) return 0;
+  const total = run.findings.reduce((sum, finding) => {
+    const severity = finding.severity === "high" ? 24 : finding.severity === "medium" ? 14 : 7;
+    return sum + severity * finding.confidence;
+  }, 0);
+  return Math.min(95, Math.max(10, Math.round(total)));
+}
+
+function toReportData(run: AnalysisRun, report: BackendReport): ReportData {
+  const categories = run.findings.reduce<Record<string, number>>((acc, finding) => {
+    acc[finding.category] = (acc[finding.category] ?? 0) + 1;
+    return acc;
+  }, {});
+  const toc = [
+    "执行摘要 · 风险总评",
+    "公司概览与发行信息",
+    ...Object.keys(categories).slice(0, 8),
+    "证据门禁与人工复核",
+  ];
+  const radar = ["FIN", "BUSINESS", "LEGAL", "MARKET", "GOVERNANCE"].map((dim) => ({
+    dim,
+    score: Math.min(
+      100,
+      20 + run.findings.filter((finding) => finding.dimension_code === dim).length * 18,
+    ),
+  }));
+  const pie = Object.entries(categories).map(([name, value]) => ({ name, value }));
+  const waterfall = [
+    { name: "基线", value: 20 },
+    ...run.findings.slice(0, 5).map((finding) => ({
+      name: finding.category,
+      value: finding.severity === "high" ? 12 : finding.severity === "medium" ? 8 : 4,
+    })),
+    { name: "报告", value: report.review_status === "draft" ? 0 : -5 },
+  ];
+  return {
+    id: run.run_id,
+    toc,
+    radar,
+    pie,
+    waterfall,
+    cashflow: [],
+    palette: [
+      "oklch(var(--chart-1))",
+      "oklch(var(--chart-2))",
+      "oklch(var(--chart-3))",
+      "oklch(var(--chart-4))",
+      "oklch(var(--chart-5))",
+      "oklch(var(--chart-6))",
+    ],
+  };
 }

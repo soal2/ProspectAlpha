@@ -5,8 +5,16 @@ description = "Backend skeleton for the HK-IPO RiskAgent pipeline."
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115.0",
+  "langgraph>=1.2.0",
+  "minio>=7.2.0",
+  "PyMuPDF>=1.24.0",
   "pydantic>=2.8.0",
   "PyYAML>=6.0.0",
+  "python-multipart>=0.0.9",
+  "qdrant-client>=1.12.0,<1.14.0",
+  "redis>=5.0.0",
+  "rq>=1.16.0",
+  "SQLAlchemy>=2.0.0",
   "uvicorn[standard]>=0.30.0",
 ]
 
@@ -15,9 +23,13 @@ dev = [
   "pytest>=8.3.0",
 ]
 pipeline = [
-  # Future dependencies: PostgreSQL, Qdrant, Celery/RQ, LangGraph, PyMuPDF,
-  # pdfplumber, pandas, LightGBM, Jinja2.
+  "alembic>=1.13.0",
+  "pdfplumber>=0.11.0",
+  "psycopg[binary]>=3.2.0",
 ]
+
+[project.scripts]
+prospect-alpha-worker = "riskagent.workers.rq_worker:main"
 
 [build-system]
 requires = ["setuptools>=68"]

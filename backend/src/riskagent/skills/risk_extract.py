@@ -75,6 +75,23 @@ def evaluate_text_against_rules(
 
 def _terms_for_rule(rule: RiskRule) -> list[str]:
     terms = [rule.risk_item, rule.category]
+    aliases = {
+        "对赌": ["valuation adjustment", "vAM", "ratchet"],
+        "赎回": ["redemption"],
+        "回购": ["repurchase", "buyback"],
+        "关联交易": ["related party transaction", "connected transaction"],
+        "现金流": ["cash flow"],
+        "客户": ["customer"],
+        "供应商": ["supplier"],
+        "诉讼": ["litigation", "lawsuit"],
+        "纠纷": ["dispute"],
+        "担保": ["guarantee"],
+        "质押": ["pledge"],
+        "持续经营": ["going concern"],
+        "知识产权": ["intellectual property", "patent"],
+        "税务": ["tax"],
+        "监管": ["regulatory", "regulation"],
+    }
     for token in [
         "对赌",
         "赎回",
@@ -104,6 +121,7 @@ def _terms_for_rule(rule: RiskRule) -> list[str]:
     ]:
         if token in f"{rule.risk_item} {rule.description} {rule.trigger_condition}":
             terms.append(token)
+            terms.extend(aliases.get(token, []))
     return list(dict.fromkeys(term for term in terms if term))
 
 

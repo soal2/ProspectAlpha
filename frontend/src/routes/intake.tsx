@@ -1,4 +1,4 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import {
   UploadCloud,
   Check,
@@ -6,13 +6,19 @@ import {
   Loader2,
   ArrowRight,
   Search,
-  Database,
   Settings2,
   Users,
   ShieldAlert,
 } from "lucide-react";
-import { useState, useEffect } from "react";
-import { createAnalysisRun, getIntakeData, type AnalysisRun } from "@/lib/data-service";
+import { useRef, useState, useEffect } from "react";
+import {
+  createAnalysisRun,
+  getAnalysisOptions,
+  getIntakeData,
+  uploadDocument,
+  type AnalysisRun,
+  type AnalysisOptions,
+} from "@/lib/data-service";
 
 export const Route = createFileRoute("/intake")({
   head: () => ({
@@ -34,12 +40,6 @@ const workflowSteps = [
   { label: "启动分析", desc: "解析后派发 Agent 协同", icon: ArrowRight },
 ];
 
-const analysisConfigs = [
-  { label: "风险规则版本", value: "hk_ipo_prospectus_risk_framework_v1", icon: Settings2 },
-  { label: "Agent 专家组", value: "rule_agent · 规则快照驱动", icon: Users },
-  { label: "知识库增强", value: "开启 · 招股书证据 + 历史案例", icon: Database },
-];
-
 const sampleText =
   "招股书披露公司存在关联交易及对赌/赎回安排，前五大供应商采购占比较高。" +
   "报告期内经营活动现金流持续为负，且部分章节存在前瞻性陈述和免责声明。";
@@ -47,37 +47,42 @@ const sampleText =
 const sampleStructuredData = "供应商集中度=Top5 采购占比 80%\n经营活动现金流=连续两期为负";
 
 function IntakePage() {
-  const [analysisId] = useState(() => {
-    const now = new Date();
-    const hkt = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Hong_Kong" }));
-    const dateKey = `${hkt.getFullYear()}${hkt.getMonth()}${hkt.getDate()}`;
-    const stored = sessionStorage.getItem(`sid-${dateKey}`);
-    if (stored) {
-      const m = stored.match(/#([A-Z])-(\d{4})/);
-      if (m) return `ana_${m[1].toLowerCase()}${m[2]}`;
-    }
-    const prefix = String.fromCharCode(65 + Math.floor(Math.random() * 26));
-    const num = String(hkt.getHours()).padStart(2, "0") + String(hkt.getMinutes()).padStart(2, "0");
-    return `ana_${prefix.toLowerCase()}${num}`;
-  });
-
+  const navigate = useNavigate();
   const [data, setData] = useState<{
     checks: { label: string; value: string; ok: boolean }[];
     parsing: { label: string; pct: number; status: string }[];
     uploadedFile: { name: string; pages: number; size: string; uploadedAt: string };
     progressText: string;
   } | null>(null);
+  const [options, setOptions] = useState<AnalysisOptions | null>(null);
   const [companyName, setCompanyName] = useState("宁德时代 · A1 申请稿");
   const [documentText, setDocumentText] = useState(sampleText);
   const [structuredDataText, setStructuredDataText] = useState(sampleStructuredData);
   const [analysisRun, setAnalysisRun] = useState<AnalysisRun | null>(null);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
+  const [selectedRuleSetId, setSelectedRuleSetId] = useState("");
+  const [selectedAgentNames, setSelectedAgentNames] = useState<string[]>([]);
+  const [analysisDepth, setAnalysisDepth] = useState<"quick" | "standard" | "deep">("standard");
+  const [uploadedDocument, setUploadedDocument] = useState<{
+    document_id: string;
+    filename: string;
+    page_count: number;
+    file_size_bytes: number;
+    created_at: string;
+  } | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    getIntakeData().then((d) => {
-      if (!cancelled) setData(d);
+    Promise.all([getIntakeData(), getAnalysisOptions()]).then(([intake, loadedOptions]) => {
+      if (cancelled) return;
+      setData(intake);
+      setOptions(loadedOptions);
+      setSelectedRuleSetId(
+        loadedOptions.risk_rule_sets.find((item) => item.active)?.rule_set_id ?? "",
+      );
+      setSelectedAgentNames(loadedOptions.agents.map((item) => item.agent_name));
     });
     return () => {
       cancelled = true;
@@ -144,21 +149,37 @@ function IntakePage() {
               上传招股书 PDF，系统将绑定公司基础信息并准备进入解析流程
             </p>
             <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:items-center">
-              <button className="inline-flex items-center justify-center gap-2 rounded-full bg-primary px-5 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90">
-                <UploadCloud className="size-4" /> 选择文件
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="application/pdf,.pdf"
+                className="hidden"
+                onChange={(event) => {
+                  const file = event.currentTarget.files?.[0];
+                  if (file) void handlePdfUpload(file);
+                }}
+              />
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                className="inline-flex items-center justify-center gap-2 rounded-full bg-primary px-5 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+              >
+                <UploadCloud className="size-4" /> {uploadedDocument ? "重新选择 PDF" : "选择文件"}
               </button>
               <span className="text-xs text-muted-foreground">或拖拽 PDF 到此处</span>
             </div>
 
-            {data?.uploadedFile.name && (
+            {(uploadedDocument || data?.uploadedFile.name) && (
               <div className="mt-6 rounded-xl border border-border bg-card/80 p-4">
                 <div className="flex items-center gap-3">
                   <FileText className="size-5 text-primary" />
                   <div className="min-w-0 flex-1">
-                    <div className="truncate text-sm font-medium">{data.uploadedFile.name}</div>
+                    <div className="truncate text-sm font-medium">
+                      {uploadedDocument?.filename ?? data?.uploadedFile.name}
+                    </div>
                     <div className="text-xs text-muted-foreground">
-                      {data.uploadedFile.pages} 页 · {data.uploadedFile.size} · 上传于{" "}
-                      {data.uploadedFile.uploadedAt}
+                      {uploadedDocument
+                        ? `${uploadedDocument.page_count} 页 · ${formatBytes(uploadedDocument.file_size_bytes)} · 已解析`
+                        : `${data?.uploadedFile.pages} 页 · ${data?.uploadedFile.size} · 上传于 ${data?.uploadedFile.uploadedAt}`}
                     </div>
                   </div>
                   <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary">
@@ -203,28 +224,78 @@ function IntakePage() {
             <div className="flex items-center justify-between">
               <h2 className="font-serif text-xl font-semibold">分析配置</h2>
               <span className="rounded-full bg-primary/8 px-2.5 py-1 text-[11px] font-medium text-primary">
-                仅展示
+                真实配置
               </span>
             </div>
             <p className="mt-1 text-sm text-muted-foreground">
-              本轮分析将沿用当前风险规则、知识库与专家组设置，不新增真实配置写入
+              选择本轮分析使用的风险规则、LangGraph Agent 和分析深度
             </p>
-            <div className="mt-4 space-y-3">
-              {analysisConfigs.map((item) => (
-                <div
-                  key={item.label}
-                  className="flex items-center gap-3 rounded-xl border border-border bg-background px-4 py-3"
+            <div className="mt-4 space-y-4">
+              <label className="block text-xs font-medium text-muted-foreground">
+                风险规则
+                <select
+                  value={selectedRuleSetId}
+                  onChange={(event) => setSelectedRuleSetId(event.target.value)}
+                  className="mt-1 h-10 w-full rounded-md border border-border bg-background px-3 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
                 >
-                  <div className="grid size-9 place-items-center rounded-lg bg-primary/8 text-primary">
-                    <item.icon className="size-4" />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="text-xs text-muted-foreground">{item.label}</div>
-                    <div className="truncate text-sm font-medium">{item.value}</div>
-                  </div>
-                  <Check className="size-4 text-[color:var(--risk-low)]" />
+                  {options?.risk_rule_sets.map((ruleSet) => (
+                    <option key={ruleSet.rule_set_id} value={ruleSet.rule_set_id}>
+                      {ruleSet.name} · {ruleSet.version} · {ruleSet.rule_count} 条
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <div>
+                <div className="text-xs font-medium text-muted-foreground">Agent 使用</div>
+                <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                  {options?.agents.map((agent) => {
+                    const checked = selectedAgentNames.includes(agent.agent_name);
+                    return (
+                      <label
+                        key={agent.agent_name}
+                        className="flex items-center gap-2 rounded-lg border border-border bg-background px-3 py-2 text-sm"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={(event) => {
+                            setSelectedAgentNames((current) =>
+                              event.target.checked
+                                ? [...current, agent.agent_name]
+                                : current.filter((name) => name !== agent.agent_name),
+                            );
+                          }}
+                        />
+                        <span className="min-w-0 truncate">{agent.title}</span>
+                      </label>
+                    );
+                  })}
                 </div>
-              ))}
+              </div>
+
+              <div>
+                <div className="text-xs font-medium text-muted-foreground">分析深度</div>
+                <div className="mt-2 grid grid-cols-3 gap-2">
+                  {options?.analysis_depths.map((depth) => (
+                    <button
+                      key={depth.depth}
+                      type="button"
+                      onClick={() => setAnalysisDepth(depth.depth)}
+                      className={`rounded-lg border px-3 py-2 text-left text-sm ${
+                        analysisDepth === depth.depth
+                          ? "border-primary bg-primary/10 text-primary"
+                          : "border-border bg-background"
+                      }`}
+                    >
+                      <span className="block font-medium">{depth.label}</span>
+                      <span className="block text-[11px] text-muted-foreground">
+                        上限 {depth.max_findings} 条
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -267,13 +338,19 @@ function IntakePage() {
           <p className="text-xs text-muted-foreground">
             文档解析完成后可派发到多 Agent 协同分析。所有上市后行情仅用于回测，不会进入分析输入。
           </p>
-          <Link
-            to="/analyses/$id"
-            params={{ id: analysisId }}
-            className="inline-flex items-center gap-1.5 rounded-full bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+          <button
+            type="button"
+            onClick={() => void runRuleAgent(true)}
+            disabled={analyzing || (!documentText.trim() && !uploadedDocument)}
+            className="inline-flex items-center gap-1.5 rounded-full bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            派发到 Agent 协同 <ArrowRight className="size-4" />
-          </Link>
+            {analyzing ? (
+              <Loader2 className="size-4 animate-spin" />
+            ) : (
+              <ArrowRight className="size-4" />
+            )}
+            派发到 Agent 协同
+          </button>
         </div>
       </div>
 
@@ -319,8 +396,8 @@ function IntakePage() {
           ) : null}
 
           <button
-            onClick={() => void runRuleAgent()}
-            disabled={analyzing || !documentText.trim()}
+            onClick={() => void runRuleAgent(false)}
+            disabled={analyzing || (!documentText.trim() && !uploadedDocument)}
             className="mt-5 inline-flex items-center gap-2 rounded-full bg-primary px-5 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {analyzing ? (
@@ -408,21 +485,41 @@ function IntakePage() {
     </div>
   );
 
-  async function runRuleAgent() {
+  async function runRuleAgent(openAfterComplete: boolean) {
     setAnalyzing(true);
     setAnalysisError(null);
     try {
+      if (!selectedRuleSetId) throw new Error("请先选择风险规则");
+      if (!selectedAgentNames.length) throw new Error("请至少选择一个 Agent");
       const run = await createAnalysisRun({
         company_name: companyName,
-        document_text: documentText,
+        document_text: uploadedDocument ? "" : documentText,
+        document_id: uploadedDocument?.document_id,
+        risk_rule_set_id: selectedRuleSetId,
+        selected_agent_names: selectedAgentNames,
+        analysis_depth: analysisDepth,
         structured_data: parseStructuredData(structuredDataText),
-        max_findings: 20,
+        max_findings:
+          options?.analysis_depths.find((item) => item.depth === analysisDepth)?.max_findings ?? 20,
       });
       setAnalysisRun(run);
+      if (openAfterComplete) {
+        await navigate({ to: "/analyses/$id", params: { id: run.run_id } });
+      }
     } catch (err) {
       setAnalysisError(err instanceof Error ? err.message : "规则 Agent 分析失败");
     } finally {
       setAnalyzing(false);
+    }
+  }
+
+  async function handlePdfUpload(file: File) {
+    setAnalysisError(null);
+    try {
+      const document = await uploadDocument(file);
+      setUploadedDocument(document);
+    } catch (err) {
+      setAnalysisError(err instanceof Error ? err.message : "PDF 上传失败");
     }
   }
 }
@@ -448,4 +545,10 @@ function parseStructuredData(text: string): Record<string, string> {
       })
       .filter(([key, value]) => key && value),
   );
+}
+
+function formatBytes(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
