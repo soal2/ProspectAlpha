@@ -43,6 +43,16 @@ function EvidencePage() {
 
   const [sortBy, setSortBy] = useState<SortBy>("confidence");
 
+  const facetCount = (label: string) => {
+    if (!data) return 0;
+    if (label === "公司") return data.stats.totalCompanies;
+    if (label === "置信度") return 4;
+    if (label === "招股书章节")
+      return new Set(data.evidence.map((e) => e.section).filter(Boolean)).size;
+    if (label === "风险类别") return new Set(data.evidence.map((e) => e.risk).filter(Boolean)).size;
+    return 0;
+  };
+
   useEffect(() => {
     let cancelled = false;
     getKnowledgeData().then((d) => {
@@ -80,7 +90,7 @@ function EvidencePage() {
                       className={`flex w-full items-center justify-between rounded-md px-2 py-1 text-left ${i === 0 ? "bg-primary/8 text-primary" : "text-muted-foreground hover:bg-accent"}`}
                     >
                       <span>{it}</span>
-                      <span className="text-[10px] tabular">{[24, 18, 12, 6][i] ?? 0}</span>
+                      <span className="text-[10px] tabular">{facetCount(f.label)}</span>
                     </button>
                   </li>
                 ))}

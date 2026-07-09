@@ -179,12 +179,26 @@ function RealtimeStream() {
     const eventFlow = liveEvents.map((event, index) => eventToBubble(event, run.created_at, index));
     return mergeBubbles(traceFlow, eventFlow);
   }, [liveEvents, run.created_at, trace]);
-  const filteredEvidence = evidenceFeed.filter((item) =>
-    `${item.source} ${item.title} ${item.id}`.toLowerCase().includes(filter.toLowerCase()),
+  const liveEvidenceFeed = useMemo(
+    () => mergeEvidenceFeed(evidenceFeed, liveEvents),
+    [evidenceFeed, liveEvents],
+  );
+  const filteredLiveEvidence = liveEvidenceFeed.filter((item) =>
+    `${item.source} ${item.title} ${item.id} ${item.snippet ?? ""}`
+      .toLowerCase()
+      .includes(filter.toLowerCase()),
   );
   const completedStages = stages.filter((stage) => stage.status === "done").length;
   const progress = stages.length ? Math.round((completedStages / stages.length) * 100) : 0;
   const visibleAgents = agentsList.slice(0, Math.max(analysis.experts, 6));
+  const activeAgentCount =
+    new Set([
+      ...run.analysis_config.selected_agents.map((agent) => agent.agent_name),
+      ...liveEvents
+        .filter((event) => ["agent_selected", "rules_assigned"].includes(event.event_type))
+        .map((event) => event.actor_name)
+        .filter(Boolean),
+    ]).size || visibleAgents.length;
 
   return (
     <div className="flex h-[calc(100vh-3.5rem)] min-h-[680px] flex-col bg-background">
@@ -226,7 +240,10 @@ function RealtimeStream() {
             </span>
           )}
           <span className="inline-flex items-center gap-1">
-            <FileText className="size-3.5" /> {evidenceFeed.length} 条证据
+            <FileText className="size-3.5" /> {liveEvidenceFeed.length} 条证据
+          </span>
+          <span className="inline-flex items-center gap-1">
+            <Users className="size-3.5" /> {activeAgentCount || visibleAgents.length} 位专家
           </span>
           <div className="flex items-center gap-2">
             <div className="h-1.5 w-28 overflow-hidden rounded-full bg-muted">
@@ -364,7 +381,7 @@ function RealtimeStream() {
             <span className="flex items-center gap-2">
               <Database className="size-3.5 text-primary" /> 证据库（实时）
             </span>
-            <span className="tabular text-muted-foreground">{filteredEvidence.length}</span>
+            <span className="tabular text-muted-foreground">{filteredLiveEvidence.length}</span>
           </div>
           <div className="relative mt-3">
             <Search className="pointer-events-none absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
@@ -376,7 +393,7 @@ function RealtimeStream() {
             />
           </div>
           <div className="mt-4 space-y-2.5">
-            {filteredEvidence.map((item) => (
+            {filteredLiveEvidence.map((item) => (
               <div key={item.id} className="rounded-lg border border-border bg-background p-3">
                 <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
                   <span
@@ -393,12 +410,17 @@ function RealtimeStream() {
                   <span className="ml-auto tabular">可信度 {Math.round(item.conf * 100)}</span>
                 </div>
                 <div className="mt-1.5 text-xs font-medium leading-snug">{item.title}</div>
+                {item.snippet ? (
+                  <p className="mt-1.5 line-clamp-3 text-[11px] leading-relaxed text-muted-foreground">
+                    {item.snippet}
+                  </p>
+                ) : null}
                 <button className="mt-2 inline-flex items-center gap-1 text-[11px] text-primary hover:underline">
                   查看原文 <ExternalLink className="size-3" />
                 </button>
               </div>
             ))}
-            {!filteredEvidence.length ? (
+            {!filteredLiveEvidence.length ? (
               <div className="mt-16 text-center text-xs text-muted-foreground">
                 <FileText className="mx-auto mb-2 size-8 opacity-40" />
                 证据采集中，稍候片刻……
@@ -407,20 +429,27 @@ function RealtimeStream() {
           </div>
         </aside>
       </div>
+      <FloatingTracePanel
+        run={run}
+        stages={stages}
+        events={liveEvents}
+        activeAgents={activeAgentCount}
+      />
     </div>
   );
 }
 
 function fallbackStages(run: AnalysisRun) {
   const order = [
-    ["ready", "输入确认", "analysis_run"],
-    ["queued", "任务投递", "worker_dispatcher"],
-    ["parsing", "PDF 解析", "pdf_parser"],
-    ["indexing", "检索索引", "hybrid_search"],
-    ["agent_running", "Agent 团队分析", "orchestrator"],
-    ["verifying", "证据门禁", "verifier"],
-    ["reporting", "报告生成", "reporter"],
-    ["completed", "签发交付", "analysis_run"],
+    ["task_understanding", "任务理解", "任务理解专家"],
+    ["pdf_parsing", "PDF 解析", "PDF 解析器"],
+    ["expert_orchestration", "专家编排", "沈北辰"],
+    ["evidence_extraction", "证据抽取", "证据检索专家"],
+    ["risk_identification", "风险识别", "专业 Agent 团队"],
+    ["cross_validation", "交叉验证", "证据审计专家"],
+    ["report_generation", "报告生成", "报告撰写专家"],
+    ["quality_review", "质检审裁", "质检审裁专家"],
+    ["completed", "交付完成", "analysis_run"],
   ];
   const current = order.findIndex(([key]) => key === run.current_stage);
   return order.map(([key, label, owner], index) => ({
@@ -434,6 +463,140 @@ function fallbackStages(run: AnalysisRun) {
           ? "running"
           : "queued",
   }));
+}
+
+function mergeEvidenceFeed(
+  seed: EvidenceFeedItem[],
+  events: AnalysisRunEvent[],
+): EvidenceFeedItem[] {
+  const fromEvents = events
+    .filter((event) => event.event_type === "evidence_found")
+    .map((event, index) => {
+      const payload = event.payload ?? {};
+      return {
+        id: String(payload.evidence_id ?? `live-${index}`),
+        source: event.actor_name,
+        title: event.title.replace("发现证据：", ""),
+        conf: Number(payload.confidence ?? 0),
+        time: event.created_at ? formatClock(event.created_at) : "近实时",
+        page: Number(payload.page_number ?? 0),
+        snippet: event.summary,
+      };
+    });
+  const byId = new Map<string, EvidenceFeedItem>();
+  [...seed, ...fromEvents].forEach((item) => byId.set(item.id, item));
+  return [...byId.values()];
+}
+
+function formatClock(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value.match(/T(\d{2}:\d{2}:\d{2})/)?.[1] ?? value;
+  }
+  const hkt = new Date(date.getTime() + 8 * 60 * 60 * 1000);
+  return hkt.toISOString().slice(11, 19);
+}
+
+function FloatingTracePanel({
+  run,
+  stages,
+  events,
+  activeAgents,
+}: {
+  run: AnalysisRun;
+  stages: { key: string; label: string; owner: string; status: string; cost?: string }[];
+  events: AnalysisRunEvent[];
+  activeAgents: number;
+}) {
+  const [open, setOpen] = useState(true);
+  const [visible, setVisible] = useState(true);
+  const [pos, setPos] = useState({ x: 24, y: 84 });
+  const dragging = useRef<{ dx: number; dy: number } | null>(null);
+  if (!visible) return null;
+  const currentStage = stages.find((stage) => stage.status === "running") ?? stages.at(-1);
+  const toolCalls = events.filter((event) => event.event_type.startsWith("tool_")).length;
+  const recent = events.slice(-4).reverse();
+  return (
+    <div
+      className="fixed z-40 w-80 rounded-lg border border-border bg-card/95 shadow-xl backdrop-blur"
+      style={{ right: pos.x, top: pos.y }}
+    >
+      <div
+        className="flex cursor-move items-center justify-between border-b border-border px-3 py-2 text-xs"
+        onMouseDown={(event) => {
+          dragging.current = { dx: event.clientX + pos.x, dy: event.clientY - pos.y };
+          const move = (moveEvent: MouseEvent) => {
+            if (!dragging.current) return;
+            setPos({
+              x: Math.max(12, dragging.current.dx - moveEvent.clientX),
+              y: Math.max(56, moveEvent.clientY - dragging.current.dy),
+            });
+          };
+          const up = () => {
+            dragging.current = null;
+            window.removeEventListener("mousemove", move);
+            window.removeEventListener("mouseup", up);
+          };
+          window.addEventListener("mousemove", move);
+          window.addEventListener("mouseup", up);
+        }}
+      >
+        <span className="font-medium">Agent Trace</span>
+        <div className="flex items-center gap-1">
+          <button
+            onClick={() => setOpen((v) => !v)}
+            className="rounded px-1 text-muted-foreground hover:bg-muted"
+          >
+            {open ? "收起" : "展开"}
+          </button>
+          <button
+            onClick={() => setVisible(false)}
+            className="rounded px-1 text-muted-foreground hover:bg-muted"
+          >
+            关闭
+          </button>
+        </div>
+      </div>
+      {open ? (
+        <div className="space-y-3 p-3 text-[11px]">
+          <div className="grid grid-cols-3 gap-2 text-center">
+            <div className="rounded bg-muted/60 p-2">
+              <div className="text-muted-foreground">工具调用</div>
+              <div className="tabular text-sm font-semibold">{toolCalls}</div>
+            </div>
+            <div className="rounded bg-muted/60 p-2">
+              <div className="text-muted-foreground">活跃专家</div>
+              <div className="tabular text-sm font-semibold">{activeAgents}</div>
+            </div>
+            <div className="rounded bg-muted/60 p-2">
+              <div className="text-muted-foreground">Token</div>
+              <div className="tabular text-sm font-semibold">未上报</div>
+            </div>
+          </div>
+          <div>
+            <div className="text-muted-foreground">当前执行步骤</div>
+            <div className="mt-1 rounded border border-border bg-background px-2 py-1.5">
+              {currentStage?.label ?? run.current_stage} · {run.status}
+            </div>
+          </div>
+          <div>
+            <div className="text-muted-foreground">最近事件</div>
+            <div className="mt-1 space-y-1">
+              {recent.map((event, index) => (
+                <div
+                  key={`${event.created_at}-${index}`}
+                  className="rounded bg-background px-2 py-1"
+                >
+                  <span className="font-medium">{event.action_label ?? event.event_type}</span>
+                  <span className="ml-1 text-muted-foreground">{event.title}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 function eventToBubble(event: AnalysisRunEvent, runCreatedAt: string, index: number): Bubble {

@@ -13,7 +13,7 @@ services:
       VECTOR_STORE_PROVIDER: qdrant
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: root
-      MINIO_SECRET_KEY: root
+      MINIO_SECRET_KEY: root1234
       MINIO_SECURE: "0"
       OBJECT_STORE_PROVIDER: minio
       OBJECT_STORE_BUCKET: prospect-alpha
@@ -106,7 +106,7 @@ services:
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: root
-      MINIO_ROOT_PASSWORD: root
+      MINIO_ROOT_PASSWORD: root1234
     ports:
       - "9000:9000"
       - "9001:9001"

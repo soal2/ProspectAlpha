@@ -6,6 +6,7 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
 
 from riskagent.documents import (
     DocumentAsset,
+    DocumentBlock,
     DocumentCreate,
     DocumentRepository,
     get_default_document_repository,
@@ -48,5 +49,13 @@ async def upload_document(
 def get_document(document_id: str) -> DocumentAsset:
     try:
         return _repo().get(document_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found") from exc
+
+
+@router.get("/{document_id}/blocks", response_model=list[DocumentBlock])
+def get_document_blocks(document_id: str) -> list[DocumentBlock]:
+    try:
+        return _repo().get_blocks(document_id)
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found") from exc

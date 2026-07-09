@@ -64,6 +64,9 @@ export interface HomepageExample {
 
 export interface ReportData {
   id: string;
+  markdown: string;
+  reviewStatus: string;
+  createdAt: string;
   toc: string[];
   radar: { dim: string; score: number }[];
   pie: { name: string; value: number }[];
@@ -76,7 +79,7 @@ export interface TraceStage {
   key: string;
   label: string;
   owner: string;
-  status: "done" | "running" | "queued";
+  status: "done" | "running" | "queued" | "failed";
   cost?: string | null;
 }
 
@@ -100,6 +103,8 @@ export interface EvidenceFeedItem {
   title: string;
   conf: number;
   time: string;
+  page?: number | null;
+  snippet?: string | null;
 }
 
 export interface TraceData {

@@ -26,6 +26,10 @@ from riskagent.documents import (
 )
 from riskagent.risk_rules import RiskRuleRepository, get_default_repository
 from riskagent.skills.risk_extract import RuleEvaluation
+from riskagent.skills.risk_skill_registry import (
+    skill_for_rule,
+    skills_for_agents,
+)
 from riskagent.models import AnalysisRunRow, EvidenceLibraryRow
 from riskagent.retrieval.hybrid import HybridSearchIndex
 from riskagent.workers.analysis import dispatch_analysis_job
@@ -35,6 +39,18 @@ BACKEND_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ANALYSIS_RUNS_PATH = BACKEND_ROOT / "data" / "processed" / "analysis_runs.yaml"
 DEFAULT_EVIDENCE_LIBRARY_PATH = BACKEND_ROOT / "data" / "processed" / "evidence_library.yaml"
 PARSER_VERSION = "local-text-parser-v1"
+
+PIPELINE_STAGES: list[tuple[str, str, str]] = [
+    ("task_understanding", "任务理解", "任务理解专家"),
+    ("pdf_parsing", "PDF 解析", "PDF 解析器"),
+    ("expert_orchestration", "专家编排", "沈北辰"),
+    ("evidence_extraction", "证据抽取", "证据检索专家"),
+    ("risk_identification", "风险识别", "专业 Agent 团队"),
+    ("cross_validation", "交叉验证", "证据审计专家"),
+    ("report_generation", "报告生成", "报告撰写专家"),
+    ("quality_review", "质检审裁", "质检审裁专家"),
+    ("completed", "交付完成", "analysis_run"),
+]
 
 
 class AnalysisRunCreate(BaseModel):
@@ -105,6 +121,7 @@ class VerificationResult(BaseModel):
 class RiskFinding(BaseModel):
     finding_id: str
     agent_name: str = "rule_agent"
+    skill_id: str | None = None
     rule_set_id: str
     rule_version: str
     rule_id: str
@@ -153,6 +170,8 @@ class TraceEvidenceItem(BaseModel):
     title: str
     conf: float
     time: str
+    page: int | None = None
+    snippet: str | None = None
 
 
 class AnalysisTrace(BaseModel):
@@ -244,7 +263,15 @@ class AnalysisRunRepository:
                 "agent_group": "selected" if payload.selected_agent_names else "default",
             },
             events=[
-                _event("stage_started", "analysis_run", "创建分析任务", "已完成信息完整性检查。"),
+                _event(
+                    "stage_started",
+                    "analysis_run",
+                    "创建分析任务",
+                    "已完成信息完整性检查，等待用户确认默认规则、专家队伍与分析深度。",
+                    stage_key="task_understanding",
+                    stage_status="ready" if status == "ready" else "waiting_user",
+                    action_label="任务创建",
+                ),
             ],
             input_payload=payload,
         )
@@ -284,12 +311,31 @@ class AnalysisRunRepository:
         run.current_stage = "queued"
         run.inputs_frozen = True
         run.events.append(
-            _event("stage_completed", "analysis_run", "任务已投递", "输入、规则快照和数据截止日期已冻结。")
+            _event(
+                "stage_completed",
+                "analysis_run",
+                "任务已投递",
+                "输入、规则快照和数据截止日期已冻结，后续 Agent 只读取本次快照。",
+                stage_key="task_understanding",
+                stage_status="completed",
+                action_label="输入冻结",
+                payload={"rule_set_id": run.rule_snapshot["rule_set_id"], "version": run.rule_snapshot["version"]},
+            )
         )
         self._save_run(run)
         job_id = dispatch_analysis_job(run.run_id, self)
         run = self.get(run.run_id)
-        run.events.append(_event("tool_called", "worker_dispatcher", "后台任务已创建", f"job_id={job_id}"))
+        run.events.append(
+            _event(
+                "tool_started",
+                "worker_dispatcher",
+                "后台任务已创建",
+                f"job_id={job_id}",
+                stage_key="task_understanding",
+                action_label="worker dispatch",
+                metrics={"tool_calls": 1},
+            )
+        )
         self._save_run(run)
         return run
 
@@ -337,7 +383,93 @@ class AnalysisRunRepository:
 
     def _execute_pipeline(self, run: AnalysisRun, payload: AnalysisRunCreate) -> AnalysisRun:
         try:
-            run = self._transition(run, "orchestra_planning", "stage_started", "Orchestra 编排分析计划", "基于用户需求和招股书摘要生成多阶段分析编队。")
+            run = self._transition(
+                run,
+                "task_understanding",
+                "stage_started",
+                "任务理解专家已收到请求",
+                "根据招股书 PDF 分析该公司的港股 IPO 上市风险。",
+                actor_name="task_understanding_agent",
+                action_label="理解任务",
+            )
+            run.understood = _understood(payload)
+            run.events.append(
+                _event(
+                    "stage_completed",
+                    "task_understanding_agent",
+                    "系统识别到本次任务属于港股 IPO 招股书风险分析",
+                    "默认关注财务风险、业务风险、合规风险、估值风险与上市后破发风险。",
+                    stage_key="task_understanding",
+                    stage_status="completed",
+                    action_label="任务确认",
+                    payload=run.understood,
+                )
+            )
+            self._save_run(run)
+
+            run = self._transition(
+                run,
+                "pdf_parsing",
+                "stage_started",
+                "PDF 解析器开始解析招股书材料",
+                "解析文本、页码、章节、bbox，并为后续 Agent 建立可回溯材料底座。",
+                actor_name="pdf_parser",
+                action_label="解析中",
+            )
+            parsed_blocks = self._document_blocks(payload)
+            run.document_blocks = _run_blocks_from_document(run.run_id, payload, parsed_blocks)
+            text = _merge_text_and_data(
+                "\n\n".join(block.text for block in run.document_blocks),
+                payload.structured_data,
+            )
+            block_stats = _document_block_stats(run.document_blocks)
+            run.events.append(
+                _event(
+                    "tool_completed",
+                    "pdf_parser",
+                    "招股书原文块解析完成",
+                    f"已提取 {len(run.document_blocks)} 个关键段落、{block_stats['table_blocks']} 张表格、{block_stats['risk_tagged_blocks']} 条风险相关原文块。",
+                    stage_key="pdf_parsing",
+                    action_label="解析完成",
+                    metrics=block_stats,
+                )
+            )
+            run.events.append(
+                _event(
+                    "tool_started",
+                    "hybrid_search",
+                    "建立材料检索索引",
+                    "将 document_blocks 写入轻量全文和语义检索索引，后续 Agent 不重复读取原始 PDF。",
+                    stage_key="pdf_parsing",
+                    action_label="建立索引",
+                    metrics={"tool_calls": 1},
+                )
+            )
+            self.search_cache.clear()
+            indexed_count = self.search_index.index_blocks(run_id=run.run_id, blocks=run.document_blocks)
+            run.events.append(
+                _event(
+                    "stage_completed",
+                    "hybrid_search",
+                    "PDF 解析与材料索引已就绪",
+                    f"已索引 {indexed_count} 个 document_blocks，索引以原文块为事实源。",
+                    stage_key="pdf_parsing",
+                    stage_status="completed",
+                    action_label="材料库就绪",
+                    metrics={"indexed_blocks": indexed_count, **block_stats},
+                )
+            )
+            self._save_run(run)
+
+            run = self._transition(
+                run,
+                "expert_orchestration",
+                "stage_started",
+                "沈北辰开始选择专家编队",
+                "根据任务和风险维度选择 Domain Skills，并从冻结规则快照分配规则。",
+                actor_name="orchestrator",
+                action_label="专家编排",
+            )
             try:
                 payload_for_orchestra = _payload_from_run(run)
                 doc_summary = payload_for_orchestra.document_text[:2000]
@@ -358,74 +490,328 @@ class AnalysisRunRepository:
                 )
                 run.orchestra_plan = plan.model_dump()
                 run.events.append(
-                    _event("orchestra_plan_generated", "orchestrator", "Orchestra 编排完成", "已生成多阶段分析计划。")
+                    _event(
+                        "orchestra_plan_generated",
+                        "orchestrator",
+                        "Orchestra 编排完成",
+                        "已生成多阶段分析计划。",
+                        stage_key="expert_orchestration",
+                        action_label="计划生成",
+                        payload=run.orchestra_plan,
+                    )
                 )
             except Exception as exc:
                 run.events.append(
-                    _event("stage_failed", "orchestrator", "Orchestra 编排失败（降级运行）", str(exc)[:200])
+                    _event(
+                        "stage_failed",
+                        "orchestrator",
+                        "Orchestra 编排失败（降级运行）",
+                        str(exc)[:200],
+                        stage_key="expert_orchestration",
+                        action_label="降级",
+                    )
                 )
-            finally:
-                run.events.append(_event("stage_completed", "orchestrator", "Orchestra 编排完成", "继续执行固定分析流水线。"))
-                self._save_run(run)
-
-            run = self._transition(run, "parsing", "stage_started", "解析招股书材料", "开始完整解析并切分原文块。")
-            parsed_blocks = self._document_blocks(payload)
-            run.document_blocks = _run_blocks_from_document(run.run_id, payload, parsed_blocks)
-            text = _merge_text_and_data(
-                "\n\n".join(block.text for block in run.document_blocks),
-                payload.structured_data,
+            selected_skills = skills_for_agents(payload.selected_agent_names)
+            run.events.extend(
+                _event(
+                    "agent_selected",
+                    skill.agent_name,
+                    f"{skill.role_zh}加入本次风险调研",
+                    f"启用 {skill.skill_id}，将按冻结规则快照检索和输出结构化证据。",
+                    stage_key="expert_orchestration",
+                    skill_id=skill.skill_id,
+                    agent_role=skill.role_zh,
+                    action_label="专家入场",
+                    payload={"skill_id": skill.skill_id, "agent_name": skill.agent_name},
+                )
+                for skill in selected_skills
             )
-            run.events.append(
-                _event("stage_completed", "pdf_parser", "原文块解析完成", f"生成 {len(run.document_blocks)} 个可回溯原文块。")
-            )
-
-            run = self._transition(run, "indexing", "stage_started", "建立检索索引", "建立轻量全文和语义检索候选。")
-            self.search_cache.clear()
-            indexed_count = self.search_index.index_blocks(run_id=run.run_id, blocks=run.document_blocks)
             run.events.append(
                 _event(
                     "stage_completed",
-                    "hybrid_search",
-                    "检索索引已就绪",
-                    f"已索引 {indexed_count} 个 document_blocks，索引以原文块为事实源。",
+                    "orchestrator",
+                    "专家编排完成",
+                    f"已选择 {len(selected_skills)} 位专家参与本次风险调研。",
+                    stage_key="expert_orchestration",
+                    stage_status="completed",
+                    action_label="编排完成",
+                    metrics={"selected_agents": len(selected_skills)},
                 )
             )
+            self._save_run(run)
 
-            run = self._transition(run, "agent_running", "agent_started", "LangGraph Agent 团队开始分析", "按 active 规则快照执行结构化风险抽取。")
+            run = self._transition(
+                run,
+                "evidence_extraction",
+                "stage_started",
+                "证据抽取阶段开始",
+                "专业 Agent 根据各自 Skill 与冻结规则快照检索招股书材料。",
+                actor_name="orchestrator",
+                action_label="证据抽取",
+            )
             max_findings = _effective_max_findings(payload)
             team_result = self.agent_supervisor.run(
                 text=text,
                 max_findings=max_findings,
                 selected_agent_names=payload.selected_agent_names,
+                rule_snapshot=run.frozen_rule_snapshot,
             )
-            run.findings = self._findings_from_evaluations(team_result.evaluations, max_findings)
+            candidate_findings = self._findings_from_evaluations(team_result.evaluations, max_findings)
             run.events.extend(team_result.events)
-            run.evidence = self._evidence_for_findings(run.run_id, run.findings, run.document_blocks)
+            run.evidence = self._evidence_for_findings(run.run_id, candidate_findings, run.document_blocks)
+            before_dedupe = len(run.evidence)
+            run.evidence = _dedupe_evidence(run.evidence)
+            for item in run.evidence[:50]:
+                finding = next((candidate for candidate in candidate_findings if candidate.finding_id == item.finding_id), None)
+                run.events.append(
+                    _event(
+                        "evidence_found",
+                        finding.agent_name if finding else "evidence_extractor",
+                        f"发现证据：{finding.title if finding else item.section_path}",
+                        f"{item.section_path} 第 {item.page_number} 页：{item.text[:80]}",
+                        stage_key="evidence_extraction",
+                        skill_id=finding.skill_id if finding else None,
+                        action_label="发现",
+                        payload={
+                            "evidence_id": item.evidence_id,
+                            "finding_id": item.finding_id,
+                            "page_number": item.page_number,
+                            "bbox": item.bbox,
+                            "confidence": item.confidence,
+                        },
+                    )
+                )
+            run.events.append(
+                _event(
+                    "evidence_deduped",
+                    "evidence_audit_skill",
+                    "证据审计专家完成初步去重",
+                    f"去重 {before_dedupe - len(run.evidence)} 条重复证据，保留 {len(run.evidence)} 条有效证据。",
+                    stage_key="evidence_extraction",
+                    skill_id="evidence_audit_skill",
+                    agent_role="证据审计专家",
+                    action_label="去重",
+                    metrics={"before": before_dedupe, "after": len(run.evidence)},
+                )
+            )
+            run.events.append(
+                _event(
+                    "stage_completed",
+                    "evidence_extractor",
+                    "证据抽取完成",
+                    f"已形成 {len(candidate_findings)} 条候选风险判断并绑定 {len(run.evidence)} 条 PDF 原文证据。",
+                    stage_key="evidence_extraction",
+                    stage_status="completed",
+                    action_label="证据库更新",
+                )
+            )
+            self._save_run(run)
 
-            run = self._transition(run, "verifying", "stage_started", "Verifier 证据门禁", "校验证据存在性和报告准入状态。")
+            run = self._transition(
+                run,
+                "risk_identification",
+                "stage_started",
+                "风险识别阶段开始",
+                "专家基于规则命中与证据材料形成初步风险判断。",
+                actor_name="orchestrator",
+                action_label="风险识别",
+            )
+            run.findings = candidate_findings
+            for finding in run.findings:
+                run.events.append(
+                    _event(
+                        "risk_finding_created",
+                        finding.agent_name,
+                        f"形成初步风险判断：{finding.title}",
+                        finding.reasoning_summary,
+                        stage_key="risk_identification",
+                        skill_id=finding.skill_id,
+                        action_label="形成判断",
+                        payload={
+                            "finding_id": finding.finding_id,
+                            "rule_id": finding.rule_id,
+                            "severity": finding.severity,
+                            "confidence": finding.confidence,
+                            "evidence_ids": finding.evidence_ids,
+                        },
+                    )
+                )
+            run.events.append(
+                _event(
+                    "stage_completed",
+                    "orchestrator",
+                    "风险识别完成",
+                    f"已形成 {len(run.findings)} 条结构化风险判断，等待交叉验证。",
+                    stage_key="risk_identification",
+                    stage_status="completed",
+                    action_label="判断汇总",
+                )
+            )
+            self._save_run(run)
+
+            run = self._transition(
+                run,
+                "cross_validation",
+                "stage_started",
+                "交叉验证阶段开始",
+                "证据审计专家检查每条风险判断是否有 PDF 原文证据支撑。",
+                actor_name="verifier",
+                action_label="交叉验证",
+            )
             run.verification_results = _verify_findings(run.findings, run.evidence)
             _apply_verification(run.findings, run.evidence, run.verification_results)
+            for result in run.verification_results:
+                finding = next((item for item in run.findings if item.finding_id == result.finding_id), None)
+                run.events.append(
+                    _event(
+                        "risk_finding_verified",
+                        "verifier",
+                        f"验证风险判断：{finding.title if finding else result.finding_id}",
+                        result.reason,
+                        stage_key="cross_validation",
+                        skill_id="evidence_audit_skill",
+                        agent_role="证据审计专家",
+                        action_label="校验",
+                        payload=result.model_dump(),
+                    )
+                )
             run.events.append(
-                _event("verification_completed", "verifier", "证据门禁完成", "仅 supported/weakly_supported/needs_human_review 进入报告。")
+                _event(
+                    "stage_completed",
+                    "verifier",
+                    "交叉验证完成",
+                    "仅 supported/weakly_supported/needs_human_review 进入报告。",
+                    stage_key="cross_validation",
+                    stage_status="completed",
+                    skill_id="evidence_audit_skill",
+                    action_label="验证完成",
+                )
             )
+            self._save_run(run)
 
-            run = self._transition(run, "reporting", "stage_started", "生成报告草案", "Reporter 只读取已验证 finding 与证据。")
+            run = self._transition(
+                run,
+                "report_generation",
+                "stage_started",
+                "报告撰写专家开始生成风险报告",
+                "报告只读取已验证 finding 与证据引用。",
+                actor_name="reporter",
+                action_label="报告生成",
+            )
             run.report = _build_report(run)
-            run.events.append(_event("report_section_generated", "reporter", "报告草案已生成", "review_status=draft。"))
+            run.events.append(
+                _event(
+                    "report_section_generated",
+                    "reporter",
+                    "报告草案已生成",
+                    "已完成公司基本信息、核心风险、各风险维度、证据引用与总结建议章节。",
+                    stage_key="report_generation",
+                    action_label="章节生成",
+                    metrics={"report_chars": len(run.report.markdown)},
+                )
+            )
+            run.events.append(
+                _event(
+                    "stage_completed",
+                    "reporter",
+                    "报告生成完成",
+                    "等待质检审裁。",
+                    stage_key="report_generation",
+                    stage_status="completed",
+                    action_label="报告完成",
+                )
+            )
+            self._save_run(run)
+
+            run = self._transition(
+                run,
+                "quality_review",
+                "stage_started",
+                "质检审裁专家开始检查最终报告",
+                "检查核心判断证据、页码引用、风险等级一致性与无证据结论。",
+                actor_name="quality_reviewer",
+                action_label="质检",
+            )
+            qa_result = _quality_review(run)
+            if run.report:
+                run.report.review_status = qa_result["review_status"]
+            if qa_result["issues"]:
+                for issue in qa_result["issues"]:
+                    run.events.append(
+                        _event(
+                            "qa_issue_found",
+                            "quality_reviewer",
+                            "发现风险判断证据不足",
+                            issue,
+                            stage_key="quality_review",
+                            skill_id="quality_review_skill",
+                            agent_role="质检审裁专家",
+                            action_label="退回补充",
+                        )
+                    )
+            else:
+                run.events.append(
+                    _event(
+                        "qa_passed",
+                        "quality_reviewer",
+                        "质检审裁通过",
+                        "所有核心结论均附有可回溯证据来源。",
+                        stage_key="quality_review",
+                        skill_id="quality_review_skill",
+                        agent_role="质检审裁专家",
+                        action_label="通过",
+                    )
+                )
+            run.events.append(
+                _event(
+                    "stage_completed",
+                    "quality_reviewer",
+                    "质检审裁完成",
+                    f"review_status={qa_result['review_status']}。",
+                    stage_key="quality_review",
+                    stage_status="completed",
+                    action_label="审裁完成",
+                    metrics={"issues": len(qa_result["issues"])},
+                )
+            )
             promoted = self._promote_supported_evidence(run)
-            run.events.append(_event("stage_completed", "evidence_library", "证据晋升完成", f"晋升 {promoted} 条 supported 原文证据。"))
+            run.events.append(
+                _event(
+                    "tool_completed",
+                    "evidence_library",
+                    "证据晋升完成",
+                    f"晋升 {promoted} 条 supported 原文证据。",
+                    stage_key="quality_review",
+                    action_label="证据沉淀",
+                )
+            )
 
             run.status = "completed"
             run.current_stage = "completed"
             run.completed_at = _now()
-            run.events.append(_event("stage_completed", "analysis_run", "分析完成", "端到端分析链路已完成。"))
+            run.events.append(
+                _event(
+                    "stage_completed",
+                    "analysis_run",
+                    "风险调研任务已完成",
+                    "最终报告已生成，核心结论均可查看完整证据链。",
+                    stage_key="completed",
+                    stage_status="completed",
+                    action_label="交付完成",
+                    metrics={
+                        "evidence_count": len(run.evidence),
+                        "finding_count": len(run.findings),
+                        "agent_count": len(selected_skills),
+                    },
+                )
+            )
             self.search_cache.collect_garbage()
             self._save_run(run)
             return run
         except Exception as exc:
             run.status = "failed"
             run.current_stage = "failed"
-            run.events.append(_event("stage_failed", "analysis_run", "分析失败", str(exc)))
+            run.events.append(_event("stage_failed", "analysis_run", "分析失败", str(exc), stage_key=run.current_stage))
             self.search_cache.collect_garbage()
             self._save_run(run)
             raise
@@ -465,10 +851,23 @@ class AnalysisRunRepository:
         event_type: str,
         title: str,
         summary: str,
+        *,
+        actor_name: str | None = None,
+        action_label: str | None = None,
     ) -> AnalysisRun:
         run.status = stage
         run.current_stage = stage
-        run.events.append(_event(event_type, stage, title, summary))
+        run.events.append(
+            _event(
+                event_type,
+                actor_name or stage,
+                title,
+                summary,
+                stage_key=stage,
+                stage_status="running",
+                action_label=action_label,
+            )
+        )
         return run
 
     def _findings_from_evaluations(
@@ -483,6 +882,7 @@ class AnalysisRunRepository:
                 RiskFinding(
                     finding_id=f"finding_{idx:03d}",
                     agent_name=item.source_type if item.source_type.endswith("_agent") else _agent_for_evaluation(item),
+                    skill_id=item.skill_id or _skill_id_for_evaluation(item),
                     rule_set_id=item.rule_set_id,
                     rule_version=item.rule_version,
                     rule_id=item.rule_id,
@@ -511,6 +911,8 @@ class AnalysisRunRepository:
         evidence: list[RunEvidence] = []
         for finding in findings:
             candidates = self._hybrid_search(run_id, finding)
+            if not candidates:
+                candidates = _block_candidates_for_finding(finding, blocks)
             for candidate in candidates[:2]:
                 evidence_id = f"ev_{uuid.uuid4().hex[:10]}"
                 evidence.append(
@@ -858,6 +1260,79 @@ def _verify_findings(findings: list[RiskFinding], evidence: list[RunEvidence]) -
     return results
 
 
+def _document_block_stats(blocks: list[DocumentBlock]) -> dict[str, int]:
+    risk_terms = [
+        "风险",
+        "现金流",
+        "客户",
+        "供应商",
+        "关联交易",
+        "诉讼",
+        "合规",
+        "毛利率",
+        "破发",
+        "估值",
+        "redemption",
+        "cash flow",
+        "litigation",
+    ]
+    return {
+        "text_blocks": sum(1 for block in blocks if block.block_type == "text"),
+        "table_blocks": sum(1 for block in blocks if block.block_type == "table"),
+        "image_blocks": sum(1 for block in blocks if block.block_type == "image_ocr"),
+        "risk_tagged_blocks": sum(
+            1
+            for block in blocks
+            if any(term.lower() in block.text.lower() for term in risk_terms)
+        ),
+    }
+
+
+def _dedupe_evidence(evidence: list[RunEvidence]) -> list[RunEvidence]:
+    seen: set[tuple[str, str]] = set()
+    deduped: list[RunEvidence] = []
+    for item in evidence:
+        key = (item.finding_id, item.source_hash or item.document_block_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
+
+
+def _block_candidates_for_finding(
+    finding: RiskFinding,
+    blocks: list[DocumentBlock],
+) -> list[dict[str, Any]]:
+    terms = [
+        term
+        for term in [finding.category, finding.title, *finding.matched_terms]
+        if term
+    ]
+    candidates = []
+    for block in blocks:
+        text = block.text.lower()
+        hits = [term for term in terms if term.lower() in text]
+        if not hits:
+            continue
+        score = min(0.95, 0.62 + len(set(hits)) * 0.08)
+        candidates.append(
+            {
+                "block_id": block.block_id,
+                "page_number": block.page_number,
+                "section_path": block.section_path,
+                "text": block.text,
+                "bbox": block.bbox,
+                "char_start": block.char_start,
+                "char_end": block.char_end,
+                "source_hash": block.source_hash,
+                "score": score,
+            }
+        )
+    candidates.sort(key=lambda item: item["score"], reverse=True)
+    return candidates
+
+
 def _apply_verification(
     findings: list[RiskFinding],
     evidence: list[RunEvidence],
@@ -871,35 +1346,129 @@ def _apply_verification(
         item.verifier_status = status_by_finding.get(item.finding_id, "needs_human_review")
 
 
+def _quality_review(run: AnalysisRun) -> dict[str, Any]:
+    evidence_by_id = {item.evidence_id: item for item in run.evidence}
+    issues: list[str] = []
+    for finding in run.findings:
+        linked = [evidence_by_id[evidence_id] for evidence_id in finding.evidence_ids if evidence_id in evidence_by_id]
+        if not linked:
+            issues.append(f"{finding.finding_id} / {finding.title} 缺少 PDF 原文证据。")
+            continue
+        if any(item.page_number <= 0 or not item.bbox or not item.source_hash for item in linked):
+            issues.append(f"{finding.finding_id} / {finding.title} 的页码、bbox 或 source_hash 不完整。")
+        if finding.severity == "high" and all(item.verifier_status != "supported" for item in linked):
+            issues.append(f"{finding.finding_id} / {finding.title} 为高风险但缺少 supported 证据。")
+    return {
+        "review_status": "draft" if not issues else "needs_human_review",
+        "issues": issues,
+    }
+
+
 def _build_report(run: AnalysisRun) -> ReportDraft:
     allowed = {"supported", "weakly_supported", "needs_human_review"}
     status_by_finding = {item.finding_id: item.status for item in run.verification_results}
     report_findings = [
         finding for finding in run.findings if status_by_finding.get(finding.finding_id) in allowed
     ]
+    evidence_by_id = {item.evidence_id: item for item in run.evidence}
+    grouped: dict[str, list[RiskFinding]] = {}
+    for finding in report_findings:
+        grouped.setdefault(_report_section_for_finding(finding), []).append(finding)
+
     lines = [
         f"# {run.company_name} IPO 风险分析草案",
         "",
         f"- 数据截止日期：{run.data_cutoff_date}",
         f"- 规则版本：{run.rule_snapshot['rule_set_id']} / {run.rule_snapshot['version']}",
-        "- 复核状态：draft",
+        "- 复核状态：待质检",
+        f"- 核心风险判断：{len(report_findings)} 条",
+        f"- PDF 原文证据：{len(run.evidence)} 条",
         "",
-        "## 关键风险发现",
+        "## 公司基本信息",
+        "",
+        f"- 公司名称：{run.company_name}",
+        "- 上市市场：港股 IPO（基于用户输入与默认分析任务识别）",
+        "- 招股书类型：招股书 / 申请版本材料（以上传文件为准）",
+        "",
+        "## 招股书关键信息摘要",
+        "",
+        f"- 已解析原文块：{len(run.document_blocks)} 个",
+        f"- 覆盖章节：{', '.join(sorted({block.section_path for block in run.document_blocks})[:8]) or '待识别'}",
+        "- 后续判断均要求回溯至 document_blocks、页码、bbox 与 source_hash。",
+        "",
+        "## 核心风险结论",
     ]
     for finding in report_findings:
         status = status_by_finding.get(finding.finding_id, "needs_human_review")
+        refs = [
+            evidence_by_id[evidence_id]
+            for evidence_id in finding.evidence_ids
+            if evidence_id in evidence_by_id
+        ]
+        ref_text = "；".join(
+            f"{item.evidence_id}（第 {item.page_number} 页，{item.section_path}）"
+            for item in refs[:3]
+        ) or "等待人工补证"
         lines.extend(
             [
                 "",
                 f"### {finding.title}",
                 f"- 规则：{finding.rule_id}",
+                f"- Skill：{finding.skill_id or '未标注'}",
                 f"- 严重程度：{finding.severity}",
                 f"- 证据门禁：{status}",
+                f"- 证据引用：{ref_text}",
                 f"- 摘要：{finding.reasoning_summary}",
             ]
         )
     if not report_findings:
         lines.append("未发现满足证据门禁的关键风险结论。")
+    section_titles = [
+        "财务风险分析",
+        "业务风险分析",
+        "行业与竞争风险分析",
+        "合规风险分析",
+        "估值与破发风险分析",
+    ]
+    for title in section_titles:
+        lines.extend(["", f"## {title}"])
+        items = grouped.get(title, [])
+        if not items:
+            lines.append("本轮未形成该维度的高置信结构化风险判断，建议人工复核招股书相关章节。")
+            continue
+        for finding in items:
+            refs = [
+                evidence_by_id[evidence_id]
+                for evidence_id in finding.evidence_ids
+                if evidence_id in evidence_by_id
+            ]
+            first_ref = refs[0] if refs else None
+            lines.append(
+                f"- {finding.title}：{finding.reasoning_summary}"
+                + (f"（证据：第 {first_ref.page_number} 页，{first_ref.section_path}）" if first_ref else "（证据：待补充）")
+            )
+    lines.extend(
+        [
+            "",
+            "## 风险等级",
+            "",
+            f"- 综合风险等级：{_overall_risk_level(report_findings)}",
+            "- 等级口径：依据触发规则数量、严重程度、证据强度和是否需要人工复核综合判断。",
+            "",
+            "## 证据引用",
+            "",
+        ]
+    )
+    for item in run.evidence[:30]:
+        lines.append(f"- {item.evidence_id}：第 {item.page_number} 页 / {item.section_path} / 可信度 {item.confidence:.2f} / {item.text[:120]}")
+    lines.extend(
+        [
+            "",
+            "## 总结建议",
+            "",
+            "建议在正式投委会或上市风险评审前，对 weakly_supported 与 needs_human_review 判断进行人工复核，并重点核对现金流、客户供应商集中、关联交易、诉讼监管和发行估值相关章节。",
+        ]
+    )
     markdown = "\n".join(lines)
     html = markdown.replace("\n", "<br>")
     return ReportDraft(
@@ -910,17 +1479,28 @@ def _build_report(run: AnalysisRun) -> ReportDraft:
     )
 
 
+def _report_section_for_finding(finding: RiskFinding) -> str:
+    if finding.skill_id == "financial_risk_skill" or finding.rule_type == "quantitative_financial":
+        return "财务风险分析"
+    if finding.skill_id == "legal_compliance_skill":
+        return "合规风险分析"
+    if finding.skill_id == "market_valuation_skill" or finding.category in {"行业竞争", "估值", "发行定价", "破发风险"}:
+        return "估值与破发风险分析"
+    return "业务风险分析"
+
+
+def _overall_risk_level(findings: list[RiskFinding]) -> str:
+    if any(finding.severity == "high" and not finding.requires_human_review for finding in findings):
+        return "高"
+    if len(findings) >= 3:
+        return "中"
+    return "低" if findings else "待判断"
+
+
 def _build_trace_view(run: AnalysisRun) -> AnalysisTrace:
     stages = [
-        TraceStage(key="orchestra_planning", label="Orchestra 编排", owner="orchestrator", status=_stage_status(run, "orchestra_planning")),
-        TraceStage(key="ready", label="输入确认", owner="analysis_run", status=_stage_status(run, "ready")),
-        TraceStage(key="queued", label="任务投递", owner="worker_dispatcher", status=_stage_status(run, "queued")),
-        TraceStage(key="parsing", label="PDF 解析", owner="pdf_parser", status=_stage_status(run, "parsing")),
-        TraceStage(key="indexing", label="检索索引", owner="hybrid_search", status=_stage_status(run, "indexing")),
-        TraceStage(key="agent_running", label="LangGraph Agent 团队", owner="orchestrator", status=_stage_status(run, "agent_running")),
-        TraceStage(key="verifying", label="证据门禁", owner="verifier", status=_stage_status(run, "verifying")),
-        TraceStage(key="reporting", label="报告生成", owner="reporter", status=_stage_status(run, "reporting")),
-        TraceStage(key="completed", label="签发交付", owner="analysis_run", status=_stage_status(run, "completed")),
+        TraceStage(key=key, label=label, owner=owner, status=_stage_status(run, key))
+        for key, label, owner in PIPELINE_STAGES
     ]
     flow = [_trace_event(run.created_at, event) for event in run.events]
     evidence = [
@@ -930,6 +1510,8 @@ def _build_trace_view(run: AnalysisRun) -> AnalysisTrace:
             title=f"{item.section_path} P.{item.page_number}",
             conf=round(item.confidence, 4),
             time="近实时",
+            page=item.page_number,
+            snippet=item.text,
         )
         for item in run.evidence[:20]
     ]
@@ -937,7 +1519,7 @@ def _build_trace_view(run: AnalysisRun) -> AnalysisTrace:
 
 
 def _stage_status(run: AnalysisRun, key: str) -> str:
-    order = ["orchestra_planning", "ready", "queued", "parsing", "indexing", "agent_running", "verifying", "reporting", "completed"]
+    order = [item[0] for item in PIPELINE_STAGES]
     if run.current_stage == key and run.status not in {"completed", "failed"}:
         return "running"
     try:
@@ -958,13 +1540,13 @@ def _trace_event(run_created_at: str, event: dict[str, Any]) -> TraceEvent:
 
 
 def _trace_kind(event_type: str) -> str:
-    if event_type in {"agent_started", "stage_started", "tool_called"}:
+    if event_type in {"agent_started", "stage_started", "tool_called", "tool_started", "rules_assigned"}:
         return "execute"
-    if event_type in {"agent_completed", "stage_completed", "report_section_generated"}:
+    if event_type in {"agent_completed", "stage_completed", "report_section_generated", "evidence_found", "risk_finding_created", "evidence_deduped"}:
         return "discover"
-    if event_type == "verification_completed":
+    if event_type in {"verification_completed", "risk_finding_verified", "qa_passed"}:
         return "verdict"
-    if event_type == "stage_failed":
+    if event_type in {"stage_failed", "qa_issue_found"}:
         return "challenge"
     return "assign"
 
@@ -1029,14 +1611,30 @@ def _agent_for_evaluation(item: RuleEvaluation) -> str:
     return "business_agent"
 
 
-def _event(event_type: str, actor_name: str, title: str, summary: str) -> dict[str, Any]:
-    return {
+def _skill_id_for_evaluation(item: RuleEvaluation) -> str | None:
+    try:
+        rule = RiskRuleRepository().get_rule(item.rule_id)
+    except Exception:
+        return None
+    return skill_for_rule(rule).skill_id
+
+
+def _event(
+    event_type: str,
+    actor_name: str,
+    title: str,
+    summary: str,
+    **extra: Any,
+) -> dict[str, Any]:
+    event = {
         "event_type": event_type,
         "actor_name": actor_name,
         "title": title,
         "summary": summary,
         "created_at": _now(),
     }
+    event.update({key: value for key, value in extra.items() if value is not None})
+    return event
 
 
 def _now() -> str:

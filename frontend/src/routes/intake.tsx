@@ -15,9 +15,10 @@ import {
 import { useRef, useState, useEffect } from "react";
 import {
   askDocument,
-  createAnalysisRun,
+  createAnalysisDraft,
   getAnalysisOptions,
   getIntakeData,
+  startAnalysisRun,
   uploadDocument,
   type AnalysisRun,
   type AnalysisOptions,
@@ -63,6 +64,7 @@ function IntakePage() {
   const [documentText, setDocumentText] = useState(sampleText);
   const [structuredDataText, setStructuredDataText] = useState(sampleStructuredData);
   const [analysisRun, setAnalysisRun] = useState<AnalysisRun | null>(null);
+  const [draftRun, setDraftRun] = useState<AnalysisRun | null>(null);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [selectedRuleSetId, setSelectedRuleSetId] = useState("");
@@ -440,7 +442,7 @@ function IntakePage() {
           </p>
           <button
             type="button"
-            onClick={() => void runRuleAgent(true)}
+            onClick={() => void createDraftForConfirmation()}
             disabled={analyzing || (!documentText.trim() && !uploadedDocument)}
             className="inline-flex items-center gap-1.5 rounded-full bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
           >
@@ -449,9 +451,55 @@ function IntakePage() {
             ) : (
               <ArrowRight className="size-4" />
             )}
-            派发到 Agent 协同
+            {draftRun ? "重新生成确认信息" : "识别任务并确认"}
           </button>
         </div>
+        {draftRun ? (
+          <div className="mt-5 rounded-xl border border-primary/20 bg-primary/5 p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <div className="text-sm font-semibold">确认本次港股 IPO 招股书风险调研任务</div>
+                <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                  我们识别到你上传或选择的是「
+                  {draftRun.understood?.company_name ?? draftRun.company_name}」
+                  的招股书材料。本次任务将重点分析财务风险、业务风险、合规风险、估值风险与上市后破发风险。
+                </p>
+                <div className="mt-3 flex flex-wrap gap-2 text-[11px]">
+                  <span className="rounded-full bg-background px-2 py-1">
+                    类型：港股 IPO 招股书风险分析
+                  </span>
+                  <span className="rounded-full bg-background px-2 py-1">
+                    规则：{draftRun.rule_snapshot.version}
+                  </span>
+                  <span className="rounded-full bg-background px-2 py-1">
+                    专家：{draftRun.analysis_config.selected_agents.length} 位
+                  </span>
+                  <span className="rounded-full bg-background px-2 py-1">
+                    深度：{draftRun.analysis_config.analysis_depth}
+                  </span>
+                </div>
+                {draftRun.blocking_questions?.length ? (
+                  <div className="mt-3 rounded-md border border-destructive/20 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+                    {draftRun.blocking_questions.join("；")}
+                  </div>
+                ) : null}
+              </div>
+              <button
+                type="button"
+                onClick={() => void startConfirmedDraft()}
+                disabled={analyzing || draftRun.status !== "ready"}
+                className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {analyzing ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <ArrowRight className="size-4" />
+                )}
+                开始专家协作分析
+              </button>
+            </div>
+          </div>
+        ) : null}
       </div>
 
       <div className="mt-8 grid gap-6 xl:grid-cols-[0.95fr_1.05fr]">
@@ -591,26 +639,67 @@ function IntakePage() {
     try {
       if (!selectedRuleSetId) throw new Error("请先选择风险规则");
       if (!selectedAgentNames.length) throw new Error("请至少选择一个 Agent");
-      const run = await createAnalysisRun({
-        company_name: companyName,
-        document_text: uploadedDocument ? "" : documentText,
-        document_id: uploadedDocument?.document_id,
-        risk_rule_set_id: selectedRuleSetId,
-        selected_agent_names: selectedAgentNames,
-        analysis_depth: analysisDepth,
-        structured_data: parseStructuredData(structuredDataText),
-        max_findings:
-          options?.analysis_depths.find((item) => item.depth === analysisDepth)?.max_findings ?? 20,
-      });
+      const draft = await createAnalysisDraft(buildPayload());
+      setDraftRun(draft);
+      if (draft.status !== "ready") {
+        setAnalysisRun(draft);
+        return;
+      }
+      const run = await startAnalysisRun(draft.run_id);
       setAnalysisRun(run);
       if (openAfterComplete) {
-        await navigate({ to: "/analyses/$id/orchestra", params: { id: run.run_id } });
+        await navigate({ to: "/analyses/$id", params: { id: draft.run_id } });
       }
     } catch (err) {
       setAnalysisError(err instanceof Error ? err.message : "规则 Agent 分析失败");
     } finally {
       setAnalyzing(false);
     }
+  }
+
+  async function createDraftForConfirmation() {
+    setAnalyzing(true);
+    setAnalysisError(null);
+    try {
+      if (!selectedRuleSetId) throw new Error("请先选择风险规则");
+      if (!selectedAgentNames.length) throw new Error("请至少选择一个 Agent");
+      const run = await createAnalysisDraft(buildPayload());
+      setDraftRun(run);
+      setAnalysisRun(run);
+    } catch (err) {
+      setAnalysisError(err instanceof Error ? err.message : "任务识别失败");
+    } finally {
+      setAnalyzing(false);
+    }
+  }
+
+  async function startConfirmedDraft() {
+    if (!draftRun) return;
+    setAnalyzing(true);
+    setAnalysisError(null);
+    try {
+      const run = await startAnalysisRun(draftRun.run_id);
+      setAnalysisRun(run);
+      await navigate({ to: "/analyses/$id", params: { id: draftRun.run_id } });
+    } catch (err) {
+      setAnalysisError(err instanceof Error ? err.message : "启动专家协作失败");
+    } finally {
+      setAnalyzing(false);
+    }
+  }
+
+  function buildPayload() {
+    return {
+      company_name: companyName,
+      document_text: uploadedDocument ? "" : documentText,
+      document_id: uploadedDocument?.document_id,
+      risk_rule_set_id: selectedRuleSetId,
+      selected_agent_names: selectedAgentNames,
+      analysis_depth: analysisDepth,
+      structured_data: parseStructuredData(structuredDataText),
+      max_findings:
+        options?.analysis_depths.find((item) => item.depth === analysisDepth)?.max_findings ?? 20,
+    };
   }
 
   async function handlePdfUpload(file: File) {

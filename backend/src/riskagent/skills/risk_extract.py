@@ -21,6 +21,7 @@ class RuleEvaluation(BaseModel):
     matched_terms: list[str]
     evidence_snippets: list[str] = []
     source_type: str = "document_text"
+    skill_id: str | None = None
 
 
 def load_rules_for_agent(
@@ -39,9 +40,10 @@ def evaluate_text_against_rules(
     *,
     rules: list[RiskRule] | None = None,
     repository: RiskRuleRepository | None = None,
+    rule_set_snapshot: dict | None = None,
 ) -> list[RuleEvaluation]:
     repo = repository or get_default_repository()
-    rule_set = repo.load()
+    rule_set = rule_set_snapshot or repo.load().model_dump()
     active_rules = rules or repo.select_rules()
     normalized_text = text.lower()
     findings: list[RuleEvaluation] = []
@@ -56,8 +58,8 @@ def evaluate_text_against_rules(
         )
         findings.append(
             RuleEvaluation(
-                rule_set_id=rule_set.rule_set_id,
-                rule_version=rule_set.version,
+                rule_set_id=str(rule_set["rule_set_id"]),
+                rule_version=str(rule_set["version"]),
                 rule_id=rule.rule_id,
                 dimension_code=rule.dimension_code,
                 rule_type=rule.rule_type,

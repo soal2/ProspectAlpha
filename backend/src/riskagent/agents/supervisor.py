@@ -11,6 +11,13 @@ from langgraph.graph import END, START, StateGraph
 from riskagent.agent_experts import AgentSpec, AgentSpecRepository
 from riskagent.risk_rules import RiskRule, RiskRuleRepository
 from riskagent.skills.risk_extract import RuleEvaluation, evaluate_text_against_rules
+from riskagent.skills.risk_skill_registry import (
+    DomainSkill,
+    rules_for_skill,
+    rules_from_snapshot,
+    skill_for_agent,
+    skill_payload,
+)
 
 
 @dataclass
@@ -18,16 +25,19 @@ class AgentTeamResult:
     evaluations: list[RuleEvaluation]
     events: list[dict[str, Any]]
     agent_counts: dict[str, int]
+    skill_rule_counts: dict[str, int]
 
 
 class AgentState(TypedDict, total=False):
     text: str
     max_findings: int
+    rule_snapshot: dict[str, Any]
     all_rules: list[RiskRule]
     assigned_rule_ids: set[str]
     evaluations: list[RuleEvaluation]
     events: list[dict[str, Any]]
     agent_counts: dict[str, int]
+    skill_rule_counts: dict[str, int]
 
 
 class AgentTeamSupervisor:
@@ -49,14 +59,19 @@ class AgentTeamSupervisor:
         text: str,
         max_findings: int,
         selected_agent_names: list[str] | None = None,
+        rule_snapshot: dict[str, Any] | None = None,
     ) -> AgentTeamResult:
         specs = self._selected_specs(selected_agent_names)
         graph = self.graph if len(specs) == len(self.agent_specs) else self._compile_graph(specs)
-        final_state = graph.invoke({"text": text, "max_findings": max_findings})
+        initial_state: AgentState = {"text": text, "max_findings": max_findings}
+        if rule_snapshot:
+            initial_state["rule_snapshot"] = rule_snapshot
+        final_state = graph.invoke(initial_state)
         return AgentTeamResult(
             evaluations=_dedupe_evaluations(final_state.get("evaluations", []))[: max_findings * 4],
             events=final_state.get("events", []),
             agent_counts=final_state.get("agent_counts", {}),
+            skill_rule_counts=final_state.get("skill_rule_counts", {}),
         )
 
     def agent_options(self) -> list[dict[str, Any]]:
@@ -94,16 +109,20 @@ class AgentTeamSupervisor:
         return graph.compile()
 
     def _orchestrator_node(self, state: AgentState) -> AgentState:
-        state["all_rules"] = self.repository.select_rules()
+        snapshot = state.get("rule_snapshot")
+        state["all_rules"] = rules_from_snapshot(snapshot) if snapshot else self.repository.select_rules()
         state["assigned_rule_ids"] = set()
         state["evaluations"] = []
         state["agent_counts"] = {}
+        state["skill_rule_counts"] = {}
         state["events"] = [
             _event(
                 "agent_started",
                 "orchestrator",
                 "LangGraph supervisor 启动",
-                "加载固定 DAG 并向专业 Agent 分配规则子集。",
+                "加载固定 DAG，并从本次冻结规则快照向专业 Agent 分配规则子集。",
+                stage_key="expert_orchestration",
+                action_label="总控启动",
             )
         ]
         return state
@@ -112,28 +131,53 @@ class AgentTeamSupervisor:
         def run_agent(state: AgentState) -> AgentState:
             all_rules = state.get("all_rules", [])
             assigned_rule_ids = state.get("assigned_rule_ids", set())
-            rules = _rules_for_spec(spec, all_rules, assigned_rule_ids)
+            skill = skill_for_agent(spec.name)
+            rules = rules_for_skill(skill, all_rules, assigned_rule_ids) if skill else _rules_for_spec(spec, all_rules, assigned_rule_ids)
             if not spec.default:
                 assigned_rule_ids.update(rule.rule_id for rule in rules)
             events = state.get("events", [])
+            if skill:
+                events.append(
+                    _event(
+                        "rules_assigned",
+                        spec.name,
+                        f"{skill.role_zh}已获取风险规则",
+                        f"通过 {skill.skill_id} 从冻结规则快照读取 {len(rules)} 条规则。",
+                        stage_key="expert_orchestration",
+                        skill_id=skill.skill_id,
+                        agent_role=skill.role_zh,
+                        action_label="规则分配",
+                        payload=skill_payload(skill, len(rules), rules),
+                    )
+                )
             events.append(
                 _event(
                     "agent_started",
                     spec.name,
                     f"{spec.name} 开始分析",
-                    f"读取 {len(rules)} 条规则、检索候选证据并输出结构化 RiskFinding。",
+                    f"读取 {len(rules)} 条冻结规则，按 Skill 检索候选证据并输出结构化 RiskFinding。",
+                    stage_key="evidence_extraction",
+                    skill_id=skill.skill_id if skill else None,
+                    agent_role=skill.role_zh if skill else spec.title,
+                    action_label="分析中",
                 )
             )
             agent_evaluations = evaluate_text_against_rules(
                 state.get("text", ""),
                 rules=rules,
                 repository=self.repository,
+                rule_set_snapshot=state.get("rule_snapshot"),
             )
             for item in agent_evaluations:
                 item.source_type = spec.name
+                item.skill_id = skill.skill_id if skill else None
             triggered_count = sum(1 for item in agent_evaluations if item.evaluation_result == "triggered")
             agent_counts = state.get("agent_counts", {})
             agent_counts[spec.name] = triggered_count
+            skill_rule_counts = state.get("skill_rule_counts", {})
+            if skill:
+                skill_rule_counts[skill.skill_id] = len(rules)
+            state["skill_rule_counts"] = skill_rule_counts
             state["agent_counts"] = agent_counts
             state["assigned_rule_ids"] = assigned_rule_ids
             state["evaluations"] = state.get("evaluations", []) + agent_evaluations
@@ -143,6 +187,11 @@ class AgentTeamSupervisor:
                     spec.name,
                     f"{spec.name} 分析完成",
                     f"生成 {triggered_count} 条结构化风险发现。",
+                    stage_key="risk_identification",
+                    skill_id=skill.skill_id if skill else None,
+                    agent_role=skill.role_zh if skill else spec.title,
+                    action_label="发现",
+                    metrics={"triggered_findings": triggered_count, "rules_read": len(rules)},
                 )
             )
             state["events"] = events
@@ -158,6 +207,8 @@ class AgentTeamSupervisor:
                 "orchestrator",
                 "Agent 团队分析完成",
                 f"生成 {sum(state.get('agent_counts', {}).values())} 条候选风险发现。",
+                stage_key="risk_identification",
+                action_label="汇总",
             )
         )
         state["events"] = events
@@ -192,11 +243,19 @@ def _dedupe_evaluations(evaluations: list[RuleEvaluation]) -> list[RuleEvaluatio
     return deduped
 
 
-def _event(event_type: str, actor_name: str, title: str, summary: str) -> dict[str, Any]:
-    return {
+def _event(
+    event_type: str,
+    actor_name: str,
+    title: str,
+    summary: str,
+    **extra: Any,
+) -> dict[str, Any]:
+    event = {
         "event_type": event_type,
         "actor_name": actor_name,
         "title": title,
         "summary": summary,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
+    event.update({key: value for key, value in extra.items() if value is not None})
+    return event

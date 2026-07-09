@@ -100,6 +100,11 @@ def test_analysis_api_exposes_minimal_pipeline_resources(tmp_path, monkeypatch):
         },
     ).json()
     assert duplicate["document_id"] == document["document_id"]
+    blocks_response = client.get(f"/documents/{document['document_id']}/blocks")
+    assert blocks_response.status_code == 200
+    blocks = blocks_response.json()
+    assert blocks
+    assert blocks[0]["document_id"] == document["document_id"]
 
     response = client.post(
         "/analysis-runs",
@@ -129,7 +134,7 @@ def test_analysis_api_exposes_minimal_pipeline_resources(tmp_path, monkeypatch):
     assert set(trace) == {"stages", "seed", "flow", "evidenceFeed"}
     assert trace["stages"][-1] == {
         "key": "completed",
-        "label": "签发交付",
+        "label": "交付完成",
         "owner": "analysis_run",
         "status": "done",
         "cost": None,

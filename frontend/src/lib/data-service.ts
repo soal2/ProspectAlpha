@@ -20,6 +20,7 @@ import type {
 export interface AnalysisFinding {
   finding_id: string;
   agent_name: string;
+  skill_id?: string | null;
   rule_set_id: string;
   rule_version: string;
   rule_id: string;
@@ -73,6 +74,13 @@ export interface AnalysisRunEvent {
   title: string;
   summary: string;
   created_at?: string;
+  stage_key?: string;
+  stage_status?: string;
+  skill_id?: string;
+  agent_role?: string;
+  action_label?: string;
+  payload?: Record<string, unknown>;
+  metrics?: Record<string, unknown>;
 }
 
 export interface AnalysisRun {
@@ -96,8 +104,19 @@ export interface AnalysisRun {
   };
   input_summary: {
     document_text_chars: number;
+    document_text_preview?: string;
     structured_data_keys: string[];
+    has_document_id?: boolean;
+    has_material_url?: boolean;
   };
+  understood?: {
+    company_name?: string;
+    material_hint?: string;
+    focus?: string[];
+  };
+  blocking_questions?: string[];
+  optional_questions?: string[];
+  assumed_defaults?: Record<string, string>;
   findings: AnalysisFinding[];
   events: { event_type: string; actor_name: string; title: string; summary: string }[];
   orchestra_plan?: OrchestraPlan;
@@ -846,6 +865,9 @@ function toReportData(run: AnalysisRun, report: BackendReport): ReportData {
   ];
   return {
     id: run.run_id,
+    markdown: report.markdown,
+    reviewStatus: report.review_status,
+    createdAt: report.created_at,
     toc,
     radar,
     pie,

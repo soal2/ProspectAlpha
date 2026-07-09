@@ -94,3 +94,29 @@ def test_analysis_run_persists_selected_agents_and_depth(tmp_path):
         {"agent_name": "legal_agent", "title": "Legal and compliance specialist"}
     ]
     assert {finding.agent_name for finding in run.findings} <= {"legal_agent"}
+
+
+def test_domain_skills_assign_frozen_rules_and_findings_keep_skill_ids(tmp_path):
+    rule_repo = RiskRuleRepository(Path(__file__).parents[1] / "configs" / "risk_rules.yaml")
+    repo = AnalysisRunRepository(tmp_path / "runs.yaml", rule_repo, use_database=False)
+
+    run = repo.create_and_run(
+        AnalysisRunCreate(
+            company_name="Skill 测试 IPO",
+            document_text="风险因素\n公司存在关联交易、赎回安排，经营活动现金流持续为负。",
+            selected_agent_names=["financial_agent", "legal_agent"],
+            analysis_depth="standard",
+        )
+    )
+
+    assert run.status == "completed"
+    assert all(finding.skill_id for finding in run.findings)
+    assert {finding.skill_id for finding in run.findings}.issubset(
+        {"financial_risk_skill", "legal_compliance_skill"}
+    )
+    assigned_events = [event for event in run.events if event["event_type"] == "rules_assigned"]
+    assert assigned_events
+    assert {event["skill_id"] for event in assigned_events}.issuperset(
+        {"financial_risk_skill", "legal_compliance_skill"}
+    )
+    assert all(event["payload"]["rule_count"] > 0 for event in assigned_events)
