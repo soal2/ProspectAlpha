@@ -2,8 +2,10 @@ import json
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from sqlalchemy.orm import sessionmaker
 
 from riskagent.api.main import create_app
+from riskagent.database import make_engine
 from riskagent.risk_rules import RiskRuleRepository
 
 
@@ -45,3 +47,14 @@ def test_risk_rules_api_crud(tmp_path, monkeypatch):
     response = client.delete(f"/risk-rules/{rule_id}")
     assert response.status_code == 204
     assert client.get("/risk-rules").json()["totals"]["rule_count"] == 143
+
+
+def test_risk_rules_repository_seeds_empty_database(tmp_path):
+    engine = make_engine(f"sqlite:///{tmp_path / 'rules.db'}")
+    session_factory = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+    repo = RiskRuleRepository(session_factory=session_factory)
+
+    rule_set = repo.load()
+
+    assert rule_set.rule_set_id == "hk_ipo_prospectus_risk_framework_v1"
+    assert rule_set.totals == {"dimension_count": 3, "category_count": 26, "rule_count": 143}

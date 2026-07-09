@@ -2,7 +2,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { Plus, Play, CheckCircle2, Loader2 } from "lucide-react";
 import { useState, useEffect } from "react";
 import { getBacktests } from "@/lib/data-service";
-import { type BacktestSummary } from "@/mocks";
+import { type BacktestSummary } from "@/lib/types";
 
 export const Route = createFileRoute("/backtest/")({
   head: () => ({

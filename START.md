@@ -16,7 +16,7 @@ ANALYSIS_EXECUTION_MODE=inline uvicorn riskagent.api.main:app --host 127.0.0.1 -
 ```bash
 cd frontend
 pnpm install
-VITE_USE_MOCK=false VITE_API_BASE_URL=http://127.0.0.1:8000 pnpm dev --host 127.0.0.1 --port 5173
+VITE_API_BASE_URL=http://127.0.0.1:8000 pnpm dev --host 127.0.0.1 --port 5173
 ```
 
 ## Docker 全栈启动

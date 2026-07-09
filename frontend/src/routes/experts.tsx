@@ -2,7 +2,7 @@ import { createFileRoute, Link, Outlet, useRouterState } from "@tanstack/react-r
 import { Search } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { getAgents } from "@/lib/data-service";
-import { type Agent } from "@/mocks";
+import { type Agent } from "@/lib/types";
 
 export const Route = createFileRoute("/experts")({
   head: () => ({

@@ -1,7 +1,7 @@
 import { createFileRoute, Link, notFound } from "@tanstack/react-router";
 import { ArrowLeft, Sparkles, FileText, GitBranch } from "lucide-react";
 import { getAgents } from "@/lib/data-service";
-import { type Agent } from "@/mocks";
+import { type Agent } from "@/lib/types";
 
 export const Route = createFileRoute("/experts/$id")({
   head: ({ params }) => ({

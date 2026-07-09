@@ -24,7 +24,7 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar";
 import { getDashboardStats } from "@/lib/data-service";
-import type { DashboardStats } from "@/mocks/dashboard";
+import type { DashboardStats } from "@/lib/types";
 
 const work = [
   { title: "工作台", url: "/", icon: Home },

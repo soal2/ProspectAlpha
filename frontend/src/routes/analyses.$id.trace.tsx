@@ -15,7 +15,7 @@ import {
   Search,
 } from "lucide-react";
 import { getAgents, getTraceData } from "@/lib/data-service";
-import { type Agent } from "@/mocks";
+import { type Agent } from "@/lib/types";
 import { motion, AnimatePresence } from "framer-motion";
 
 export const Route = createFileRoute("/analyses/$id/trace")({

@@ -11,7 +11,7 @@ import {
 } from "lucide-react";
 import { useState, useEffect } from "react";
 import { getAnalyses, getDashboardStats } from "@/lib/data-service";
-import { type AnalysisSummary } from "@/mocks";
+import { type AnalysisSummary } from "@/lib/types";
 import { RiskBadge } from "@/components/risk-badge";
 
 export const Route = createFileRoute("/monitor")({

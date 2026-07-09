@@ -3,7 +3,6 @@
 Base URL defaults to `http://localhost:8000`. Frontend configuration uses:
 
 - `VITE_API_BASE_URL`: backend base URL
-- `VITE_USE_MOCK=false`: call real backend APIs
 
 All JSON endpoints use `Content-Type: application/json` unless noted.
 
@@ -12,7 +11,7 @@ All JSON endpoints use `Content-Type: application/json` unless noted.
 ### `GET /agents`
 
 Returns the database-backed Agent expert directory used by the frontend expert guild pages.
-If the `agent_experts` table is empty, the response is an empty array and does not fall back to LangGraph execution nodes.
+Empty databases are initialized with the bundled expert seed data before the response is produced.
 
 Response item:
 

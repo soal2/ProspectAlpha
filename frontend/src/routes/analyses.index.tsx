@@ -2,7 +2,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { Plus, Search, ListFilter, Network } from "lucide-react";
 import { useState, useEffect } from "react";
 import { getAnalyses } from "@/lib/data-service";
-import { type AnalysisSummary } from "@/mocks";
+import { type AnalysisSummary } from "@/lib/types";
 import { RiskBadge } from "@/components/risk-badge";
 
 export const Route = createFileRoute("/analyses/")({

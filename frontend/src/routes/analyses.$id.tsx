@@ -33,10 +33,20 @@ const tabs: {
 function AnalysisShell() {
   const { analysis } = Route.useLoaderData();
   const pathname = useRouterState({ select: (r) => r.location.pathname });
+  const realtimePath = `/analyses/${analysis.id}`;
+  const isRealtimeWorkspace = pathname === realtimePath || pathname === `${realtimePath}/`;
   const isActive = (to: string, exact?: boolean) => {
     const full = to.replace("$id", analysis.id);
     return exact ? pathname === full : pathname.startsWith(full);
   };
+
+  if (isRealtimeWorkspace) {
+    return (
+      <div className="min-w-0 flex-1">
+        <Outlet />
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col">

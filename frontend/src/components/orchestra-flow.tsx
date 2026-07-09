@@ -11,7 +11,7 @@ import ReactFlow, {
 import "reactflow/dist/style.css";
 import { Sparkles, CheckCircle2, Loader2, Circle, AlertCircle } from "lucide-react";
 import type { OrchestraPlan, OrchestraStageStatus } from "@/lib/data-service";
-import type { Agent } from "@/mocks";
+import type { Agent } from "@/lib/types";
 
 const STATUS_RING: Record<OrchestraStageStatus, string> = {
   queued: "ring-muted-foreground/30 text-muted-foreground",

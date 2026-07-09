@@ -103,3 +103,63 @@ class AgentExpertRow(Base):
     accent: Mapped[str] = mapped_column(String(16))
     display_order: Mapped[int] = mapped_column(Integer, index=True)
     created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AgentSpecRow(Base):
+    __tablename__ = "agent_specs"
+
+    agent_name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    title: Mapped[str] = mapped_column(String(256))
+    rule_types: Mapped[list[str]] = mapped_column(JSON, default=list)
+    categories: Mapped[list[str]] = mapped_column(JSON, default=list)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    display_order: Mapped[int] = mapped_column(Integer, index=True)
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class RiskRuleSetRow(Base):
+    __tablename__ = "risk_rule_sets"
+
+    rule_set_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    version: Mapped[str] = mapped_column(String(64))
+    name: Mapped[str] = mapped_column(String(256))
+    source_workbook: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    source_main_sheet: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    source_summary_sheet: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    scope: Mapped[str | None] = mapped_column(Text, nullable=True)
+    usage_notes: Mapped[list[str]] = mapped_column(JSON, default=list)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    display_order: Mapped[int] = mapped_column(Integer, default=1, index=True)
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class RiskRuleDimensionRow(Base):
+    __tablename__ = "risk_rule_dimensions"
+
+    dimension_id: Mapped[str] = mapped_column(String(192), primary_key=True)
+    rule_set_id: Mapped[str] = mapped_column(ForeignKey("risk_rule_sets.rule_set_id"), index=True)
+    dimension_code: Mapped[str] = mapped_column(String(64), index=True)
+    dimension: Mapped[str] = mapped_column(String(256))
+    rule_type: Mapped[str] = mapped_column(String(128), index=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    display_order: Mapped[int] = mapped_column(Integer, index=True)
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class RiskRuleRow(Base):
+    __tablename__ = "risk_rules"
+
+    rule_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    rule_set_id: Mapped[str] = mapped_column(ForeignKey("risk_rule_sets.rule_set_id"), index=True)
+    dimension_code: Mapped[str] = mapped_column(String(64), index=True)
+    dimension: Mapped[str] = mapped_column(String(256))
+    rule_type: Mapped[str] = mapped_column(String(128), index=True)
+    category: Mapped[str] = mapped_column(String(256), index=True)
+    risk_item: Mapped[str] = mapped_column(String(512))
+    description: Mapped[str] = mapped_column(Text)
+    trigger_condition: Mapped[str] = mapped_column(Text)
+    calculation_or_method: Mapped[str] = mapped_column(Text)
+    source_sections: Mapped[str] = mapped_column(Text)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    display_order: Mapped[int] = mapped_column(Integer, index=True)
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now())

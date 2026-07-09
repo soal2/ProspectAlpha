@@ -4,27 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, TypedDict
 
-import yaml
 from langgraph.graph import END, START, StateGraph
 
+from riskagent.agent_experts import AgentSpec, AgentSpecRepository
 from riskagent.risk_rules import RiskRule, RiskRuleRepository
 from riskagent.skills.risk_extract import RuleEvaluation, evaluate_text_against_rules
-
-
-BACKEND_ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_AGENT_GRAPH_PATH = BACKEND_ROOT / "configs" / "agent_graph.yaml"
-
-
-@dataclass(frozen=True)
-class AgentSpec:
-    name: str
-    title: str
-    rule_types: tuple[str, ...] = ()
-    categories: tuple[str, ...] = ()
-    default: bool = False
 
 
 @dataclass
@@ -49,11 +35,12 @@ class AgentTeamSupervisor:
         self,
         *,
         repository: RiskRuleRepository,
-        graph_path: Path | str | None = None,
+        agent_spec_repository: AgentSpecRepository | None = None,
+        agent_specs: list[AgentSpec] | None = None,
     ) -> None:
         self.repository = repository
-        self.graph_path = Path(graph_path or DEFAULT_AGENT_GRAPH_PATH)
-        self.agent_specs = _load_agent_specs(self.graph_path)
+        self.agent_spec_repository = agent_spec_repository or AgentSpecRepository()
+        self.agent_specs = agent_specs or self.agent_spec_repository.list_specs()
         self.graph = self._compile_graph()
 
     def run(
@@ -175,22 +162,6 @@ class AgentTeamSupervisor:
         )
         state["events"] = events
         return state
-
-
-def _load_agent_specs(path: Path) -> list[AgentSpec]:
-    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    specs = []
-    for item in data.get("agents", []):
-        specs.append(
-            AgentSpec(
-                name=item["name"],
-                title=item.get("title", item["name"]),
-                rule_types=tuple(item.get("rule_types", [])),
-                categories=tuple(item.get("categories", [])),
-                default=bool(item.get("default", False)),
-            )
-        )
-    return specs
 
 
 def _rules_for_spec(

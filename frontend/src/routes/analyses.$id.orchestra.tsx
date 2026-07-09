@@ -20,7 +20,7 @@ import {
   type OrchestraPlan,
   type OrchestraStageStatus,
 } from "@/lib/data-service";
-import { type Agent } from "@/mocks";
+import { type Agent } from "@/lib/types";
 
 export const Route = createFileRoute("/analyses/$id/orchestra")({
   loader: async ({ params }) => {

@@ -39,3 +39,16 @@ def init_db() -> None:
     from riskagent import models  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
+
+
+def init_reference_data(session_factory: sessionmaker = SessionLocal) -> None:
+    from riskagent import models  # noqa: F401
+
+    bind = getattr(session_factory, "kw", {}).get("bind")
+    if bind is None:
+        init_db()
+    else:
+        Base.metadata.create_all(bind=bind)
+    from riskagent.seed_data import seed_reference_data
+
+    seed_reference_data(session_factory)

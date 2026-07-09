@@ -1,29 +1,21 @@
-import { API_BASE_URL, USE_MOCK } from "./env";
-import {
-  analyses as mockAnalyses,
-  agents as mockAgents,
-  backtests as mockBacktests,
-  dashboardStats as mockDashboardStats,
-  homepageExamples,
-  reportData,
-  traceData,
-  evidenceDetailItems,
-  backtestDetailData,
-  intakeData,
-  riskRulesData,
-  backtestNewData,
-  knowledgeData,
-} from "@/mocks";
+import { API_BASE_URL } from "./env";
 import type {
-  ReportData,
-  TraceData,
-  EvidenceDetailItem,
-  KnowledgeData,
-  BacktestDetailData,
   Agent,
+  AnalysisSummary,
+  BacktestDetailData,
+  BacktestNewData,
+  BacktestSummary,
   DashboardStats,
+  EvidenceDetailItem,
+  EvidenceFeedItem,
   HomepageExample,
-} from "@/mocks";
+  IntakeData,
+  KnowledgeData,
+  ReportData,
+  RiskRule,
+  RiskRulesData,
+  TraceData,
+} from "./types";
 
 export interface AnalysisFinding {
   finding_id: string;
@@ -120,7 +112,7 @@ type BackendReport = {
   created_at: string;
 };
 
-type UploadedDocument = {
+export type UploadedDocument = {
   document_id: string;
   filename: string;
   content_type: string;
@@ -132,6 +124,20 @@ type UploadedDocument = {
   block_count: number;
   source_url: string | null;
   created_at: string;
+};
+
+export type AnalysisRunPayload = {
+  company_name: string;
+  document_text: string;
+  document_id?: string;
+  material_url?: string;
+  ipo_project_hint?: string;
+  confirm_defaults?: boolean;
+  risk_rule_set_id?: string;
+  selected_agent_names?: string[];
+  analysis_depth?: "quick" | "standard" | "deep";
+  structured_data?: Record<string, string>;
+  max_findings?: number;
 };
 
 type BackendEvidence = {
@@ -171,13 +177,12 @@ export type AnalysisOptions = {
   }[];
 };
 
-// Mock data fetchers (replace with real API calls when backend is ready)
-async function fetchAnalyses(): Promise<typeof mockAnalyses> {
+async function fetchAnalyses(): Promise<AnalysisSummary[]> {
   const runs = await apiRequest<AnalysisRun[]>("/analysis-runs");
   return runs.map(toAnalysisSummary);
 }
 
-async function fetchAnalysis(id: string): Promise<(typeof mockAnalyses)[number] | null> {
+async function fetchAnalysis(id: string): Promise<AnalysisSummary | null> {
   try {
     return toAnalysisSummary(await apiRequest<AnalysisRun>(`/analysis-runs/${id}`));
   } catch (err) {
@@ -186,11 +191,11 @@ async function fetchAnalysis(id: string): Promise<(typeof mockAnalyses)[number] 
   }
 }
 
-async function fetchAgents(): Promise<typeof mockAgents> {
+async function fetchAgents(): Promise<Agent[]> {
   return apiRequest<BackendAgent[]>("/agents");
 }
 
-async function fetchBacktests(): Promise<typeof mockBacktests> {
+async function fetchBacktests(): Promise<BacktestSummary[]> {
   return [];
 }
 
@@ -339,7 +344,7 @@ async function fetchBacktestDetailData(id: string): Promise<BacktestDetailData |
   return null;
 }
 
-async function fetchIntakeData(): Promise<typeof intakeData> {
+async function fetchIntakeData(): Promise<IntakeData> {
   const options = await fetchAnalysisOptions();
   const activeRuleSet = options.risk_rule_sets.find((item) => item.active);
   return {
@@ -403,182 +408,119 @@ function isNotFound(err: unknown) {
   return err instanceof Error && err.message.includes("404");
 }
 
-async function fetchRiskRulesData(): Promise<typeof riskRulesData> {
-  return apiRequest<typeof riskRulesData>("/risk-rules");
+async function fetchRiskRulesData(): Promise<RiskRulesData> {
+  return apiRequest<RiskRulesData>("/risk-rules");
 }
 
-async function fetchBacktestNewData(): Promise<typeof backtestNewData> {
-  return backtestNewData;
+async function fetchBacktestNewData(): Promise<BacktestNewData> {
+  return {
+    steps: [
+      { key: "scope", label: "样本范围", desc: "选择回测的港股 IPO 样本时间窗口、行业、规模" },
+      { key: "model", label: "模型版本", desc: "选择 RiskAgent 模型版本与特征集" },
+      { key: "thresh", label: "风险阈值", desc: "定义高 / 中 / 低风险的判定边界" },
+      { key: "metric", label: "评估口径", desc: "选择评估窗口与指标" },
+    ],
+  };
 }
 
 // Analyses
 export async function getAnalyses() {
-  if (USE_MOCK) return mockAnalyses;
   return fetchAnalyses();
 }
 
 export async function getAnalysis(id: string) {
-  if (USE_MOCK) return mockAnalyses.find((a) => a.id === id) ?? null;
   return fetchAnalysis(id);
+}
+
+export async function getAnalysisRun(id: string) {
+  return apiRequest<AnalysisRun>(`/analysis-runs/${id}`);
 }
 
 // Agents
 export async function getAgents() {
-  if (USE_MOCK) return mockAgents;
   return fetchAgents();
 }
 
 // Backtests
 export async function getBacktests() {
-  if (USE_MOCK) return mockBacktests;
   return fetchBacktests();
 }
 
 // Dashboard
 export async function getDashboardStats() {
-  if (USE_MOCK) return mockDashboardStats;
   return fetchDashboardStats();
 }
 
 // Homepage
 export async function getHomepageExamples() {
-  if (USE_MOCK) return homepageExamples;
   return fetchHomepageExamples();
 }
 
 // Report
 export async function getReportData(id: string) {
-  if (USE_MOCK) return reportData[id] ?? null;
   return fetchReportData(id);
 }
 
 // Trace
 export async function getTraceData(id: string) {
-  if (USE_MOCK) return traceData[id] ?? null;
   return fetchTraceData(id);
 }
 
 // Evidence Detail
 export async function getEvidenceDetailItems(id: string) {
-  if (USE_MOCK) return evidenceDetailItems[id] ?? [];
   return fetchEvidenceDetailItems(id);
 }
 
 // Evidence Knowledge
 export async function getKnowledgeData() {
-  if (USE_MOCK) return knowledgeData;
   return fetchKnowledgeData();
 }
 
 // Backtest Detail
 export async function getBacktestDetailData(id: string) {
-  if (USE_MOCK) return backtestDetailData[id] ?? null;
   return fetchBacktestDetailData(id);
 }
 
 // Intake
 export async function getIntakeData() {
-  if (USE_MOCK) return intakeData;
   return fetchIntakeData();
 }
 
 export async function getAnalysisOptions() {
-  if (USE_MOCK) {
-    return {
-      risk_rule_sets: [
-        {
-          rule_set_id: riskRulesData.rule_set_id,
-          version: riskRulesData.version,
-          name: riskRulesData.name,
-          rule_count: riskRulesData.totals.rule_count,
-          active: true,
-        },
-      ],
-      agents: [
-        { agent_name: "financial_agent", title: "Financial specialist", default: false },
-        { agent_name: "legal_agent", title: "Legal and compliance specialist", default: false },
-        { agent_name: "market_agent", title: "Market and industry specialist", default: false },
-        {
-          agent_name: "business_agent",
-          title: "Business and disclosure specialist",
-          default: true,
-        },
-      ],
-      analysis_depths: [
-        { depth: "quick", label: "快速", max_findings: 8 },
-        { depth: "standard", label: "标准", max_findings: 20 },
-        { depth: "deep", label: "深度", max_findings: 40 },
-      ],
-    } satisfies AnalysisOptions;
-  }
   return fetchAnalysisOptions();
 }
 
-export async function createAnalysisRun(payload: {
-  company_name: string;
-  document_text: string;
-  document_id?: string;
-  risk_rule_set_id?: string;
-  selected_agent_names?: string[];
-  analysis_depth?: "quick" | "standard" | "deep";
-  structured_data?: Record<string, string>;
-  max_findings?: number;
-}) {
-  if (USE_MOCK) {
-    return {
-      run_id: `mock_${Date.now()}`,
-      company_name: payload.company_name,
-      status: "completed",
-      current_stage: "completed",
-      created_at: new Date().toISOString(),
-      completed_at: new Date().toISOString(),
-      rule_snapshot: {
-        rule_set_id: riskRulesData.rule_set_id,
-        version: riskRulesData.version,
-        totals: riskRulesData.totals,
-      },
-      input_summary: {
-        document_text_chars: payload.document_text.length,
-        structured_data_keys: Object.keys(payload.structured_data ?? {}),
-      },
-      analysis_config: {
-        risk_rule_set_id: payload.risk_rule_set_id ?? riskRulesData.rule_set_id,
-        analysis_depth: payload.analysis_depth ?? "standard",
-        selected_agents: [],
-        max_findings: payload.max_findings ?? 20,
-      },
-      findings: [],
-      events: [],
-    } satisfies AnalysisRun;
-  }
-  const draft = await apiRequest<AnalysisRun>("/analysis-runs", {
+export async function createAnalysisDraft(payload: AnalysisRunPayload) {
+  return apiRequest<AnalysisRun>("/analysis-runs", {
     method: "POST",
     body: JSON.stringify(payload),
   });
-  if (draft.status !== "ready") return draft;
-  const started = await apiRequest<AnalysisRun>(`/analysis-runs/${draft.run_id}/start`, {
+}
+
+export async function startAnalysisRun(runId: string) {
+  const response = await fetch(`${API_BASE_URL}/analysis-runs/${runId}/start`, {
     method: "POST",
+    headers: { "content-type": "application/json" },
   });
+  if (response.status === 409) {
+    return getAnalysisRun(runId);
+  }
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `Request failed: ${response.status}`);
+  }
+  return response.json() as Promise<AnalysisRun>;
+}
+
+export async function createAnalysisRun(payload: AnalysisRunPayload) {
+  const draft = await createAnalysisDraft(payload);
+  if (draft.status !== "ready") return draft;
+  const started = await startAnalysisRun(draft.run_id);
   if (started.status !== "queued") return started;
   return pollAnalysisRun(started.run_id);
 }
 
 export async function uploadDocument(file: File) {
-  if (USE_MOCK) {
-    return {
-      document_id: `mock_doc_${Date.now()}`,
-      filename: file.name,
-      content_type: file.type || "application/pdf",
-      file_sha256: "",
-      storage_uri: "",
-      file_size_bytes: file.size,
-      page_count: 0,
-      text_chars: 0,
-      block_count: 0,
-      source_url: null,
-      created_at: new Date().toISOString(),
-    } satisfies UploadedDocument;
-  }
   const form = new FormData();
   form.append("file", file);
   return apiRequest<UploadedDocument>("/documents/upload", {
@@ -595,27 +537,6 @@ export async function askDocument(
   onDelta: (delta: string, full: string) => void,
   options: { topK?: number; signal?: AbortSignal } = {},
 ): Promise<AskResult> {
-  if (USE_MOCK) {
-    // simulate streaming
-    const answer = `（mock 模式）基于已上传的文档「${documentId}」，对问题「${question}」的样例回答：本招股书披露了关联交易、对赌安排与现金流压力等风险因素。`;
-    let acc = "";
-    for (const ch of answer) {
-      await new Promise((r) => setTimeout(r, 12));
-      acc += ch;
-      onDelta(ch, acc);
-    }
-    return {
-      answer,
-      citations: [
-        {
-          block_id: "mock_block_1",
-          page_number: 92,
-          section_path: "风险因素 · 关联交易",
-          snippet: "报告期内，公司与关联方存在持续性的采购与销售交易安排……",
-        },
-      ],
-    };
-  }
   const response = await fetch(`${API_BASE_URL}/documents/${documentId}/ask`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -685,24 +606,6 @@ export async function chatWithAssistant(
   onDelta: (delta: string, full: string) => void,
   options: { signal?: AbortSignal } = {},
 ): Promise<ChatResult> {
-  if (USE_MOCK) {
-    const reply = `（mock 模式）已收到你的问题：「${message}」。我会基于港股 IPO 风险分析框架，从财务、法律、业务和市场四个维度切入，先确认标的公司和招股书来源，然后再派发到 Agent 协同。`;
-    let acc = "";
-    for (const ch of reply) {
-      await new Promise((r) => setTimeout(r, 12));
-      acc += ch;
-      onDelta(ch, acc);
-    }
-    return {
-      reply,
-      understanding: {
-        company: message.slice(0, 6) || null,
-        focus: ["对赌", "现金流"],
-        material_hints: null,
-        clarifying_questions: ["请提供招股书 PDF 或链接"],
-      },
-    };
-  }
   const response = await fetch(`${API_BASE_URL}/chat`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -762,36 +665,6 @@ export async function streamAnalysisRun(
   onDone: (run: AnalysisRun) => void,
   options: { signal?: AbortSignal } = {},
 ): Promise<void> {
-  if (USE_MOCK) {
-    // simulate a few events then done
-    const fakeEvents: AnalysisRunEvent[] = [
-      {
-        event_type: "stage_started",
-        actor_name: "orchestrator",
-        title: "Orchestra 编排分析计划",
-        summary: "生成多阶段编队…",
-      },
-      {
-        event_type: "orchestra_plan_generated",
-        actor_name: "orchestrator",
-        title: "Orchestra 计划已生成",
-        summary: "4 个阶段",
-      },
-      {
-        event_type: "stage_completed",
-        actor_name: "orchestrator",
-        title: "Orchestra 编排完成",
-        summary: "进入解析阶段",
-      },
-    ];
-    for (const ev of fakeEvents) {
-      await new Promise((r) => setTimeout(r, 600));
-      onEvent(ev);
-    }
-    const run = await apiRequest<AnalysisRun>(`/analysis-runs/${runId}`);
-    onDone(run);
-    return;
-  }
   const response = await fetch(`${API_BASE_URL}/analysis-runs/${runId}/stream`, {
     method: "GET",
     headers: { accept: "text/event-stream" },
@@ -815,19 +688,28 @@ export async function streamAnalysisRun(
       if (!raw.startsWith("data:")) continue;
       const payload = raw.slice(5).trim();
       if (!payload) continue;
-      let evt: { type: string; event?: AnalysisRunEvent; run?: AnalysisRun; message?: string };
+      let evt:
+        | ({
+            type: string;
+            event?: AnalysisRunEvent;
+            run?: AnalysisRun;
+            message?: string;
+          } & Partial<AnalysisRunEvent>)
+        | AnalysisRunEvent;
       try {
         evt = JSON.parse(payload);
       } catch {
         continue;
       }
-      if (evt.type === "event" && evt.event) {
+      if ("type" in evt && evt.type === "event" && evt.event) {
         onEvent(evt.event);
-      } else if (evt.type === "done" && evt.run) {
+      } else if ("type" in evt && evt.type === "done" && evt.run) {
         onDone(evt.run);
         return;
-      } else if (evt.type === "error") {
+      } else if ("type" in evt && evt.type === "error") {
         throw new Error(evt.message || "stream error");
+      } else if ("event_type" in evt && evt.event_type) {
+        onEvent(evt as AnalysisRunEvent);
       }
     }
   }
@@ -835,84 +717,45 @@ export async function streamAnalysisRun(
 
 // Risk Rules
 export async function getRiskRulesData() {
-  if (USE_MOCK) return riskRulesData;
   return fetchRiskRulesData();
 }
 
-export type RiskRulePayload = Omit<(typeof riskRulesData.rules)[number], "rule_id">;
+export type RiskRulePayload = Omit<RiskRule, "rule_id">;
 
 export async function createRiskRule(payload: RiskRulePayload) {
-  if (USE_MOCK) return { ...payload, rule_id: `MOCK-${Date.now()}` };
-  return apiRequest<(typeof riskRulesData.rules)[number]>("/risk-rules", {
+  return apiRequest<RiskRule>("/risk-rules", {
     method: "POST",
     body: JSON.stringify(payload),
   });
 }
 
 export async function updateRiskRule(ruleId: string, payload: Partial<RiskRulePayload>) {
-  if (USE_MOCK) return { ...riskRulesData.rules[0], ...payload, rule_id: ruleId };
-  return apiRequest<(typeof riskRulesData.rules)[number]>(`/risk-rules/${ruleId}`, {
+  return apiRequest<RiskRule>(`/risk-rules/${ruleId}`, {
     method: "PATCH",
     body: JSON.stringify(payload),
   });
 }
 
 export async function deleteRiskRule(ruleId: string) {
-  if (USE_MOCK) return;
   return apiRequest<void>(`/risk-rules/${ruleId}`, { method: "DELETE" });
 }
 
 // Backtest New
 export async function getBacktestNewData() {
-  if (USE_MOCK) return backtestNewData;
   return fetchBacktestNewData();
 }
 
-// Evidence feed for analyses.$id.index (realtime stream page)
-const evidenceFeed = [
-  { id: "#1", source: "官方", title: "招股书 P.218 · 现金流量表", conf: 0.93, time: "近实时" },
-  {
-    id: "#2",
-    source: "web",
-    title: "海通证券 · 宁德时代深度报告 2026Q2",
-    conf: 0.62,
-    time: "近一年",
-  },
-  {
-    id: "#3",
-    source: "web",
-    title: "公司公告 · 关于回购义务的补充披露",
-    conf: 0.81,
-    time: "近半年",
-  },
-  {
-    id: "#4",
-    source: "官方",
-    title: "招股书 P.92 · 风险因素 · 关联交易",
-    conf: 0.88,
-    time: "近实时",
-  },
-  {
-    id: "#5",
-    source: "web",
-    title: "Wind · 同业宁波容百 2025 年度报告",
-    conf: 0.54,
-    time: "近一年",
-  },
-];
-
-async function fetchEvidenceFeed(id?: string): Promise<typeof evidenceFeed> {
+async function fetchEvidenceFeed(id?: string): Promise<EvidenceFeedItem[]> {
   if (!id) return [];
   const trace = await fetchTraceData(id);
   return trace?.evidenceFeed ?? [];
 }
 
 export async function getEvidenceFeed(id?: string) {
-  if (USE_MOCK) return evidenceFeed;
   return fetchEvidenceFeed(id);
 }
 
-function toAnalysisSummary(run: AnalysisRun): (typeof mockAnalyses)[number] {
+function toAnalysisSummary(run: AnalysisRun): AnalysisSummary {
   const structured =
     (run as AnalysisRun & { structured_data?: Record<string, unknown> }).structured_data ?? {};
   const evidenceCount = run.findings.reduce(

@@ -19,7 +19,7 @@ import {
   updateRiskRule,
   type RiskRulePayload,
 } from "@/lib/data-service";
-import type { RiskRule, RiskRulesData } from "@/mocks";
+import type { RiskRule, RiskRulesData } from "@/lib/types";
 
 export const Route = createFileRoute("/risk-rules")({
   head: () => ({
