@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 
 from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import StreamingResponse
@@ -25,6 +26,10 @@ router = APIRouter(prefix="/analysis-runs", tags=["analysis-runs"])
 
 def _repo() -> AnalysisRunRepository:
     return get_default_analysis_repository()
+
+
+def _api_dispatch_mode() -> str:
+    return os.getenv("ANALYSIS_API_EXECUTION_MODE", "thread")
 
 
 @router.post("", response_model=AnalysisRun, status_code=status.HTTP_201_CREATED)
@@ -61,7 +66,7 @@ def update_analysis_inputs(run_id: str, payload: AnalysisRunInputPatch) -> Analy
 @router.post("/{run_id}/start", response_model=AnalysisRun)
 def start_analysis_run(run_id: str) -> AnalysisRun:
     try:
-        return _repo().start(run_id)
+        return _repo().start(run_id, dispatch_mode=_api_dispatch_mode())
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found") from exc
     except ValueError as exc:
@@ -79,7 +84,9 @@ def get_analysis_events(run_id: str, after: int = 0) -> dict[str, object]:
 @router.get("/{run_id}/stream")
 async def stream_analysis_run(run_id: str) -> StreamingResponse:
     try:
-        _repo().get(run_id)
+        run = _repo().get(run_id)
+        if _should_resume(run):
+            _repo().resume(run_id, dispatch_mode=_api_dispatch_mode())
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found") from exc
 
@@ -104,6 +111,19 @@ async def stream_analysis_run(run_id: str) -> StreamingResponse:
         event_source(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+def _should_resume(run: AnalysisRun) -> bool:
+    if run.status in {"ready", "queued", "completed", "failed", "clarifying"}:
+        return False
+    if not run.events:
+        return False
+    last_event = run.events[-1]
+    return (
+        last_event.get("event_type") == "stage_completed"
+        and last_event.get("stage_key") == run.current_stage
+        and last_event.get("stage_status") == "completed"
     )
 
 

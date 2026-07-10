@@ -1,7 +1,9 @@
 from pathlib import Path
+import time
 
 import fitz
 import pytest
+import yaml
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import sessionmaker
 
@@ -56,8 +58,8 @@ def test_clarifying_patch_start_freezes_inputs_and_generates_artifacts(tmp_path)
     assert completed.report is not None
     assert completed.report.review_status == "draft"
     assert all(item.text for item in completed.evidence)
-    with repo.session_factory() as session:
-        assert session.query(EvidenceLibraryRow).count() >= 1
+    evidence_library = yaml.safe_load((tmp_path / "evidence_library.yaml").read_text()) or []
+    assert evidence_library
 
     with pytest.raises(ValueError):
         repo.update_inputs(completed.run_id, AnalysisRunInputPatch(company_name="不可修改"))
@@ -123,7 +125,15 @@ def test_analysis_api_exposes_minimal_pipeline_resources(tmp_path, monkeypatch):
 
     run_id = payload["run_id"]
     started = client.post(f"/analysis-runs/{run_id}/start").json()
-    assert started["status"] == "completed"
+    assert started["status"] in {"queued", "completed"}
+    for _ in range(50):
+        current = client.get(f"/analysis-runs/{run_id}").json()
+        if current["status"] == "completed":
+            started = current
+            break
+        time.sleep(0.1)
+    else:
+        raise AssertionError("analysis run did not complete")
     events = client.get(f"/analysis-runs/{run_id}/events").json()["events"]
     assert events
     assert {event["actor_name"] for event in events}.issuperset(
@@ -181,7 +191,15 @@ def test_pdf_upload_drives_analysis_with_page_and_bbox_evidence(tmp_path, monkey
     assert run_response.status_code == 201
     run_id = run_response.json()["run_id"]
     started = client.post(f"/analysis-runs/{run_id}/start").json()
-    assert started["status"] == "completed"
+    assert started["status"] in {"queued", "completed"}
+    for _ in range(50):
+        current = client.get(f"/analysis-runs/{run_id}").json()
+        if current["status"] == "completed":
+            started = current
+            break
+        time.sleep(0.1)
+    else:
+        raise AssertionError("analysis run did not complete")
 
     evidence = client.get(f"/analysis-runs/{run_id}/evidence").json()
     assert evidence

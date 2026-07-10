@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, TypedDict
@@ -10,6 +11,7 @@ from langgraph.graph import END, START, StateGraph
 
 from riskagent.agent_experts import AgentSpec, AgentSpecRepository
 from riskagent.risk_rules import RiskRule, RiskRuleRepository
+from riskagent.seed_data import AGENT_SPECS
 from riskagent.skills.risk_extract import RuleEvaluation, evaluate_text_against_rules
 from riskagent.skills.risk_skill_registry import (
     DomainSkill,
@@ -50,7 +52,11 @@ class AgentTeamSupervisor:
     ) -> None:
         self.repository = repository
         self.agent_spec_repository = agent_spec_repository or AgentSpecRepository()
-        self.agent_specs = agent_specs or self.agent_spec_repository.list_specs()
+        self.agent_specs = agent_specs or (
+            _seed_agent_specs()
+            if os.getenv("USE_DATABASE", "1") == "0"
+            else self.agent_spec_repository.list_specs()
+        )
         self.graph = self._compile_graph()
 
     def run(
@@ -230,6 +236,19 @@ def _rules_for_spec(
         if spec.categories and rule.category in spec.categories:
             selected.append(rule)
     return selected
+
+
+def _seed_agent_specs() -> list[AgentSpec]:
+    return [
+        AgentSpec(
+            name=str(item["agent_name"]),
+            title=str(item["title"]),
+            rule_types=tuple(item.get("rule_types") or []),
+            categories=tuple(item.get("categories") or []),
+            default=bool(item.get("is_default")),
+        )
+        for item in AGENT_SPECS
+    ]
 
 
 def _dedupe_evaluations(evaluations: list[RuleEvaluation]) -> list[RuleEvaluation]:

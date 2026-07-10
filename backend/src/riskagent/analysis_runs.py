@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import os
 import re
+import threading
 import uuid
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -14,11 +15,13 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy.orm import sessionmaker
 
+from riskagent.agent_experts import AgentSpec
 from riskagent.agents.orchestrator import orchestrate
 from riskagent.agents.supervisor import AgentTeamSupervisor
 from riskagent.common.cache import TTLCache
-from riskagent.database import SessionLocal, init_db
+from riskagent.database import Base, SessionLocal, init_db, make_engine
 from riskagent.documents import (
     DocumentBlock as ParsedDocumentBlock,
     DocumentRepository,
@@ -30,6 +33,7 @@ from riskagent.skills.risk_skill_registry import (
     skill_for_rule,
     skills_for_agents,
 )
+from riskagent.seed_data import AGENT_SPECS
 from riskagent.models import AnalysisRunRow, EvidenceLibraryRow
 from riskagent.retrieval.hybrid import HybridSearchIndex
 from riskagent.workers.analysis import dispatch_analysis_job
@@ -39,6 +43,8 @@ BACKEND_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ANALYSIS_RUNS_PATH = BACKEND_ROOT / "data" / "processed" / "analysis_runs.yaml"
 DEFAULT_EVIDENCE_LIBRARY_PATH = BACKEND_ROOT / "data" / "processed" / "evidence_library.yaml"
 PARSER_VERSION = "local-text-parser-v1"
+_FILE_LOCKS: dict[str, threading.RLock] = {}
+_FILE_LOCKS_GUARD = threading.Lock()
 
 PIPELINE_STAGES: list[tuple[str, str, str]] = [
     ("task_understanding", "任务理解", "任务理解专家"),
@@ -229,13 +235,31 @@ class AnalysisRunRepository:
             or DEFAULT_EVIDENCE_LIBRARY_PATH
         )
         self.document_repository = document_repository or get_default_document_repository()
-        self.session_factory = session_factory
         self.use_database = use_database if use_database is not None else os.getenv("USE_DATABASE", "1") != "0"
         if self.use_database:
-            init_db()
+            bind = getattr(session_factory, "kw", {}).get("bind")
+            if bind is None:
+                init_db()
+            else:
+                Base.metadata.create_all(bind=bind)
+            self.session_factory = session_factory
+        else:
+            retrieval_path = self.path.with_suffix(".retrieval.db")
+            retrieval_path.parent.mkdir(parents=True, exist_ok=True)
+            retrieval_engine = make_engine(f"sqlite:///{retrieval_path}")
+            Base.metadata.create_all(bind=retrieval_engine)
+            self.session_factory = sessionmaker(
+                bind=retrieval_engine,
+                autoflush=False,
+                autocommit=False,
+                future=True,
+            )
         self.search_cache: TTLCache[list[dict[str, Any]]] = TTLCache(ttl_seconds=30, max_items=256)
-        self.search_index = search_index or HybridSearchIndex(session_factory=session_factory)
-        self.agent_supervisor = agent_supervisor or AgentTeamSupervisor(repository=self.rule_repository)
+        self.search_index = search_index or HybridSearchIndex(session_factory=self.session_factory)
+        self.agent_supervisor = agent_supervisor or AgentTeamSupervisor(
+            repository=self.rule_repository,
+            agent_specs=None if self.use_database else _seed_agent_specs(),
+        )
 
     def create_draft(self, payload: AnalysisRunCreate) -> AnalysisRun:
         now = _now()
@@ -303,7 +327,7 @@ class AnalysisRunRepository:
         self._save_run(run)
         return run
 
-    def start(self, run_id: str) -> AnalysisRun:
+    def start(self, run_id: str, *, dispatch_mode: str | None = None) -> AnalysisRun:
         run = self.get(run_id)
         if run.status != "ready":
             raise ValueError("Run is not ready to start.")
@@ -323,17 +347,69 @@ class AnalysisRunRepository:
             )
         )
         self._save_run(run)
-        job_id = dispatch_analysis_job(run.run_id, self)
-        run = self.get(run.run_id)
         run.events.append(
             _event(
                 "tool_started",
                 "worker_dispatcher",
                 "后台任务已创建",
-                f"job_id={job_id}",
+                "分析任务已提交给后台执行器。",
                 stage_key="task_understanding",
                 action_label="worker dispatch",
                 metrics={"tool_calls": 1},
+            )
+        )
+        self._save_run(run)
+        job_id = dispatch_analysis_job(run.run_id, self, mode=dispatch_mode)
+        if dispatch_mode == "thread":
+            return run
+        run = self.get(run.run_id)
+        run.events.append(
+            _event(
+                "tool_completed",
+                "worker_dispatcher",
+                "后台任务执行完成",
+                f"job_id={job_id}",
+                stage_key="task_understanding",
+                action_label="worker dispatch",
+            )
+        )
+        self._save_run(run)
+        return run
+
+    def resume(self, run_id: str, *, dispatch_mode: str | None = None) -> AnalysisRun:
+        run = self.get(run_id)
+        if run.status in {"completed", "failed"}:
+            return run
+        if run.status == "ready":
+            return self.start(run_id, dispatch_mode=dispatch_mode)
+        if not run.inputs_frozen:
+            raise ValueError("Run inputs are not frozen; start the run first.")
+        run.status = "queued"
+        run.current_stage = "queued"
+        run.events.append(
+            _event(
+                "tool_started",
+                "worker_dispatcher",
+                "恢复后台任务",
+                "检测到分析任务停留在非终态阶段，已重新投递后台执行。",
+                stage_key="task_understanding",
+                action_label="resume dispatch",
+                metrics={"tool_calls": 1},
+            )
+        )
+        self._save_run(run)
+        job_id = dispatch_analysis_job(run.run_id, self, mode=dispatch_mode)
+        if dispatch_mode == "thread":
+            return run
+        run = self.get(run.run_id)
+        run.events.append(
+            _event(
+                "tool_completed",
+                "worker_dispatcher",
+                "后台恢复任务已创建",
+                f"job_id={job_id}",
+                stage_key="task_understanding",
+                action_label="resume dispatch",
             )
         )
         self._save_run(run)
@@ -549,6 +625,7 @@ class AnalysisRunRepository:
                 actor_name="orchestrator",
                 action_label="证据抽取",
             )
+            self._save_run(run)
             max_findings = _effective_max_findings(payload)
             team_result = self.agent_supervisor.run(
                 text=text,
@@ -990,11 +1067,11 @@ class AnalysisRunRepository:
         dumped = run.model_dump()
         dumped["input_payload"] = _payload_from_run(run).model_dump()
         dumped["frozen_rule_snapshot"] = run.frozen_rule_snapshot
-        dumped["document_blocks"] = [item.model_dump() for item in run.document_blocks]
         dumped["evidence"] = [item.model_dump() for item in run.evidence]
         dumped["verification_results"] = [item.model_dump() for item in run.verification_results]
         dumped["report"] = run.report.model_dump() if run.report else None
         if self.use_database:
+            dumped["document_blocks"] = [item.model_dump() for item in run.document_blocks]
             with self.session_factory() as session:
                 row = session.get(AnalysisRunRow, run.run_id)
                 if row is None:
@@ -1019,15 +1096,20 @@ class AnalysisRunRepository:
                     row.payload = dumped
                 session.commit()
             return
-        data = self._load_all()
-        data[run.run_id] = dumped
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
+        with _path_lock(self.path):
+            data = _read_yaml_unlocked(self.path, {})
+            existing = data.get(run.run_id, {})
+            existing_blocks = existing.get("document_blocks") or []
+            if existing_blocks and len(existing_blocks) == len(run.document_blocks):
+                dumped["document_blocks"] = existing_blocks
+            else:
+                dumped["document_blocks"] = [item.model_dump() for item in run.document_blocks]
+            data[run.run_id] = dumped
+            _write_yaml_atomic_unlocked(self.path, data)
 
     def _load_all(self) -> dict[str, Any]:
-        if not self.path.exists():
-            return {}
-        return yaml.safe_load(self.path.read_text(encoding="utf-8")) or {}
+        with _path_lock(self.path):
+            return _read_yaml_unlocked(self.path, {})
 
     def _load_evidence_library(self) -> list[dict[str, Any]]:
         if self.use_database:
@@ -1045,9 +1127,8 @@ class AnalysisRunRepository:
                     }
                     for row in rows
                 ]
-        if not self.evidence_library_path.exists():
-            return []
-        return yaml.safe_load(self.evidence_library_path.read_text(encoding="utf-8")) or []
+        with _path_lock(self.evidence_library_path):
+            return _read_yaml_unlocked(self.evidence_library_path, [])
 
     def _save_evidence_library(self, items: list[dict[str, Any]]) -> None:
         if self.use_database:
@@ -1069,11 +1150,8 @@ class AnalysisRunRepository:
                     )
                 session.commit()
             return
-        self.evidence_library_path.parent.mkdir(parents=True, exist_ok=True)
-        self.evidence_library_path.write_text(
-            yaml.safe_dump(items, allow_unicode=True, sort_keys=False),
-            encoding="utf-8",
-        )
+        with _path_lock(self.evidence_library_path):
+            _write_yaml_atomic_unlocked(self.evidence_library_path, items)
 
 
 def _payload_from_run(run: AnalysisRun) -> AnalysisRunCreate:
@@ -1639,6 +1717,45 @@ def _event(
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _path_lock(path: Path) -> threading.RLock:
+    key = str(path.resolve() if path.exists() else path.absolute())
+    with _FILE_LOCKS_GUARD:
+        lock = _FILE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _FILE_LOCKS[key] = lock
+        return lock
+
+
+def _read_yaml_unlocked(path: Path, default: Any) -> Any:
+    if not path.exists():
+        return default
+    return yaml.safe_load(path.read_text(encoding="utf-8")) or default
+
+
+def _write_yaml_atomic_unlocked(path: Path, data: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
+    temp_path.write_text(
+        yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    temp_path.replace(path)
+
+
+def _seed_agent_specs() -> list[AgentSpec]:
+    return [
+        AgentSpec(
+            name=str(item["agent_name"]),
+            title=str(item["title"]),
+            rule_types=tuple(item.get("rule_types") or []),
+            categories=tuple(item.get("categories") or []),
+            default=bool(item.get("is_default")),
+        )
+        for item in AGENT_SPECS
+    ]
 
 
 def get_default_analysis_repository() -> AnalysisRunRepository:

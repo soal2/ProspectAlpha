@@ -1,4 +1,5 @@
 from pathlib import Path
+import time
 
 from fastapi.testclient import TestClient
 
@@ -49,7 +50,14 @@ def test_analysis_api_creates_ready_run_then_start_completes(tmp_path, monkeypat
 
     run_id = payload["run_id"]
     started = client.post(f"/analysis-runs/{run_id}/start").json()
-    assert started["status"] == "completed"
+    assert started["status"] in {"queued", "completed"}
+    for _ in range(50):
+        current = client.get(f"/analysis-runs/{run_id}").json()
+        if current["status"] == "completed":
+            break
+        time.sleep(0.1)
+    else:
+        raise AssertionError("analysis run did not complete")
     findings = client.get(f"/analysis-runs/{run_id}/findings").json()["findings"]
     assert findings
 

@@ -180,8 +180,9 @@ function RealtimeStream() {
     return mergeBubbles(traceFlow, eventFlow);
   }, [liveEvents, run.created_at, trace]);
   const liveEvidenceFeed = useMemo(
-    () => mergeEvidenceFeed(evidenceFeed, liveEvents),
-    [evidenceFeed, liveEvents],
+    () =>
+      terminalStatuses.has(run.status) ? evidenceFeed : mergeEvidenceFeed(evidenceFeed, liveEvents),
+    [evidenceFeed, liveEvents, run.status],
   );
   const filteredLiveEvidence = liveEvidenceFeed.filter((item) =>
     `${item.source} ${item.title} ${item.id} ${item.snippet ?? ""}`
