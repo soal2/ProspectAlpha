@@ -23,6 +23,8 @@ _ACTIVE_THREAD_JOBS_LOCK = threading.Lock()
 
 def dispatch_analysis_job(run_id: str, executor: AnalysisExecutor, *, mode: str | None = None) -> str:
     mode = mode or os.getenv("ANALYSIS_EXECUTION_MODE", "inline")
+    if mode not in {"inline", "thread", "rq"}:
+        raise ValueError("ANALYSIS_EXECUTION_MODE must be inline, thread, or rq")
     if mode == "rq":
         return _dispatch_rq(run_id)
     if mode == "thread":

@@ -150,9 +150,6 @@ function WorkspacePage() {
   const focusDisplay = useMemo(() => inferFocus(requestText), [requestText]);
   const activeRuleSet =
     options?.risk_rule_sets.find((item) => item.active) ?? options?.risk_rule_sets[0];
-  const defaultAgents = options?.agents.filter((item) => item.default).length
-    ? options.agents.filter((item) => item.default)
-    : options?.agents;
   const deepDepth = options?.analysis_depths.find((item) => item.depth === "deep");
   const canConfirm = Boolean(uploadedDocument && requestText.trim() && !uploading);
 
@@ -455,7 +452,7 @@ function WorkspacePage() {
               <ConfirmItem
                 icon={Users}
                 label="Agent 队伍"
-                value={`${defaultAgents?.length ?? agents.length} 位专家 · 默认队伍`}
+                value={`战略层按任务动态选用 · ${options?.agents.length ?? agents.length} 位可用专家`}
               />
             </div>
 
@@ -529,7 +526,6 @@ function WorkspacePage() {
         ipo_project_hint: requestText.trim(),
         confirm_defaults: true,
         risk_rule_set_id: activeRuleSet?.rule_set_id,
-        selected_agent_names: defaultAgents?.map((item) => item.agent_name) ?? [],
         analysis_depth: "deep",
         structured_data: {
           focus_areas: focusDisplay,

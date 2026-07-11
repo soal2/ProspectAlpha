@@ -1,107 +1,136 @@
 import { createFileRoute, getRouteApi, useNavigate } from "@tanstack/react-router";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
-  CheckCircle2,
-  Loader2,
-  Circle,
-  Sparkles,
-  Workflow,
-  FileText,
   AlertCircle,
   ArrowRight,
+  CheckCircle2,
+  Circle,
+  ExternalLink,
+  FileText,
+  Loader2,
+  PauseCircle,
+  RefreshCw,
+  Sparkles,
+  Workflow,
 } from "lucide-react";
-import { motion, AnimatePresence } from "framer-motion";
+import { AnimatePresence, motion } from "framer-motion";
 import { OrchestraFlow } from "@/components/orchestra-flow";
 import {
   getAgents,
+  getAnalysisOptions,
+  getAnalysisRun,
+  selectAnalysisExperts,
   streamAnalysisRun,
+  type AgentTeamState,
+  type AnalysisOptions,
   type AnalysisRun,
   type AnalysisRunEvent,
   type OrchestraPlan,
   type OrchestraStageStatus,
+  type StrategyPlan,
 } from "@/lib/data-service";
-import { type Agent } from "@/lib/types";
+import type { Agent } from "@/lib/types";
 
 export const Route = createFileRoute("/analyses/$id/orchestra")({
   loader: async ({ params }) => {
-    const [agentsList, run] = await Promise.all([getAgents(), fetchRun(params.id)]);
-    return { agentsList, initialRun: run };
+    const [agentsList, options, run] = await Promise.all([
+      getAgents(),
+      getAnalysisOptions(),
+      getAnalysisRun(params.id),
+    ]);
+    return { agentsList, options, initialRun: run };
   },
   component: OrchestraPage,
-  head: () => ({ meta: [{ title: "Orchestra 实时编排 · ProspectAlpha" }] }),
+  head: () => ({ meta: [{ title: "动态 Agent 编排 · ProspectAlpha" }] }),
 });
 
-async function fetchRun(id: string): Promise<AnalysisRun | null> {
-  try {
-    const res = await fetch(
-      `${import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000"}/analysis-runs/${id}`,
-    );
-    if (!res.ok) return null;
-    return (await res.json()) as AnalysisRun;
-  } catch {
-    return null;
-  }
-}
-
 const TERMINAL = new Set(["completed", "failed"]);
+const PAUSED = new Set(["awaiting_expert_selection"]);
 
 function OrchestraPage() {
   const api = getRouteApi("/analyses/$id");
   const { id } = api.useParams();
   const navigate = useNavigate();
-  const { agentsList: initialAgents, initialRun } = Route.useLoaderData() as {
+  const { agentsList, options, initialRun } = Route.useLoaderData() as {
     agentsList: Agent[];
-    initialRun: AnalysisRun | null;
+    options: AnalysisOptions;
+    initialRun: AnalysisRun;
   };
 
-  const [run, setRun] = useState<AnalysisRun | null>(initialRun);
-  const [events, setEvents] = useState<AnalysisRunEvent[]>(initialRun?.events ?? []);
-  const [agentsList] = useState<Agent[]>(initialAgents);
+  const [run, setRun] = useState<AnalysisRun>(initialRun);
+  const [events, setEvents] = useState<AnalysisRunEvent[]>(initialRun.events ?? []);
   const [streamError, setStreamError] = useState<string | null>(null);
-  const abortRef = useRef<AbortController | null>(null);
+  const [streamEpoch, setStreamEpoch] = useState(0);
+  const [selectedAgents, setSelectedAgents] = useState<string[]>([]);
+  const [resuming, setResuming] = useState(false);
+  const [resumeError, setResumeError] = useState<string | null>(null);
 
-  const plan = (run?.orchestra_plan ?? null) as OrchestraPlan | null;
-
-  // Derive stage status from run.events
-  const stageStatus = deriveStageStatus(events, run?.current_stage);
+  const plan = useMemo(() => strategyPlanForRun(run), [run]);
+  const teamState = run.team_state ?? [];
+  const stageStatus = deriveStageStatus(events, run.current_stage, run.status);
+  const paused = PAUSED.has(run.status);
+  const completedModuleIds = new Set(
+    (run.module_results ?? []).map((item) => String(item.module_id ?? "")).filter(Boolean),
+  );
+  const pendingModuleCount = plan
+    ? plan.assignments.filter((assignment) => !completedModuleIds.has(assignment.module_id)).length
+    : undefined;
 
   useEffect(() => {
-    if (!run) return;
-    if (TERMINAL.has(run.status)) return;
+    if (TERMINAL.has(run.status) || PAUSED.has(run.status)) return;
     const controller = new AbortController();
-    abortRef.current = controller;
     setStreamError(null);
     streamAnalysisRun(
       id,
-      (event) => setEvents((cur) => [...cur, event]),
-      (finalRun) => {
-        setRun(finalRun);
-        setEvents(finalRun.events);
+      (event) => setEvents((current) => appendUniqueEvent(current, event)),
+      (latestRun) => {
+        setRun(latestRun);
+        setEvents(latestRun.events ?? []);
       },
       { signal: controller.signal },
-    ).catch((err: unknown) => {
-      if (err instanceof DOMException && err.name === "AbortError") return;
-      setStreamError(err instanceof Error ? err.message : "stream failed");
+    ).catch((error: unknown) => {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      setStreamError(error instanceof Error ? error.message : "stream failed");
     });
     return () => controller.abort();
+    // Status updates arrive inside the stream; reconnect only after an explicit resume.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, run?.run_id]);
+  }, [id, run.run_id, streamEpoch]);
 
-  // Poll for plan if not yet on the run (LLM might still be planning)
   useEffect(() => {
-    if (!run) return;
-    if (plan) return;
     if (TERMINAL.has(run.status)) return;
-    const t = setInterval(() => {
-      fetchRun(id).then((fresh) => {
-        if (!fresh) return;
-        if (fresh.orchestra_plan) {
+    const timer = setInterval(() => {
+      getAnalysisRun(id)
+        .then((fresh) => {
+          if (PAUSED.has(run.status) && !PAUSED.has(fresh.status)) {
+            setStreamEpoch((value) => value + 1);
+          }
           setRun(fresh);
-        }
-      });
+          setEvents((current) =>
+            (fresh.events?.length ?? 0) >= current.length ? (fresh.events ?? []) : current,
+          );
+        })
+        .catch(() => undefined);
     }, 1500);
-    return () => clearInterval(t);
-  }, [id, run, plan]);
+    return () => clearInterval(timer);
+  }, [id, run.status]);
+
+  async function resumeWithExperts() {
+    if (!selectedAgents.length) return;
+    setResuming(true);
+    setResumeError(null);
+    try {
+      const resumedRun = await selectAnalysisExperts(id, selectedAgents);
+      setRun(resumedRun);
+      setEvents(resumedRun.events ?? []);
+      setSelectedAgents([]);
+      setStreamEpoch((value) => value + 1);
+    } catch (error) {
+      setResumeError(error instanceof Error ? error.message : "恢复动态编排失败");
+    } finally {
+      setResuming(false);
+    }
+  }
 
   return (
     <div className="flex h-[calc(100vh-3.5rem)] min-h-[640px] flex-col">
@@ -109,9 +138,9 @@ function OrchestraPage() {
         <div className="flex items-center gap-2">
           <Sparkles className="size-4 text-primary" />
           <div>
-            <h1 className="font-serif text-base font-semibold">Orchestra 实时编排</h1>
+            <h1 className="font-serif text-base font-semibold">动态 Agent 编排</h1>
             <p className="text-[11px] text-muted-foreground">
-              {run?.company_name ?? "加载中"} · {run?.run_id}
+              {run.company_name} · {run.run_id}
             </p>
           </div>
         </div>
@@ -120,14 +149,22 @@ function OrchestraPage() {
             <span className="inline-flex items-center gap-1 rounded-full bg-destructive/10 px-2 py-1 text-destructive">
               <AlertCircle className="size-3" /> SSE 断开：{streamError}
             </span>
+          ) : paused ? (
+            <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/10 px-2 py-1 text-amber-700">
+              <PauseCircle className="size-3" /> 等待人工选择专家
+            </span>
           ) : (
             <span className="inline-flex items-center gap-1">
-              <span className="size-1.5 animate-pulse rounded-full bg-primary" />
-              {TERMINAL.has(run?.status ?? "") ? "已结束" : "实时同步中"}
+              <span
+                className={`size-1.5 rounded-full bg-primary ${TERMINAL.has(run.status) ? "" : "animate-pulse"}`}
+              />
+              {TERMINAL.has(run.status) ? "已结束" : "A2A 实时同步中"}
             </span>
           )}
-          <span className="rounded bg-muted px-1.5 py-0.5 tabular">{run?.status ?? "--"}</span>
-          {run?.status === "completed" ? (
+          <span className="rounded bg-muted px-1.5 py-0.5 tabular">
+            {runStatusLabel(run.status)}
+          </span>
+          {run.status === "completed" ? (
             <button
               onClick={() => navigate({ to: "/analyses/$id", params: { id } })}
               className="inline-flex items-center gap-1 rounded-full bg-primary px-3 py-1 text-primary-foreground hover:bg-primary/90"
@@ -138,45 +175,121 @@ function OrchestraPage() {
         </div>
       </header>
 
-      <div className="grid flex-1 grid-cols-[260px_1fr_320px] overflow-hidden">
-        {/* Left: stage pipeline */}
-        <aside className="overflow-y-auto border-r border-border bg-card/40 px-4 py-5">
+      {paused ? (
+        <ExpertSelectionPanel
+          options={options}
+          selectedAgents={selectedAgents}
+          interruptReason={run.interrupt_reason}
+          error={resumeError}
+          resuming={resuming}
+          requiredCount={pendingModuleCount}
+          onToggle={(agentName) =>
+            setSelectedAgents((current) =>
+              current.includes(agentName)
+                ? current.filter((name) => name !== agentName)
+                : pendingModuleCount && current.length >= pendingModuleCount
+                  ? current
+                  : [...current, agentName],
+            )
+          }
+          onResume={() => void resumeWithExperts()}
+        />
+      ) : null}
+
+      <div className="grid min-h-0 flex-1 grid-cols-[240px_minmax(0,1fr)_300px] overflow-hidden max-xl:grid-cols-[minmax(0,1fr)_270px]">
+        <aside className="overflow-y-auto border-r border-border bg-card/40 px-4 py-5 max-xl:hidden">
           <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
-            <Workflow className="size-3.5 text-primary" /> 分析编队阶段
+            <Workflow className="size-3.5 text-primary" /> 战略任务编队
           </div>
-          <ol className="mt-3 space-y-1">
-            {pipelineStages(plan, run).map((s, i) => (
-              <li key={s.key} className="relative pl-6">
-                <span className="absolute left-0 top-1.5">
-                  {s.status === "done" && <CheckCircle2 className="size-4 text-emerald-600" />}
-                  {s.status === "running" && (
-                    <Loader2 className="size-4 animate-spin text-primary" />
-                  )}
-                  {(s.status === "queued" || s.status === "failed") && (
-                    <Circle
-                      className={`size-4 ${s.status === "failed" ? "text-destructive" : "text-muted-foreground/40"}`}
-                    />
-                  )}
-                </span>
-                <div className="rounded-md px-2 py-1 text-[11.5px]">
-                  <div className="font-medium leading-snug">{s.label}</div>
-                  <div className="text-[10px] text-muted-foreground">{s.owner}</div>
+          {plan ? (
+            <>
+              <p className="mt-3 text-xs leading-relaxed text-foreground/80">{plan.summary}</p>
+              {plan.focus_areas?.length ? (
+                <div className="mt-3 flex flex-wrap gap-1">
+                  {plan.focus_areas.map((focus) => (
+                    <span
+                      key={focus}
+                      className="rounded-full bg-primary/8 px-2 py-0.5 text-[10px] text-primary"
+                    >
+                      {focus}
+                    </span>
+                  ))}
                 </div>
-                {i < (plan?.stages.length ?? 0) + 3 - 1 && (
-                  <span className="absolute left-2 top-6 h-4 w-px bg-border" />
-                )}
-              </li>
-            ))}
-          </ol>
+              ) : null}
+              <ol className="mt-4 space-y-2">
+                {plan.assignments.map((assignment) => {
+                  const member = teamState.find(
+                    (item) =>
+                      item.current_module === assignment.module_id ||
+                      item.agent_name === assignment.agent_name,
+                  );
+                  const status =
+                    stageStatus[assignment.module_id] ?? teamStageStatus(member, run.current_stage);
+                  return (
+                    <li
+                      key={assignment.module_id}
+                      className="rounded-lg border border-border bg-background px-3 py-2.5"
+                    >
+                      <div className="flex items-start gap-2">
+                        <StageStatusIcon status={status} />
+                        <div className="min-w-0 flex-1">
+                          <div className="text-xs font-medium leading-snug">
+                            {assignment.module}
+                          </div>
+                          <div className="mt-0.5 truncate text-[10px] text-muted-foreground">
+                            {expertTitle(options, member?.agent_name ?? assignment.agent_name)} ·{" "}
+                            {member?.status ?? "queued"}
+                          </div>
+                        </div>
+                        {member?.replacement_round ? (
+                          <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-[9px] text-amber-700">
+                            R{member.replacement_round}
+                          </span>
+                        ) : null}
+                      </div>
+                    </li>
+                  );
+                })}
+              </ol>
+            </>
+          ) : (
+            <div className="mt-4 rounded-lg border border-dashed border-border p-3 text-xs leading-relaxed text-muted-foreground">
+              战略层正在加载专家能力卡并规划模块任务。
+            </div>
+          )}
+
+          {run.replacement_history?.length ? (
+            <div className="mt-6 border-t border-border pt-4">
+              <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+                <RefreshCw className="size-3.5 text-amber-700" /> 动态替补记录
+              </div>
+              <div className="mt-2 space-y-2">
+                {run.replacement_history.map((record, index) => (
+                  <div
+                    key={`${replacementValue(record, "module_id")}-${index}`}
+                    className="rounded-md bg-amber-500/8 px-2.5 py-2 text-[10.5px] leading-relaxed"
+                  >
+                    <div className="font-medium">
+                      {replacementValue(record, "module_id") || "分析模块"} · 第
+                      {replacementValue(record, "round") || index + 1} 轮
+                    </div>
+                    <div className="mt-0.5 text-muted-foreground">{replacementSummary(record)}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
         </aside>
 
-        {/* Middle: reactflow DAG */}
         <section className="relative overflow-hidden bg-background">
           <OrchestraFlow
             plan={plan}
             stageStatus={stageStatus}
+            teamState={teamState}
             agentsList={agentsList}
-            pipelineStage={run?.current_stage}
+            pipelineStage={run.current_stage}
+            runStatus={run.status}
+            failedStage={run.failed_stage}
           />
           {!plan ? (
             <div className="absolute inset-x-0 bottom-4 flex justify-center">
@@ -185,52 +298,58 @@ function OrchestraPage() {
                 transition={{ duration: 1.6, repeat: Infinity }}
                 className="inline-flex items-center gap-1.5 rounded-full bg-card px-3 py-1.5 text-[11px] text-muted-foreground shadow ring-1 ring-border"
               >
-                <Sparkles className="size-3 text-primary" /> 等待 Orchestra LLM 生成分析计划…
+                <Sparkles className="size-3 text-primary" /> 等待战略层生成动态编队…
               </motion.div>
             </div>
           ) : null}
         </section>
 
-        {/* Right: event stream */}
         <aside className="flex flex-col overflow-hidden border-l border-border bg-card/40">
           <div className="flex items-center justify-between border-b border-border px-4 py-3 text-[11px] font-medium">
             <span className="inline-flex items-center gap-1.5">
-              <FileText className="size-3.5 text-primary" /> 实时事件流
+              <FileText className="size-3.5 text-primary" /> A2A 生命周期
             </span>
             <span className="text-muted-foreground tabular">{events.length}</span>
           </div>
           <div className="flex-1 overflow-y-auto px-4 py-3">
             <AnimatePresence initial={false}>
-              {events.map((ev, i) => (
+              {events.map((event, index) => (
                 <motion.div
-                  key={i}
+                  key={`${event.created_at ?? index}-${event.event_type}-${event.actor_name}`}
                   initial={{ opacity: 0, y: 6 }}
                   animate={{ opacity: 1, y: 0 }}
                   className="mb-2.5 rounded-lg border border-border bg-background px-3 py-2"
                 >
                   <div className="flex items-center gap-1.5 text-[10.5px] text-muted-foreground">
                     <span
-                      className={`rounded px-1.5 py-0.5 font-medium ${kindClass(ev.event_type)}`}
+                      className={`rounded px-1.5 py-0.5 font-medium ${kindClass(event.event_type)}`}
                     >
-                      {kindLabel(ev.event_type)}
+                      {kindLabel(event.event_type)}
                     </span>
-                    <span className="font-medium text-foreground/80">{ev.actor_name}</span>
+                    <span className="truncate font-medium text-foreground/80">
+                      {event.actor_name}
+                    </span>
+                    {event.created_at ? (
+                      <span className="ml-auto shrink-0 tabular">
+                        {formatClock(event.created_at)}
+                      </span>
+                    ) : null}
                   </div>
-                  <div className="mt-1 text-[12px] font-medium leading-snug">{ev.title}</div>
-                  {ev.summary ? (
+                  <div className="mt-1 text-[12px] font-medium leading-snug">{event.title}</div>
+                  {event.summary ? (
                     <div className="mt-0.5 text-[10.5px] leading-relaxed text-muted-foreground">
-                      {ev.summary}
+                      {event.summary}
                     </div>
                   ) : null}
                 </motion.div>
               ))}
-              {!TERMINAL.has(run?.status ?? "") ? (
+              {!TERMINAL.has(run.status) && !paused ? (
                 <motion.div
                   animate={{ opacity: [0.4, 1, 0.4] }}
                   transition={{ duration: 1.4, repeat: Infinity }}
                   className="inline-flex items-center gap-1.5 text-[10.5px] text-muted-foreground"
                 >
-                  <span className="size-1.5 rounded-full bg-primary" /> Agent 仍在协同…
+                  <span className="size-1.5 rounded-full bg-primary" /> Agent 正在监听 JSON 邮箱…
                 </motion.div>
               ) : null}
             </AnimatePresence>
@@ -241,98 +360,272 @@ function OrchestraPage() {
   );
 }
 
-function pipelineStages(plan: OrchestraPlan | null, run: AnalysisRun | null) {
-  const cur = run?.current_stage ?? "";
-  const status = (key: string): OrchestraStageStatus => {
-    if (cur === key) return "running";
-    const order = [
-      "orchestra_planning",
-      "ready",
-      "queued",
-      "parsing",
-      "indexing",
-      "agent_running",
-      "verifying",
-      "reporting",
-      "completed",
-    ];
-    const ci = order.indexOf(cur);
-    const ki = order.indexOf(key);
-    if (ci < 0 || ki < 0) return "queued";
-    if (run?.status === "completed") return "done";
-    if (run?.status === "failed" && cur === key) return "failed";
-    return ci > ki ? "done" : "queued";
-  };
-  const stages: { key: string; label: string; owner: string; status: OrchestraStageStatus }[] = [
-    {
-      key: "orchestra_planning",
-      label: "Orchestra 编排",
-      owner: "orchestrator",
-      status: status("orchestra_planning"),
-    },
-  ];
-  if (plan) {
-    for (const stage of plan.stages) {
-      // map plan stage key → approximate pipeline signal: stages execute during "agent_running"
-      const ss: OrchestraStageStatus =
-        cur === "agent_running"
-          ? "running"
-          : status("agent_running") === "done"
-            ? "done"
-            : "queued";
-      stages.push({
-        key: stage.key,
-        label: stage.label,
-        owner: stage.agent,
-        status: ss,
-      });
-    }
+function ExpertSelectionPanel({
+  options,
+  selectedAgents,
+  interruptReason,
+  error,
+  resuming,
+  requiredCount,
+  onToggle,
+  onResume,
+}: {
+  options: AnalysisOptions;
+  selectedAgents: string[];
+  interruptReason?: string | null;
+  error: string | null;
+  resuming: boolean;
+  requiredCount?: number;
+  onToggle: (agentName: string) => void;
+  onResume: () => void;
+}) {
+  return (
+    <section className="border-b border-amber-500/30 bg-amber-500/8 px-6 py-4">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div className="max-w-2xl">
+          <div className="flex items-center gap-2 text-sm font-semibold text-amber-800">
+            <PauseCircle className="size-4" /> 需要人工选择可用专家
+          </div>
+          <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+            {interruptReason ?? "战略层返回的专家名单未通过校验，当前运行已安全暂停。"}
+            {requiredCount
+              ? ` 当前有 ${requiredCount} 个未完成模块，请选择 ${requiredCount} 位专家。`
+              : " 请选择至少一位专家。"}
+            选择后将从 LangGraph checkpoint 恢复；后续任务和替补仍由战略层动态规划。
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={onResume}
+          disabled={
+            !selectedAgents.length ||
+            resuming ||
+            (requiredCount !== undefined && selectedAgents.length !== requiredCount)
+          }
+          className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-primary px-4 py-2 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {resuming ? (
+            <Loader2 className="size-3.5 animate-spin" />
+          ) : (
+            <ArrowRight className="size-3.5" />
+          )}
+          恢复动态编排
+        </button>
+      </div>
+      <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+        {options.agents.map((agent) => {
+          const selected = selectedAgents.includes(agent.agent_name);
+          return (
+            <div
+              key={agent.agent_name}
+              className={`rounded-lg border bg-card px-3 py-2.5 transition ${
+                selected ? "border-primary ring-1 ring-primary/30" : "border-border"
+              }`}
+            >
+              <label className="flex cursor-pointer items-start gap-2">
+                <input
+                  type="checkbox"
+                  checked={selected}
+                  disabled={
+                    !selected &&
+                    requiredCount !== undefined &&
+                    selectedAgents.length >= requiredCount
+                  }
+                  onChange={() => onToggle(agent.agent_name)}
+                  className="mt-0.5"
+                />
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-xs font-medium">{agent.title}</span>
+                  <span className="mt-0.5 line-clamp-2 block text-[10px] leading-relaxed text-muted-foreground">
+                    {agent.description || agent.capabilities?.join("、") || "可参与招股书风险分析"}
+                  </span>
+                </span>
+              </label>
+              <div className="mt-2 flex items-center justify-between gap-2">
+                <span className="truncate text-[9.5px] text-muted-foreground">
+                  {agent.capabilities?.slice(0, 2).join(" · ") || "通用分析"}
+                </span>
+                {agent.agent_card_url ? (
+                  <a
+                    href={agent.agent_card_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex shrink-0 items-center gap-0.5 text-[9.5px] text-primary hover:underline"
+                  >
+                    Agent Card <ExternalLink className="size-2.5" />
+                  </a>
+                ) : null}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      {error ? (
+        <div className="mt-2 inline-flex items-center gap-1 text-xs text-destructive">
+          <AlertCircle className="size-3.5" /> {error}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function strategyPlanForRun(run: AnalysisRun): StrategyPlan | null {
+  if (run.strategy_plan && Array.isArray(run.strategy_plan.assignments)) {
+    return run.strategy_plan;
   }
-  stages.push({
-    key: "verifying",
-    label: "证据门禁",
-    owner: "verifier",
-    status: status("verifying"),
-  });
-  stages.push({
-    key: "reporting",
-    label: "报告签发",
-    owner: "reporter",
-    status: status("reporting"),
-  });
-  return stages;
+  const legacy = run.orchestra_plan as OrchestraPlan | StrategyPlan | undefined;
+  if (!legacy) return null;
+  if ("assignments" in legacy && Array.isArray(legacy.assignments)) return legacy;
+  if (!("stages" in legacy) || !Array.isArray(legacy.stages)) return null;
+  return {
+    summary: legacy.summary,
+    focus_areas: legacy.focus_areas,
+    assignments: legacy.stages.map((stage) => ({
+      module_id: stage.key,
+      agent_name: stage.agent,
+      module: stage.label,
+      goal: stage.goal,
+      expected_outputs: stage.expected_outputs,
+    })),
+  };
 }
 
 function deriveStageStatus(
-  _events: AnalysisRunEvent[],
+  events: AnalysisRunEvent[],
   currentStage: string | undefined,
+  runStatus: string,
 ): Record<string, OrchestraStageStatus> {
-  // We rely primarily on run.current_stage; events are for the right-pane feed.
-  // Return empty map; the OrchestraFlow component infers per-stage status from currentStage.
-  void currentStage;
-  return {};
+  const statuses: Record<string, OrchestraStageStatus> = {};
+  for (const event of events) {
+    const rawModuleId = String(
+      event.payload?.module_id ?? event.payload?.task_id ?? event.stage_key ?? "",
+    );
+    const moduleId = rawModuleId.replace(/__replacement_\d+$/, "");
+    if (!moduleId) continue;
+    const type = event.event_type.toLowerCase();
+    if (type.includes("failed") || type.includes("error")) statuses[moduleId] = "failed";
+    else if (type.includes("completed") || type.includes("result") || type.includes("artifact"))
+      statuses[moduleId] = "done";
+    else if (type.includes("started") || type.includes("assigned") || type.includes("working"))
+      statuses[moduleId] = "running";
+  }
+  if (runStatus === "awaiting_expert_selection") {
+    for (const key of Object.keys(statuses)) {
+      if (statuses[key] === "running") statuses[key] = "paused";
+    }
+  }
+  return statuses;
+}
+
+function teamStageStatus(
+  member: AgentTeamState | undefined,
+  currentStage: string,
+): OrchestraStageStatus {
+  if (!member) return "queued";
+  const status = member.status.toLowerCase();
+  if (status.includes("fail") || status.includes("error")) return "failed";
+  if (status.includes("complete") || status.includes("done") || status.includes("terminat"))
+    return "done";
+  if (status.includes("run") || status.includes("work") || member.current_module) return "running";
+  if (["verifying", "synthesizing", "reporting", "completed"].includes(currentStage)) return "done";
+  return "queued";
+}
+
+function StageStatusIcon({ status }: { status: OrchestraStageStatus }) {
+  if (status === "done") return <CheckCircle2 className="mt-0.5 size-3.5 text-emerald-600" />;
+  if (status === "running")
+    return <Loader2 className="mt-0.5 size-3.5 animate-spin text-primary" />;
+  if (status === "failed") return <AlertCircle className="mt-0.5 size-3.5 text-destructive" />;
+  if (status === "paused") return <PauseCircle className="mt-0.5 size-3.5 text-amber-700" />;
+  return <Circle className="mt-0.5 size-3.5 text-muted-foreground/40" />;
+}
+
+function expertTitle(options: AnalysisOptions, agentName: string) {
+  return options.agents.find((agent) => agent.agent_name === agentName)?.title ?? agentName;
 }
 
 function kindLabel(eventType: string): string {
-  if (eventType.startsWith("agent_started") || eventType.startsWith("stage_started")) return "启动";
-  if (eventType.startsWith("agent_completed") || eventType.startsWith("stage_completed"))
-    return "完成";
-  if (eventType.startsWith("verification")) return "裁定";
-  if (eventType.startsWith("report")) return "报告";
-  if (eventType.startsWith("orchestra")) return "编排";
-  if (eventType.startsWith("stage_failed")) return "失败";
-  if (eventType.startsWith("tool")) return "调用";
+  const type = eventType.toLowerCase();
+  if (type.includes("mailbox") || type.includes("message") || type.includes("a2a")) return "A2A";
+  if (type.includes("idle") || type.includes("thread") || type.includes("shutdown"))
+    return "生命周期";
+  if (type.includes("replacement") || type.includes("replan")) return "替补";
+  if (type.includes("interrupt") || type.includes("expert_selection")) return "接管";
+  if (type.includes("verification")) return "裁定";
+  if (type.includes("report") || type.includes("synth")) return "整合";
+  if (type.includes("strategy") || type.includes("orchestra")) return "战略";
+  if (type.includes("failed") || type.includes("error")) return "失败";
+  if (type.includes("completed") || type.includes("result")) return "完成";
+  if (type.includes("started") || type.includes("assigned")) return "启动";
   return "事件";
 }
 
 function kindClass(eventType: string): string {
-  if (eventType.startsWith("stage_failed")) return "bg-destructive/10 text-destructive";
-  if (eventType.startsWith("orchestra")) return "bg-primary/10 text-primary";
-  if (eventType.startsWith("verification")) return "bg-amber-500/15 text-amber-700";
-  if (eventType.startsWith("report")) return "bg-emerald-500/15 text-emerald-700";
-  if (eventType.startsWith("agent_started") || eventType.startsWith("stage_started"))
-    return "bg-primary/10 text-primary";
-  if (eventType.startsWith("agent_completed") || eventType.startsWith("stage_completed"))
-    return "bg-emerald-500/10 text-emerald-700";
+  const label = kindLabel(eventType);
+  if (label === "失败") return "bg-destructive/10 text-destructive";
+  if (label === "接管" || label === "替补") return "bg-amber-500/15 text-amber-700";
+  if (label === "裁定") return "bg-amber-500/15 text-amber-700";
+  if (label === "完成" || label === "整合") return "bg-emerald-500/15 text-emerald-700";
+  if (label === "A2A") return "bg-sky-500/12 text-sky-700";
+  if (label === "生命周期") return "bg-slate-500/12 text-slate-700";
+  if (label === "战略" || label === "启动") return "bg-primary/10 text-primary";
   return "bg-muted text-muted-foreground";
+}
+
+function runStatusLabel(status: string) {
+  const labels: Record<string, string> = {
+    task_understanding: "任务理解",
+    pdf_parsing: "材料解析",
+    expert_orchestration: "动态专家编排",
+    evidence_extraction: "证据抽取",
+    risk_identification: "风险识别",
+    cross_validation: "证据校验",
+    report_generation: "战略整合",
+    quality_review: "质检审裁",
+    orchestra_planning: "战略规划",
+    spawning_experts: "启动专家线程",
+    agent_running: "专家协作",
+    replanning: "动态替补",
+    awaiting_expert_selection: "等待人工接管",
+    verifying: "证据校验",
+    synthesizing: "战略整合",
+    completed: "已完成",
+    failed: "失败",
+  };
+  return labels[status] ?? status;
+}
+
+function replacementValue(record: Record<string, unknown>, key: string) {
+  const value = record[key];
+  return value === undefined || value === null ? "" : String(value);
+}
+
+function replacementSummary(record: Record<string, unknown>) {
+  const failed = replacementValue(record, "failed_agent") || replacementValue(record, "agent_name");
+  const replacement = replacementValue(record, "replacement_agent");
+  const reason = replacementValue(record, "reason");
+  if (failed && replacement) return `${failed} → ${replacement}${reason ? ` · ${reason}` : ""}`;
+  return reason || replacementValue(record, "status") || "战略层已重新规划该模块。";
+}
+
+function appendUniqueEvent(current: AnalysisRunEvent[], event: AnalysisRunEvent) {
+  const duplicate = current.some(
+    (item) =>
+      item.created_at === event.created_at &&
+      item.event_type === event.event_type &&
+      item.actor_name === event.actor_name &&
+      item.title === event.title,
+  );
+  return duplicate ? current : [...current, event];
+}
+
+function formatClock(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(date);
 }

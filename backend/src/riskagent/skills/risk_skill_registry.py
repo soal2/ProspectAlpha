@@ -64,14 +64,7 @@ DOMAIN_SKILLS: tuple[DomainSkill, ...] = (
 
 def skills_for_agents(agent_names: list[str] | None = None) -> list[DomainSkill]:
     selected = {name for name in (agent_names or []) if name}
-    skills = [skill for skill in DOMAIN_SKILLS if skill.agent_name in selected] if selected else []
-    if not skills:
-        skills = [
-            skill
-            for skill in DOMAIN_SKILLS
-            if skill.agent_name in {"financial_agent", "legal_agent", "market_agent", "business_agent"}
-        ]
-    return skills
+    return [skill for skill in DOMAIN_SKILLS if skill.agent_name in selected]
 
 
 def skill_for_agent(agent_name: str) -> DomainSkill | None:

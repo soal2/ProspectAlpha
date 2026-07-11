@@ -15,6 +15,7 @@ from riskagent.analysis_runs import (
     AnalysisRunInputPatch,
     AnalysisTrace,
     AnalysisRunRepository,
+    ExpertSelectionRequest,
     ReportDraft,
     RunEvidence,
     get_default_analysis_repository,
@@ -29,7 +30,9 @@ def _repo() -> AnalysisRunRepository:
 
 
 def _api_dispatch_mode() -> str:
-    return os.getenv("ANALYSIS_API_EXECUTION_MODE", "thread")
+    return os.getenv("ANALYSIS_API_EXECUTION_MODE") or os.getenv(
+        "ANALYSIS_EXECUTION_MODE", "thread"
+    )
 
 
 @router.post("", response_model=AnalysisRun, status_code=status.HTTP_201_CREATED)
@@ -73,6 +76,20 @@ def start_analysis_run(run_id: str) -> AnalysisRun:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 
+@router.post("/{run_id}/expert-selection", response_model=AnalysisRun)
+def submit_expert_selection(run_id: str, payload: ExpertSelectionRequest) -> AnalysisRun:
+    try:
+        return _repo().select_experts(
+            run_id,
+            payload.agent_names,
+            dispatch_mode=_api_dispatch_mode(),
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
 @router.get("/{run_id}/events")
 def get_analysis_events(run_id: str, after: int = 0) -> dict[str, object]:
     try:
@@ -102,6 +119,9 @@ async def stream_analysis_run(run_id: str) -> StreamingResponse:
             for event in new_events:
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
             after += len(new_events)
+            if run.status == "awaiting_expert_selection":
+                yield f"data: {json.dumps({'type': 'paused', 'run': run.model_dump()}, ensure_ascii=False)}\n\n"
+                return
             if run.status in {"completed", "failed"}:
                 yield f"data: {json.dumps({'type': 'done', 'run': run.model_dump()}, ensure_ascii=False)}\n\n"
                 return
@@ -115,7 +135,14 @@ async def stream_analysis_run(run_id: str) -> StreamingResponse:
 
 
 def _should_resume(run: AnalysisRun) -> bool:
-    if run.status in {"ready", "queued", "completed", "failed", "clarifying"}:
+    if run.status in {
+        "ready",
+        "queued",
+        "completed",
+        "failed",
+        "clarifying",
+        "awaiting_expert_selection",
+    }:
         return False
     if not run.events:
         return False

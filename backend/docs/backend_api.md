@@ -12,6 +12,7 @@ All JSON endpoints use `Content-Type: application/json` unless noted.
 
 Returns the database-backed Agent expert directory used by the frontend expert guild pages.
 Empty databases are initialized with the bundled expert seed data before the response is produced.
+The dynamic strategist consumes executable expert capabilities through `/analysis-options` and each expert's Agent Card; this presentation directory is not a fixed execution chain.
 
 Response item:
 
@@ -30,6 +31,28 @@ Response item:
 }
 ```
 
+## Agent-to-Agent (A2A)
+
+The following is the A2A 1.0 public surface for each executable expert in the current catalog. Routes resolve the catalog on every request, so additions, capability updates, and removals do not require an API restart. The strategist remains an internal LangGraph/mailbox coordinator. The collaboration runtime uses the official SDK JSON-RPC dispatcher; Agent Cards declare `streaming: false`.
+
+### `GET /a2a/{agent_name}/.well-known/agent-card.json`
+
+Returns the current A2A Agent Card, including the agent identity, capability description, skills, supported input/output modes, streaming support and JSON-RPC interface URL. Unknown catalog names return `404`; card discovery does not require an active analysis run.
+
+### `POST /a2a/{agent_name}`
+
+Accepts A2A 1.0 JSON-RPC requests. Clients send `A2A-Version: 1.0` and `Content-Type: application/json`. Supported core methods are:
+
+- `SendMessage`
+- `GetTask`
+- `ListTasks`
+
+`CancelTask` is recognized but returns the standard not-cancelable error because an in-flight mailbox expert cannot be interrupted safely. Streaming, task subscription, push notifications, and extended Agent Cards are not enabled.
+
+A2A protocol failures use the JSON-RPC `error` envelope (normally with HTTP `200`), including a version-not-supported error when `A2A-Version` is absent or not `1.0`.
+
+The canonical payloads are `Message`, `Task`, `Artifact` and `Part`. For an analysis run, `contextId` maps to `run_id`; the server generates a globally unique opaque `Task.id`, while the business `module_id` remains in assignment/metadata. Omit `message.taskId` to create a task; a supplied task ID must already exist or returns `TaskNotFound`. Repeating the same `messageId` returns the existing task rather than executing it twice. Internal team controls such as `task`, `idle_notification`, peer request/response, and shutdown handshakes are carried in message `metadata`, not as non-standard top-level A2A fields.
+
 ## Health
 
 ### `GET /health`
@@ -46,13 +69,15 @@ Response:
 
 ### `GET /analysis-options`
 
-Returns active rule-set, available LangGraph agents, and supported analysis depths for the intake page.
+Returns the active rule-set, current executable expert catalog, and supported analysis depths. The catalog is used both by the strategist's `AVAILABLE_EXPERTS_JSON` prompt variable and by the manual-selection recovery UI.
 
 Response fields:
 
 - `risk_rule_sets[]`: `{ rule_set_id, version, name, rule_count, active }`
-- `agents[]`: `{ agent_name, title, default }`
+- `agents[]`: `{ agent_name, title, description, capabilities[], rule_types[], categories[], available, agent_card_url, input_modes[], output_modes[], output_schema }`
 - `analysis_depths[]`: `{ depth, label, max_findings }`
+
+No returned agent is implicitly part of a fixed team. The strategist chooses the run-specific set after analysis starts.
 
 ## Documents
 
@@ -180,7 +205,6 @@ Request body:
   "ipo_project_hint": "拟上市代码或项目备注",
   "confirm_defaults": true,
   "risk_rule_set_id": "hk_ipo_prospectus_risk_framework_v1",
-  "selected_agent_names": ["financial_agent", "legal_agent"],
   "analysis_depth": "standard",
   "structured_data": { "industry": "金融科技" },
   "max_findings": 30
@@ -203,6 +227,22 @@ Updates draft inputs before the run starts. Once started, inputs are frozen.
 
 Starts a `ready` run, freezes inputs and dispatches the background worker.
 
+The worker loads the current expert catalog, injects it into the strategist prompt as `AVAILABLE_EXPERTS_JSON`, validates the resulting `StrategyDecision`, then dynamically starts only the selected experts. Replacement and manual-resume decisions refresh the catalog before validation. An invalid strategy does not fall back to a default chain; the run pauses at `awaiting_expert_selection`.
+
+### `POST /analysis-runs/{run_id}/expert-selection`
+
+Resumes a run paused at `awaiting_expert_selection`.
+
+Request body:
+
+```json
+{
+  "agent_names": ["financial_agent", "legal_agent"]
+}
+```
+
+All names must be unique and currently available. If no valid `strategy_plan` exists, the system derives one assignment per selected expert from its live capability payload. When recovering failed modules, exactly one expert must be selected per unfinished module; completed results, evaluations, team state, and replacement history are preserved, and the selected experts are mapped to pending modules by capability score. Both paths resume the existing LangGraph `thread_id = run_id`; inputs remain frozen. Calling this endpoint in any other state returns `409`.
+
 ### `GET /analysis-runs/{run_id}/events?after=0`
 
 Returns run events after the numeric offset.
@@ -215,6 +255,10 @@ Response:
   "events": []
 }
 ```
+
+### `GET /analysis-runs/{run_id}/stream`
+
+Streams analysis events as Server-Sent Events. Terminal runs end with a `done` event. A run paused for human expert selection emits `paused` with reason `awaiting_expert_selection` and closes; after `expert-selection` succeeds, clients open a new stream for the same `run_id`.
 
 ### `GET /analysis-runs/{run_id}/evidence`
 
@@ -247,6 +291,8 @@ Analysis run response fields:
 - `company_name`
 - `status`
 - `current_stage`
+- `failed_stage`
+- `error_summary`
 - `created_at`
 - `completed_at`
 - `data_cutoff_date`
@@ -258,14 +304,21 @@ Analysis run response fields:
 - `optional_questions`
 - `assumed_defaults`
 - `inputs_frozen`
+- `strategy_plan`
+- `team_state[]`
+- `interrupt_reason`
+- `replacement_history[]`
+- `module_results[]`
+- `orchestra_plan` (read-only compatibility alias for `strategy_plan`)
 - `findings[]`
 - `events[]`
 
 Errors:
 
 - `400`: invalid create payload
+- `422`: invalid FastAPI request/structured payload
 - `404`: run/report not found
-- `409`: invalid state transition, such as starting a non-ready run or editing frozen inputs
+- `409`: invalid state transition or rejected expert selection, such as starting a non-ready run, editing frozen inputs, submitting duplicate/unknown experts, or resuming a run that is not awaiting expert selection
 
 ## Frontend Coverage Notes
 

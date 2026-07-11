@@ -3,6 +3,8 @@ import threading
 import time
 import types
 
+import pytest
+
 from riskagent.workers.analysis import dispatch_analysis_job
 from riskagent.workers import rq_worker
 
@@ -23,6 +25,11 @@ def test_dispatch_inline_executes_immediately(monkeypatch):
 
     assert job_id == "inline:run_inline"
     assert executor.executed == ["run_inline"]
+
+
+def test_dispatch_rejects_unknown_execution_mode():
+    with pytest.raises(ValueError, match="ANALYSIS_EXECUTION_MODE"):
+        dispatch_analysis_job("run_invalid", InlineExecutor(), mode="typo")
 
 
 def test_dispatch_thread_executes_once_for_active_run(monkeypatch):

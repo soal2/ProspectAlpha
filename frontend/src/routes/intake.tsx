@@ -31,7 +31,7 @@ export const Route = createFileRoute("/intake")({
       { title: "新建 IPO 风险分析 · ProspectAlpha IPO RiskAgent" },
       {
         name: "description",
-        content: "选择标的、准备材料、配置风险规则与专家组，启动 Agent 协同分析。",
+        content: "选择标的、准备材料、配置风险规则，由战略层动态组建 Agent 团队。",
       },
     ],
   }),
@@ -41,7 +41,7 @@ export const Route = createFileRoute("/intake")({
 const workflowSteps = [
   { label: "标的选择", desc: "公司名称 / 申请编号 / URL", icon: Search },
   { label: "材料准备", desc: "招股书 PDF 与基础信息", icon: FileText },
-  { label: "分析配置", desc: "规则版本 / 专家组 / 知识库", icon: Settings2 },
+  { label: "分析配置", desc: "规则版本 / 分析深度 / 知识库", icon: Settings2 },
   { label: "启动分析", desc: "解析后派发 Agent 协同", icon: ArrowRight },
 ];
 
@@ -68,7 +68,6 @@ function IntakePage() {
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [selectedRuleSetId, setSelectedRuleSetId] = useState("");
-  const [selectedAgentNames, setSelectedAgentNames] = useState<string[]>([]);
   const [analysisDepth, setAnalysisDepth] = useState<"quick" | "standard" | "deep">("standard");
   const [uploadedDocument, setUploadedDocument] = useState<{
     document_id: string;
@@ -94,7 +93,6 @@ function IntakePage() {
       setSelectedRuleSetId(
         loadedOptions.risk_rule_sets.find((item) => item.active)?.rule_set_id ?? "",
       );
-      setSelectedAgentNames(loadedOptions.agents.map((item) => item.agent_name));
     });
     return () => {
       cancelled = true;
@@ -330,7 +328,7 @@ function IntakePage() {
               </span>
             </div>
             <p className="mt-1 text-sm text-muted-foreground">
-              选择本轮分析使用的风险规则、LangGraph Agent 和分析深度
+              选择风险规则与分析深度；专家编队将在任务启动后由战略层实时生成
             </p>
             <div className="mt-4 space-y-4">
               <label className="block text-xs font-medium text-muted-foreground">
@@ -349,30 +347,18 @@ function IntakePage() {
               </label>
 
               <div>
-                <div className="text-xs font-medium text-muted-foreground">Agent 使用</div>
-                <div className="mt-2 grid gap-2 sm:grid-cols-2">
-                  {options?.agents.map((agent) => {
-                    const checked = selectedAgentNames.includes(agent.agent_name);
-                    return (
-                      <label
-                        key={agent.agent_name}
-                        className="flex items-center gap-2 rounded-lg border border-border bg-background px-3 py-2 text-sm"
-                      >
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={(event) => {
-                            setSelectedAgentNames((current) =>
-                              event.target.checked
-                                ? [...current, agent.agent_name]
-                                : current.filter((name) => name !== agent.agent_name),
-                            );
-                          }}
-                        />
-                        <span className="min-w-0 truncate">{agent.title}</span>
-                      </label>
-                    );
-                  })}
+                <div className="text-xs font-medium text-muted-foreground">Agent 编队</div>
+                <div className="mt-2 rounded-lg border border-primary/20 bg-primary/5 px-3 py-3">
+                  <div className="flex items-start gap-2">
+                    <Sparkles className="mt-0.5 size-4 shrink-0 text-primary" />
+                    <div>
+                      <div className="text-sm font-medium">战略层动态选用专家</div>
+                      <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                        启动后将实时读取 {options?.agents.length ?? 0}{" "}
+                        位可用专家的能力卡，按任务模块生成编队；此处无需预设固定执行链。
+                      </p>
+                    </div>
+                  </div>
                 </div>
               </div>
 
@@ -471,9 +457,7 @@ function IntakePage() {
                   <span className="rounded-full bg-background px-2 py-1">
                     规则：{draftRun.rule_snapshot.version}
                   </span>
-                  <span className="rounded-full bg-background px-2 py-1">
-                    专家：{draftRun.analysis_config.selected_agents.length} 位
-                  </span>
+                  <span className="rounded-full bg-background px-2 py-1">专家：战略层动态选择</span>
                   <span className="rounded-full bg-background px-2 py-1">
                     深度：{draftRun.analysis_config.analysis_depth}
                   </span>
@@ -638,7 +622,6 @@ function IntakePage() {
     setAnalysisError(null);
     try {
       if (!selectedRuleSetId) throw new Error("请先选择风险规则");
-      if (!selectedAgentNames.length) throw new Error("请至少选择一个 Agent");
       const draft = await createAnalysisDraft(buildPayload());
       setDraftRun(draft);
       if (draft.status !== "ready") {
@@ -662,7 +645,6 @@ function IntakePage() {
     setAnalysisError(null);
     try {
       if (!selectedRuleSetId) throw new Error("请先选择风险规则");
-      if (!selectedAgentNames.length) throw new Error("请至少选择一个 Agent");
       const run = await createAnalysisDraft(buildPayload());
       setDraftRun(run);
       setAnalysisRun(run);
@@ -694,7 +676,6 @@ function IntakePage() {
       document_text: uploadedDocument ? "" : documentText,
       document_id: uploadedDocument?.document_id,
       risk_rule_set_id: selectedRuleSetId,
-      selected_agent_names: selectedAgentNames,
       analysis_depth: analysisDepth,
       structured_data: parseStructuredData(structuredDataText),
       max_findings:

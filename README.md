@@ -2,7 +2,7 @@
 
 ProspectAlpha 是一个面向港股 IPO 的可解释 RiskAgent 系统，用于招股书解析与上市后下行风险预警。项目目标是将 IPO 招股书、公司基础信息和上市前市场信号转化为有证据支撑的风险特征、多智能体分析日志、预测结果和可复核报告。
 
-> 当前状态：后端运行时初具雏形。FastAPI 服务、SQLAlchemy 持久化、文档入库、风险规则体系、分析运行编排与 RQ worker 已可本地启动（详见 `START.md` 与 `backend/README.md`）；specialist agents、评分卡、回测与报告生成仍为骨架。
+> 当前状态：FastAPI 服务、SQLAlchemy 持久化、文档入库、风险规则体系、分析运行编排与 RQ worker 已可本地启动（详见 `START.md` 与 `backend/README.md`）。战略层动态选人、LangGraph 中断/恢复、A2A 1.0 与 JSON 邮箱生命周期已实现；真实模型下的专家领域行为、生产多进程验证、评分卡、回测和完整报告渲染仍待补齐。
 
 ![项目全景图](assets/项目全景图.png)
 
@@ -29,7 +29,7 @@ ProspectAlpha 采用从数据源到风险报告的分层流水线架构。
 | 文档解析 | PDF 解析、OCR、页面清洗、章节识别、段落切分、表格抽取和页码映射。 |
 | 证据库 | 结构化文本块、表格、页码、截图和检索元数据。 |
 | 风险特征 | 财务、经营、法务合规、市场情绪和发行属性等风险信号。 |
-| 多智能体分析 | 总控、财务、法务、业务、市场、验证和报告智能体协同完成风险推理。 |
+| 多智能体分析 | 战略 Agent 从实时能力目录动态选择专家；专家通过 A2A 1.0 与隔离 JSON 邮箱并行协作，Verifier 门禁后由战略层统一汇总。 |
 | 风险预测 | 优先采用规则评分卡，后续支持机器学习模型进行风险概率校准和排序。 |
 | 报告生成 | 风险摘要、核心诱因、证据溯源、Agent 日志和人工复核输出。 |
 | 回测评估 | 历史回测、标签对比、AUC/Precision/Recall、分组收益分析和特征重要性分析。 |
@@ -43,7 +43,8 @@ backend/src/riskagent/
 ├── parsing/          # 招股书结构化解析
 ├── retrieval/        # 证据库与混合检索
 ├── features/         # 风险特征抽取
-├── agents/           # 多智能体协同（含 supervisor 编排）
+├── agents/           # 战略决策、专家执行、证据验证与最终汇总
+├── a2a/              # A2A 1.0 数据边界与 JSON 邮箱运行时
 ├── skills/           # 可复用 Agent Skill
 ├── prediction/       # 规则评分卡与后续模型服务
 ├── backtesting/      # 回测评估与历史验证
@@ -51,7 +52,7 @@ backend/src/riskagent/
 ├── providers/        # embedding / object_store / vector_store 抽象
 ├── workers/          # 分析任务执行（inline + RQ worker）
 ├── database.py       # SQLAlchemy 引擎 / 会话 / Base
-├── models.py         # 6 张运行时表的 ORM
+├── models.py         # 运行时与参考数据 ORM
 ├── documents.py      # 文档资产入库
 ├── analysis_runs.py  # 分析运行状态机
 ├── risk_rules.py     # 风险规则加载与 CRUD
@@ -67,15 +68,17 @@ IPO 风险结论只有在复核人员能看到原始依据时才有价值。Pros
 
 ### 多智能体复核，而不是单次摘要
 
-系统按专业视角拆分风险推理：
+系统由战略 Agent 根据本次招股书、风险焦点和实时 Agent Card 动态组队，不在代码中固定专家链路。当前专家目录提供的典型专业视角包括：
 
 - 财务 Agent 关注收入质量、现金流、毛利率、研发投入和持续经营压力；
 - 法务 Agent 关注诉讼、合规、关联交易、特殊股东权利等条款风险；
 - 业务 Agent 关注客户集中度、供应商依赖、产品结构和商业化风险；
 - 市场 Agent 关注发行窗口、流动性、可比 IPO 表现和市场情绪；
-- 验证 Agent 负责检查风险结论是否被证据充分支撑，并处理冲突判断。
+- Verifier 负责检查风险结论是否被证据充分支撑，并处理冲突判断；战略 Agent 收齐全部已验证模块后生成连贯的综合报告。
 
-这种拆分方式让系统更容易审计、测试，也便于多人按模块持续改进。
+每位专家拥有独立线程和收件箱，可以在已启动团队内自主请求同伴信息；战略输出、A2A 消息、替补记录和关机握手均可审计。这种拆分方式让系统更容易测试，也便于多人按模块持续改进。
+
+完整协议生命周期、邮箱可靠性和人工恢复契约见 [`backend/docs/analysis_pipeline_design.md`](backend/docs/analysis_pipeline_design.md)。
 
 ### 结构化信号与非结构化理解结合
 
@@ -114,7 +117,8 @@ IPO 风险结论只有在复核人员能看到原始依据时才有价值。Pros
 | 对象存储 | 已采用 | MinIO 或本地文件系统 |
 | 异步任务 | 已采用 | RQ + Redis |
 | PDF 解析 | 已采用 | PyMuPDF、pdfplumber、可选 OCR |
-| Agent 编排 | 已采用 | LangGraph 风格状态图 |
+| Agent 编排 | 已实现（生产验证待补） | LangGraph 动态战略图、checkpoint / interrupt |
+| Agent 通信 | 已实现（生产验证待补） | 官方 A2A 1.0 + run 隔离 JSONL 邮箱 |
 | 结构化输出 | 已采用 | Pydantic |
 | 部署 | 已采用 | Docker Compose |
 | 风险预测 | 计划 | 规则评分卡优先，后续支持 LightGBM/XGBoost |

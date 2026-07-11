@@ -4,8 +4,10 @@ version = "0.1.0"
 description = "Backend skeleton for the HK-IPO RiskAgent pipeline."
 requires-python = ">=3.11"
 dependencies = [
+  "a2a-sdk[http-server]>=1.1,<2",
   "fastapi>=0.115.0",
   "langgraph>=1.2.0",
+  "langgraph-checkpoint-sqlite>=3.1,<4",
   "minio>=7.2.0",
   "openai>=1.40.0",
   "PyMuPDF>=1.24.0",
@@ -25,6 +27,7 @@ dev = [
 ]
 pipeline = [
   "alembic>=1.13.0",
+  "langgraph-checkpoint-postgres>=3.1,<4",
   "pdfplumber>=0.11.0",
   "psycopg[binary]>=3.2.0",
 ]
