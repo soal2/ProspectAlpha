@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
-from sqlalchemy import create_engine
-from sqlalchemy.orm import DeclarativeBase, sessionmaker
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+
+from riskagent.env import load_dotenv
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
@@ -18,6 +22,7 @@ class Base(DeclarativeBase):
 
 
 def get_database_url() -> str:
+    load_dotenv()
     configured = os.getenv("DATABASE_URL")
     if configured:
         return configured
@@ -33,6 +38,26 @@ def make_engine(database_url: str | None = None):
 
 engine = make_engine()
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+
+
+@contextmanager
+def session_scope(session_factory: sessionmaker = SessionLocal) -> Iterator[Session]:
+    """Provide a transactional session boundary for repository and indexing work."""
+    session = session_factory()
+    try:
+        yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def check_database_connection(session_factory: sessionmaker = SessionLocal) -> bool:
+    with session_factory() as session:
+        session.execute(text("SELECT 1"))
+    return True
 
 
 def init_db() -> None:

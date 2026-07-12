@@ -1,0 +1,27 @@
+providers:
+  embedding:
+    default: dashscope_text_embedding_v4
+    models:
+      dashscope_text_embedding_v4:
+        provider: dashscope
+        model: text-embedding-v4
+        api_key_env: DASHSCOPE_API_KEY
+      openai_text_embedding_3_large:
+        provider: openai
+        model: text-embedding-3-large
+        api_key_env: OPENAI_API_KEY
+        base_url_env: OPENAI_BASE_URL
+
+  vllm:
+    default: dashscope_qwen37_plus
+    models:
+      dashscope_qwen37_plus:
+        provider: dashscope
+        model: qwen3.7-plus
+        api_key_env: DASHSCOPE_API_KEY
+        base_url: https://llm-brsq0ce4o43nxul5.cn-beijing.maas.aliyuncs.com/api/v1
+      openai_gpt_4o:
+        provider: openai
+        model: gpt-4o
+        api_key_env: OPENAI_API_KEY
+        base_url_env: OPENAI_BASE_URL

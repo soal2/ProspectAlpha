@@ -12,14 +12,34 @@ from riskagent.database import SessionLocal
 from riskagent.models import RetrievalIndexRow
 from riskagent.providers.embedding import (
     EmbeddingClient,
-    HashingEmbeddingClient,
-    cosine_similarity,
-    tokenize,
+    get_default_embedding_client,
 )
 from riskagent.providers.vector_store import VectorPoint, VectorStore, get_default_vector_store
+from riskagent.retrieval.index import ChunkSearchResult, PostgresChunkIndexer
 
 
 DEFAULT_COLLECTION = "prospect_alpha_document_blocks"
+
+
+def prospectus_hybrid_search(
+    *,
+    query: str,
+    document_id: str,
+    limit: int = 5,
+    vector_weight: float = 0.75,
+    indexer: PostgresChunkIndexer | None = None,
+) -> list[ChunkSearchResult]:
+    active_indexer = indexer or PostgresChunkIndexer()
+    try:
+        return active_indexer.hybrid_search(
+            query=query,
+            document_id=document_id,
+            limit=limit,
+            vector_weight=vector_weight,
+        )
+    finally:
+        if indexer is None:
+            active_indexer.close()
 
 
 class IndexableBlock(Protocol):
@@ -63,7 +83,7 @@ class HybridSearchIndex:
         collection_name: str = DEFAULT_COLLECTION,
     ) -> None:
         self.session_factory = session_factory
-        self.embedding_client = embedding_client or HashingEmbeddingClient()
+        self.embedding_client = embedding_client or get_default_embedding_client()
         probe_vector = self.embedding_client.embed("probe")
         self.vector_store = vector_store or get_default_vector_store(len(probe_vector))
         self.collection_name = collection_name
@@ -74,7 +94,6 @@ class HybridSearchIndex:
             session.execute(delete(RetrievalIndexRow).where(RetrievalIndexRow.run_id == run_id))
             rows = []
             for block in blocks:
-                terms = tokenize(block.text)
                 embedding = self.embedding_client.embed(block.text)
                 point_id = _index_id(run_id, block.block_id)
                 payload = {
@@ -97,7 +116,7 @@ class HybridSearchIndex:
                         document_id=block.document_id,
                         block_id=block.block_id,
                         text=block.text,
-                        terms=terms,
+                        terms=[],
                         embedding=embedding,
                         payload=payload,
                     )
@@ -117,30 +136,28 @@ class HybridSearchIndex:
         query: str,
         limit: int = 5,
     ) -> list[EvidenceCandidate]:
-        query_terms = tokenize(query)
         query_embedding = self.embedding_client.embed(query)
-        vector_scores = {
-            match.point_id: max(0.0, match.score)
-            for match in self.vector_store.search(
-                collection=self.collection_name,
-                vector=query_embedding,
-                run_id=run_id,
-                limit=max(limit * 4, 20),
-            )
-        }
+        vector_matches = self.vector_store.search(
+            collection=self.collection_name,
+            vector=query_embedding,
+            run_id=run_id,
+            limit=limit,
+        )
+        vector_scores = {match.point_id: max(0.0, match.score) for match in vector_matches}
+        if not vector_scores:
+            return []
         with self.session_factory() as session:
             rows = session.scalars(
-                select(RetrievalIndexRow).where(RetrievalIndexRow.run_id == run_id)
+                select(RetrievalIndexRow).where(
+                    RetrievalIndexRow.run_id == run_id,
+                    RetrievalIndexRow.index_id.in_(vector_scores),
+                )
             ).all()
         candidates = []
         for row in rows:
-            lexical = _lexical_score(query_terms, row.terms or [], row.text)
-            local_vector = max(0.0, cosine_similarity(query_embedding, row.embedding or []))
-            vector = max(local_vector, vector_scores.get(row.index_id, 0.0))
-            raw_score = lexical * 0.65 + vector * 0.35
-            if raw_score <= 0:
+            vector = vector_scores.get(row.index_id, 0.0)
+            if vector <= 0:
                 continue
-            score = min(0.99, 0.5 + raw_score * 0.49)
             payload = row.payload or {}
             candidates.append(
                 EvidenceCandidate(
@@ -154,8 +171,8 @@ class HybridSearchIndex:
                     char_end=int(payload.get("char_end", 0)),
                     source_hash=str(payload.get("source_hash", "")),
                     parser_version=str(payload.get("parser_version", "")),
-                    score=score,
-                    lexical_score=lexical,
+                    score=vector,
+                    lexical_score=0.0,
                     vector_score=vector,
                 )
             )
@@ -165,11 +182,3 @@ class HybridSearchIndex:
 
 def _index_id(run_id: str, block_id: str) -> str:
     return hashlib.sha256(f"{run_id}:{block_id}".encode("utf-8")).hexdigest()
-
-
-def _lexical_score(query_terms: list[str], block_terms: list[str], text: str) -> float:
-    if not query_terms:
-        return 0.0
-    block_term_set = set(block_terms)
-    hits = sum(1 for term in query_terms if term in block_term_set or term in text.lower())
-    return hits / len(set(query_terms))

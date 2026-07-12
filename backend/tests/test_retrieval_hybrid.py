@@ -50,6 +50,20 @@ class FakeVectorStore:
         ]
 
 
+class FakeEmbeddingClient:
+    def encode(self, texts: list[str]) -> list[list[float]]:
+        return [self.embed(text) for text in texts]
+
+    def embed(self, text: str) -> list[float]:
+        vector = [0.0] * 8
+        lowered = text.lower()
+        if "redemption" in lowered or "obligations" in lowered:
+            vector[0] = 1.0
+        if "customer" in lowered or "concentration" in lowered:
+            vector[1] = 1.0
+        return vector
+
+
 def test_hybrid_index_persists_rows_and_uses_vector_store(tmp_path):
     engine = make_engine(f"sqlite:///{tmp_path / 'retrieval.db'}")
     Base.metadata.create_all(bind=engine)
@@ -57,6 +71,7 @@ def test_hybrid_index_persists_rows_and_uses_vector_store(tmp_path):
     vector_store = FakeVectorStore()
     index = HybridSearchIndex(
         session_factory=session_factory,
+        embedding_client=FakeEmbeddingClient(),
         vector_store=vector_store,
         collection_name="test_collection",
     )

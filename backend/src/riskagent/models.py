@@ -48,6 +48,21 @@ class DocumentBlockRow(Base):
     document: Mapped[DocumentAssetRow] = relationship(back_populates="blocks")
 
 
+class ProspectusDocumentRow(Base):
+    __tablename__ = "prospectus_documents"
+
+    document_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    doc_key: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    original_filename: Mapped[str] = mapped_column(String(512))
+    raw_pdf_path: Mapped[str] = mapped_column(String(1024))
+    content_type: Mapped[str] = mapped_column(String(128), default="application/pdf")
+    file_sha256: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    file_size_bytes: Mapped[int] = mapped_column(Integer)
+    source_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    status: Mapped[str] = mapped_column(String(64), default="registered", index=True)
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class AnalysisRunRow(Base):
     __tablename__ = "analysis_runs"
 
