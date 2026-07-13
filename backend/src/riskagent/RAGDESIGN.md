@@ -1145,8 +1145,11 @@ own behavior and storage contracts.
   `content_list.json`; they are not written by MinerU.
 - `image_path` must not be the raw MinerU relative path. It should include
   `backend/data/processed/{document_id}/ocr/`.
-- `page_idx` remains 0-based to match MinerU and frontend PDF navigation.
-- Bbox coordinates remain MinerU's original coordinate system.
+- `page_idx` remains 0-based to match MinerU. API `page_number` keeps the same
+  value; the frontend adds one only when calling PDF.js or displaying a page
+  label.
+- Bbox coordinates use MinerU's normalized `1000 x 1000`, top-left-origin
+  coordinate space. The frontend scales them into the current PDF viewport.
 - Text, table, and image chunks must share one schema so embedding and storage
   stay simple.
 
@@ -1190,3 +1193,65 @@ Migration scope:
 The migration changes retrieval orchestration and evidence data handling. It
 does not change embedding, hybrid ranking, model-provider behavior, or report
 generation contracts.
+
+## PDF Evidence Traceback and Highlighting
+
+The implemented evidence traceback path preserves one coordinate contract from
+retrieval through the browser. `GET /analysis-runs/{run_id}/evidence` returns:
+
+- `document_id`, which identifies the original prospectus PDF
+- `page_number`, which remains 0-based internally
+- `bbox`, the primary bbox for the evidence page
+- `bbox_regions[]`, containing `{page_number, bbox}` page-local regions
+- `bbox_coordinate_space`, currently `{width: 1000, height: 1000,
+  origin: "top-left"}`
+
+`bbox_regions` is the authoritative representation for chunks that cover more
+than one page. The analysis mapping groups retrieved `merged_bboxes` by
+`page_idx` and computes a union only among boxes in the same group. It must
+never calculate a union across different pages. This is a defensive boundary
+in addition to the chunker's page-local grouping, so malformed or legacy
+retrieval results cannot create an oversized cross-page highlight. `bbox`
+selects the region matching the evidence `page_number` and falls back to the
+first valid region only when no matching region exists.
+
+The document API exposes the original source needed by the viewer:
+
+- `POST /documents/upload` registers and processes a PDF
+- `GET /documents/{document_id}` returns document metadata
+- `GET /documents/{document_id}/file` streams the original PDF inline
+
+The frontend evidence pages retain `document_id`, page-local bbox regions, and
+the coordinate-space metadata when mapping the API response. The PDF viewer
+loads PDF.js only in the browser to avoid server-side `DOMMatrix` failures,
+converts the internal page with `pdf.getPage(pageIndex + 1)`, and overlays each
+bbox using the rendered viewport dimensions:
+
+```text
+left   = x1 / source_width  * rendered_width
+top    = y1 / source_height * rendered_height
+width  = (x2 - x1) / source_width  * rendered_width
+height = (y2 - y1) / source_height * rendered_height
+```
+
+When an evidence item has regions on multiple pages, page selection displays
+only regions whose `page_number` matches the active page. For older persisted
+evidence, the frontend may derive `document_id` from the analysis input and
+represent a valid primary `bbox` as one page-local region. Missing PDFs return
+404, invalid or empty bboxes do not create a fabricated highlight, and PDF
+load/render failures are surfaced in the viewer.
+
+### Real-Scenario Acceptance
+
+The end-to-end path was verified against the local PostgreSQL index and the
+stored original prospectus, not a mocked PDF. The indexed document contained
+1,091 chunks across a 700-page PDF. A retrieved chunk on internal page 242 with
+bbox `[110, 453, 885, 885]` was exposed as page label `P.243`; both the
+run-specific evidence page and the global evidence page rendered the source
+page and kept the scaled highlight inside the PDF canvas. A fresh browser run
+reported no console errors or warnings. The temporary analysis row used for
+this acceptance check was removed afterward.
+
+This implementation changes document/evidence data handling and evidence
+traceability. It does not change embedding, hybrid ranking, model behavior, or
+generated-report contracts.
