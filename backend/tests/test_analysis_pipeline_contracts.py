@@ -1,11 +1,14 @@
 from pathlib import Path
+import time
 
 import fitz
 import pytest
+import yaml
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import sessionmaker
 
-from riskagent.analysis_runs import AnalysisRunCreate, AnalysisRunInputPatch, AnalysisRunRepository
+from riskagent.analysis_runs import AnalysisRunCreate, AnalysisRunInputPatch
+from riskagent.api.analysis import _api_dispatch_mode
 from riskagent.api.main import create_app
 from riskagent.common.cache import TTLCache
 from riskagent.database import Base, make_engine
@@ -25,10 +28,19 @@ def _rule_repo() -> RiskRuleRepository:
     return RiskRuleRepository(Path(__file__).parents[1] / "configs" / "risk_rules.yaml")
 
 
-def test_clarifying_patch_start_freezes_inputs_and_generates_artifacts(tmp_path):
-    repo = AnalysisRunRepository(
-        tmp_path / "runs.yaml",
-        _rule_repo(),
+def test_api_dispatch_mode_falls_back_to_shared_execution_setting(monkeypatch):
+    monkeypatch.delenv("ANALYSIS_API_EXECUTION_MODE", raising=False)
+    monkeypatch.setenv("ANALYSIS_EXECUTION_MODE", "rq")
+
+    assert _api_dispatch_mode() == "rq"
+
+
+def test_clarifying_patch_start_freezes_inputs_and_generates_artifacts(
+    tmp_path, analysis_repo_factory
+):
+    repo = analysis_repo_factory(
+        rule_repository=_rule_repo(),
+        path=tmp_path / "runs.yaml",
         evidence_library_path=tmp_path / "evidence_library.yaml",
     )
 
@@ -56,18 +68,27 @@ def test_clarifying_patch_start_freezes_inputs_and_generates_artifacts(tmp_path)
     assert completed.report is not None
     assert completed.report.review_status == "draft"
     assert all(item.text for item in completed.evidence)
-    with repo.session_factory() as session:
-        assert session.query(EvidenceLibraryRow).count() >= 1
+    evidence_library = yaml.safe_load((tmp_path / "evidence_library.yaml").read_text()) or []
+    assert evidence_library
 
     with pytest.raises(ValueError):
         repo.update_inputs(completed.run_id, AnalysisRunInputPatch(company_name="不可修改"))
 
 
-def test_analysis_api_exposes_minimal_pipeline_resources(tmp_path, monkeypatch):
+def test_analysis_api_exposes_minimal_pipeline_resources(
+    tmp_path, monkeypatch, analysis_repo_factory
+):
     monkeypatch.setenv("ANALYSIS_RUNS_PATH", str(tmp_path / "runs.yaml"))
     monkeypatch.setenv("EVIDENCE_LIBRARY_PATH", str(tmp_path / "evidence_library.yaml"))
     monkeypatch.setenv("DOCUMENTS_PATH", str(tmp_path / "documents.yaml"))
     monkeypatch.setenv("RISK_RULES_PATH", str(Path(__file__).parents[1] / "configs" / "risk_rules.yaml"))
+    monkeypatch.setenv("USE_DATABASE", "0")
+    repo = analysis_repo_factory(
+        rule_repository=_rule_repo(),
+        path=tmp_path / "runs.yaml",
+        evidence_library_path=tmp_path / "evidence_library.yaml",
+    )
+    monkeypatch.setattr("riskagent.api.analysis._repo", lambda: repo)
     client = TestClient(create_app())
 
     document_response = client.post(
@@ -123,7 +144,15 @@ def test_analysis_api_exposes_minimal_pipeline_resources(tmp_path, monkeypatch):
 
     run_id = payload["run_id"]
     started = client.post(f"/analysis-runs/{run_id}/start").json()
-    assert started["status"] == "completed"
+    assert started["status"] in {"queued", "completed"}
+    for _ in range(50):
+        current = client.get(f"/analysis-runs/{run_id}").json()
+        if current["status"] == "completed":
+            started = current
+            break
+        time.sleep(0.1)
+    else:
+        raise AssertionError("analysis run did not complete")
     events = client.get(f"/analysis-runs/{run_id}/events").json()["events"]
     assert events
     assert {event["actor_name"] for event in events}.issuperset(
@@ -139,7 +168,9 @@ def test_analysis_api_exposes_minimal_pipeline_resources(tmp_path, monkeypatch):
         "status": "done",
         "cost": None,
     }
-    assert any("LangGraph" in item["text"] for item in trace["flow"])
+    assert {event["event_type"] for event in events}.issuperset(
+        {"strategy_decision_validated", "peer_request_sent", "dynamic_team_completed"}
+    )
     assert trace["evidenceFeed"]
     assert "text" not in trace["evidenceFeed"][0]
     report = client.get(f"/analysis-runs/{run_id}/report").json()
@@ -147,7 +178,9 @@ def test_analysis_api_exposes_minimal_pipeline_resources(tmp_path, monkeypatch):
     assert "IPO 风险分析草案" in report["markdown"]
 
 
-def test_pdf_upload_drives_analysis_with_page_and_bbox_evidence(tmp_path, monkeypatch):
+def test_pdf_upload_drives_analysis_with_page_and_bbox_evidence(
+    tmp_path, monkeypatch, analysis_repo_factory
+):
     monkeypatch.setenv("ANALYSIS_RUNS_PATH", str(tmp_path / "runs.yaml"))
     monkeypatch.setenv("EVIDENCE_LIBRARY_PATH", str(tmp_path / "evidence_library.yaml"))
     monkeypatch.setenv("DOCUMENTS_PATH", str(tmp_path / "documents.yaml"))
@@ -155,6 +188,13 @@ def test_pdf_upload_drives_analysis_with_page_and_bbox_evidence(tmp_path, monkey
     monkeypatch.setenv("OBJECT_STORE_BUCKET", "test-bucket")
     monkeypatch.setenv("OBJECT_STORE_LOCAL_ROOT", str(tmp_path / "object-store"))
     monkeypatch.setenv("RISK_RULES_PATH", str(Path(__file__).parents[1] / "configs" / "risk_rules.yaml"))
+    monkeypatch.setenv("USE_DATABASE", "0")
+    repo = analysis_repo_factory(
+        rule_repository=_rule_repo(),
+        path=tmp_path / "runs.yaml",
+        evidence_library_path=tmp_path / "evidence_library.yaml",
+    )
+    monkeypatch.setattr("riskagent.api.analysis._repo", lambda: repo)
     client = TestClient(create_app())
 
     pdf_bytes = _sample_pdf_bytes(
@@ -181,7 +221,15 @@ def test_pdf_upload_drives_analysis_with_page_and_bbox_evidence(tmp_path, monkey
     assert run_response.status_code == 201
     run_id = run_response.json()["run_id"]
     started = client.post(f"/analysis-runs/{run_id}/start").json()
-    assert started["status"] == "completed"
+    assert started["status"] in {"queued", "completed"}
+    for _ in range(50):
+        current = client.get(f"/analysis-runs/{run_id}").json()
+        if current["status"] == "completed":
+            started = current
+            break
+        time.sleep(0.1)
+    else:
+        raise AssertionError("analysis run did not complete")
 
     evidence = client.get(f"/analysis-runs/{run_id}/evidence").json()
     assert evidence
@@ -190,7 +238,9 @@ def test_pdf_upload_drives_analysis_with_page_and_bbox_evidence(tmp_path, monkey
     assert evidence[0]["source_hash"]
 
 
-def test_database_persistence_covers_document_run_and_evidence(tmp_path):
+def test_database_persistence_covers_document_run_and_evidence(
+    tmp_path, analysis_repo_factory
+):
     engine = make_engine(f"sqlite:///{tmp_path / 'runtime.db'}")
     Base.metadata.create_all(bind=engine)
     session_factory = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
@@ -199,9 +249,9 @@ def test_database_persistence_covers_document_run_and_evidence(tmp_path):
         use_database=True,
         object_store=LocalObjectStore(tmp_path / "object-store", bucket="db-test"),
     )
-    analysis_repo = AnalysisRunRepository(
-        tmp_path / "runs.yaml",
-        _rule_repo(),
+    analysis_repo = analysis_repo_factory(
+        rule_repository=_rule_repo(),
+        path=tmp_path / "runs.yaml",
         evidence_library_path=tmp_path / "evidence_library.yaml",
         document_repository=document_repo,
         session_factory=session_factory,

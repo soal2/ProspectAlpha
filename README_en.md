@@ -5,11 +5,12 @@ and post-listing downside risk warning. It is designed to turn IPO documents,
 company metadata, and pre-listing market signals into evidence-grounded risk
 features, multi-agent review logs, prediction results, and reviewable reports.
 
-> Current status: backend runtime in early shape. The FastAPI service,
-> SQLAlchemy persistence, document ingestion, risk-rule system, analysis-run
-> orchestration, and RQ worker can all run locally (see `START.md` and
-> `backend/README.md`). Specialist agents, scorecard, backtesting, and report
-> generation are still skeletons.
+> Current status: the FastAPI service, SQLAlchemy persistence, document
+> ingestion, risk-rule system, analysis-run orchestration, and RQ worker can
+> all run locally (see `START.md` and `backend/README.md`). Dynamic strategic
+> selection, LangGraph interrupt/resume, A2A 1.0, and JSON mailbox lifecycles
+> are implemented. Real-model domain behavior, production multiprocess
+> validation, scorecards, backtesting, and complete report rendering remain.
 
 ![Project architecture](assets/项目全景图.png)
 
@@ -39,7 +40,7 @@ ProspectAlpha follows a layered pipeline from source data to risk report.
 | Document parsing | PDF parsing, OCR, page cleaning, section recognition, paragraph splitting, table extraction, and page mapping. |
 | Evidence store | Structured document chunks, tables, page numbers, screenshots, and retrieval metadata. |
 | Risk features | Financial, operating, legal/compliance, market sentiment, and issuance attribute signals. |
-| Multi-agent analysis | Controller, financial, legal, business, market, verifier, and reporter agents collaborate on risk reasoning. |
+| Multi-agent analysis | A strategist selects experts from the live capability catalog; experts collaborate through A2A 1.0 and run-isolated JSON mailboxes, then the strategist synthesizes verifier-approved modules. |
 | Risk prediction | Rule scorecard first, with future ML model support for calibrated risk probability and ranking. |
 | Report generation | Risk summary, key drivers, evidence traceability, agent logs, and review outputs. |
 | Evaluation | Backtesting, label comparison, AUC/precision/recall, grouped return analysis, and feature importance. |
@@ -53,7 +54,8 @@ backend/src/riskagent/
 ├── parsing/          # Prospectus structure extraction
 ├── retrieval/        # Evidence store and hybrid retrieval
 ├── features/         # Risk feature extraction
-├── agents/           # Multi-agent collaboration (incl. supervisor orchestration)
+├── agents/           # Strategic planning, expert execution, verification, and synthesis
+├── a2a/              # A2A 1.0 boundary and JSON mailbox runtime
 ├── skills/           # Reusable agent skills
 ├── prediction/       # Scorecard and future model service
 ├── backtesting/      # Evaluation and historical validation
@@ -61,7 +63,7 @@ backend/src/riskagent/
 ├── providers/        # embedding / object_store / vector_store abstractions
 ├── workers/          # Analysis task execution (inline + RQ worker)
 ├── database.py       # SQLAlchemy engine / session / Base
-├── models.py         # ORM for 6 runtime tables
+├── models.py         # Runtime and reference-data ORM
 ├── documents.py      # Document asset ingestion
 ├── analysis_runs.py  # Analysis-run state machine
 ├── risk_rules.py     # Risk-rule loading and CRUD
@@ -80,7 +82,9 @@ outputs rather than afterthoughts.
 
 ### Multi-agent review instead of single-pass summarization
 
-The system separates risk reasoning by professional perspective:
+The strategist forms a run-specific team from current Agent Cards and the
+prospectus risk focus; expert names and edges are not hard-coded. Typical
+perspectives in the current expert catalog include:
 
 - financial agent for revenue quality, cash flow, margin, and R&D pressure;
 - legal agent for litigation, compliance, related-party transactions, and special
@@ -88,9 +92,16 @@ The system separates risk reasoning by professional perspective:
 - business agent for customer concentration, supplier dependency, products, and
   commercialization risk;
 - market agent for issuance window, liquidity, comparable IPOs, and market mood;
-- verifier agent for evidence support and conflict checks.
+- verifier for evidence support and conflict checks, followed by strategist-led
+  synthesis after all modules pass the evidence gate.
 
-This division makes analysis easier to audit, test, and improve module by module.
+Each selected expert has an independent thread and inbox and may request input
+from other already-running experts. Strategy decisions, A2A messages,
+replacement attempts, and shutdown handshakes remain auditable. This division
+makes analysis easier to test and improve module by module.
+
+See [`backend/docs/analysis_pipeline_design.md`](backend/docs/analysis_pipeline_design.md)
+for the protocol lifecycle, mailbox reliability, and human-resume contract.
 
 ### Hybrid structured and unstructured intelligence
 
@@ -134,7 +145,8 @@ See `AGENTS.md` for repository-wide collaboration rules.
 | Object storage | Adopted | MinIO or local filesystem |
 | Async tasks | Adopted | RQ + Redis |
 | PDF parsing | Adopted | PyMuPDF, pdfplumber, optional OCR |
-| Agent orchestration | Adopted | LangGraph-style state graph |
+| Agent orchestration | Implemented (production validation pending) | Dynamic strategist-led LangGraph with checkpoints and interrupts |
+| Agent communication | Implemented (production validation pending) | Official A2A 1.0 plus run-isolated JSONL mailboxes |
 | Structured outputs | Adopted | Pydantic |
 | Deployment | Adopted | Docker Compose |
 | Prediction | Planned | Rule scorecard first, future LightGBM/XGBoost |

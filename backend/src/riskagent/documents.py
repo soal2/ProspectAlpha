@@ -22,6 +22,7 @@ from riskagent.ingestion import (
     ProspectusRegisterRequest,
     ProspectusRegistration,
 )
+from riskagent.database import Base, SessionLocal, init_db
 from riskagent.models import DocumentAssetRow, DocumentBlockRow
 from riskagent.parsing import (
     ChunkResult,
@@ -202,7 +203,11 @@ class DocumentRepository:
         self.use_database = use_database if use_database is not None else os.getenv("USE_DATABASE", "1") != "0"
         self.object_store = object_store or get_default_object_store()
         if self.use_database:
-            init_db()
+            bind = getattr(session_factory, "kw", {}).get("bind")
+            if bind is None:
+                init_db()
+            else:
+                Base.metadata.create_all(bind=bind)
 
     def create(self, payload: DocumentCreate) -> DocumentAsset:
         raw = payload.content_text.encode("utf-8")
