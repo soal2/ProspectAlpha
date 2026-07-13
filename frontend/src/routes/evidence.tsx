@@ -1,7 +1,9 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { Search, FileText, ExternalLink } from "lucide-react";
+import { Search, FileText } from "lucide-react";
 import { useState, useEffect } from "react";
+import { PdfEvidenceViewer } from "@/components/pdf-evidence-viewer";
 import { getKnowledgeData } from "@/lib/data-service";
+import type { KnowledgeData } from "@/lib/types";
 
 type SortBy = "time" | "confidence";
 
@@ -19,29 +21,11 @@ export const Route = createFileRoute("/evidence")({
 });
 
 function EvidencePage() {
-  const [data, setData] = useState<{
-    facets: { label: string; items: string[] }[];
-    evidence: {
-      id: string;
-      code: string;
-      name: string;
-      section: string;
-      page: number;
-      conf: number;
-      snippet: string;
-      risk: string;
-    }[];
-    stats: { totalEvidence: number; totalCompanies: number };
-    preview: {
-      evidenceId: string;
-      code: string;
-      section: string;
-      page: number;
-      linkedConclusions: string[];
-    };
-  } | null>(null);
+  const [data, setData] = useState<KnowledgeData | null>(null);
 
   const [sortBy, setSortBy] = useState<SortBy>("confidence");
+  const [selectedId, setSelectedId] = useState("");
+  const [activePage, setActivePage] = useState(0);
 
   const facetCount = (label: string) => {
     if (!data) return 0;
@@ -56,12 +40,24 @@ function EvidencePage() {
   useEffect(() => {
     let cancelled = false;
     getKnowledgeData().then((d) => {
-      if (!cancelled) setData(d);
+      if (!cancelled) {
+        setData(d);
+        setSelectedId(d.evidence[0]?.id ?? "");
+        setActivePage(d.evidence[0]?.page ?? 0);
+      }
     });
     return () => {
       cancelled = true;
     };
   }, []);
+  const selected = data?.evidence.find((item) => item.id === selectedId) ?? data?.evidence[0];
+  const evidence = data?.evidence.slice() ?? [];
+  if (sortBy === "confidence") evidence.sort((left, right) => right.conf - left.conf);
+  const activeBboxes = selected
+    ? selected.bboxRegions
+        .filter((region) => region.page === activePage)
+        .map((region) => region.bbox)
+    : [];
   return (
     <div className="grid h-[calc(100vh-3.5rem)] grid-cols-[260px_1fr_360px]">
       {/* facets */}
@@ -138,10 +134,15 @@ function EvidencePage() {
           </div>
         </div>
         <div className="mt-5 space-y-3">
-          {data?.evidence.map((e) => (
-            <article
+          {evidence.map((e) => (
+            <button
+              type="button"
               key={e.id}
-              className="rounded-xl border border-border bg-card p-4 transition hover:border-primary/30"
+              onClick={() => {
+                setSelectedId(e.id);
+                setActivePage(e.page);
+              }}
+              className={`w-full rounded-xl border bg-card p-4 text-left transition ${selected?.id === e.id ? "border-primary ring-1 ring-primary/20" : "border-border hover:border-primary/30"}`}
             >
               <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
                 <span className="tabular font-medium text-foreground">{e.code}</span>
@@ -149,7 +150,7 @@ function EvidencePage() {
                 <span>{e.name}</span>
                 <span>·</span>
                 <span>
-                  {e.section} P.{e.page}
+                  {e.section} P.{e.page + 1}
                 </span>
                 <span className="ml-auto inline-flex items-center gap-1 rounded-full bg-primary/8 px-2 py-0.5 font-medium text-primary tabular">
                   置信度 {e.conf.toFixed(2)}
@@ -165,11 +166,9 @@ function EvidencePage() {
                     [{e.id}]
                   </span>
                 </div>
-                <button className="inline-flex items-center gap-1 text-xs text-primary hover:underline">
-                  查看原文 <ExternalLink className="size-3" />
-                </button>
+                <span className="text-xs text-primary">查看原文</span>
               </div>
-            </article>
+            </button>
           ))}
         </div>
       </section>
@@ -179,30 +178,37 @@ function EvidencePage() {
         <h3 className="flex items-center gap-2 font-serif text-base font-semibold">
           <FileText className="size-4 text-primary" /> 原文预览
         </h3>
-        {data?.preview.evidenceId ? (
+        {selected ? (
           <>
             <div className="mt-1 text-[11px] text-muted-foreground">
-              {data?.preview.evidenceId} · {data?.preview.code} · {data?.preview.section} · P.
-              {data?.preview.page}
+              {selected.id} · {selected.code} · {selected.section} · P.{activePage + 1}
             </div>
-            <div className="mt-4 aspect-[3/4] overflow-hidden rounded-lg border border-border bg-paper">
-              <div className="grid h-full place-items-center bg-gradient-to-br from-[color:var(--sage-soft)]/30 to-[color:var(--amber-soft)]/30 text-center text-xs text-muted-foreground">
-                <div>
-                  <FileText className="mx-auto size-8 text-primary/40" />
-                  <p className="mt-3 px-4 leading-relaxed">
-                    招股书 PDF 第 218 页 ·<br />
-                    bbox [72.1, 118.5, 520.4, 360.2]
-                  </p>
-                  <p className="mt-2 text-[10px]">点击放大查看原始截图</p>
-                </div>
+            {selected.bboxRegions.length > 1 && (
+              <div className="mt-3 flex flex-wrap gap-1">
+                {[...new Set(selected.bboxRegions.map((region) => region.page))].map((page) => (
+                  <button
+                    type="button"
+                    key={page}
+                    onClick={() => setActivePage(page)}
+                    className={`rounded px-2 py-1 text-[11px] ${activePage === page ? "bg-primary text-primary-foreground" : "bg-muted"}`}
+                  >
+                    P.{page + 1}
+                  </button>
+                ))}
               </div>
+            )}
+            <div className="mt-4 aspect-[3/4] overflow-hidden rounded-lg border border-border bg-paper">
+              <PdfEvidenceViewer
+                pdfUrl={selected.pdfUrl}
+                pageIndex={activePage}
+                bboxes={activeBboxes}
+                coordinateSpace={selected.bboxCoordinateSpace}
+              />
             </div>
             <div className="mt-4 rounded-lg border border-border bg-background p-3 text-xs">
               <div className="font-medium">证据链接到的结论</div>
               <ul className="mt-2 space-y-1 text-muted-foreground">
-                {data?.preview.linkedConclusions.map((conclusion) => (
-                  <li key={conclusion}>· {conclusion}</li>
-                ))}
+                <li>· {selected.risk}</li>
               </ul>
             </div>
           </>

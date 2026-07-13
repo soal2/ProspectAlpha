@@ -52,6 +52,7 @@
     "framer-motion": "^12.42.0",
     "input-otp": "^1.4.2",
     "lucide-react": "^0.575.0",
+    "pdfjs-dist": "^6.1.200",
     "react": "^19.2.0",
     "react-day-picker": "^9.14.0",
     "react-dom": "^19.2.0",

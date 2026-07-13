@@ -5,7 +5,11 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
-from riskagent.analysis_runs import AnalysisRunCreate, AnalysisRunInputPatch
+from riskagent.analysis_runs import (
+    AnalysisRunCreate,
+    AnalysisRunInputPatch,
+    _page_local_bbox_regions,
+)
 from riskagent.api.analysis import _api_dispatch_mode
 from riskagent.api.main import create_app
 from riskagent.common.cache import TTLCache
@@ -21,6 +25,21 @@ def test_api_dispatch_mode_falls_back_to_shared_execution_setting(monkeypatch):
     monkeypatch.setenv("ANALYSIS_EXECUTION_MODE", "rq")
 
     assert _api_dispatch_mode() == "rq"
+
+
+def test_page_local_bbox_regions_never_merge_across_pages():
+    regions = _page_local_bbox_regions(
+        [
+            {"page_idx": 7, "bbox": [10, 20, 30, 40]},
+            {"page_idx": 8, "bbox": [1, 2, 3, 4]},
+            {"page_idx": 7, "bbox": [5, 25, 35, 45]},
+        ]
+    )
+
+    assert regions == [
+        {"page_number": 7, "bbox": [5.0, 20.0, 35.0, 45.0]},
+        {"page_number": 8, "bbox": [1.0, 2.0, 3.0, 4.0]},
+    ]
 
 
 def test_clarifying_patch_start_freezes_inputs_and_generates_artifacts(

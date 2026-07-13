@@ -121,6 +121,22 @@ export interface EvidenceDetailItem {
   conf: number;
   snippet: string;
   risk: string;
+  documentId: string | null;
+  pdfUrl: string | null;
+  bbox: number[];
+  bboxRegions: EvidenceBBoxRegion[];
+  bboxCoordinateSpace: BBoxCoordinateSpace;
+}
+
+export interface EvidenceBBoxRegion {
+  page: number;
+  bbox: number[];
+}
+
+export interface BBoxCoordinateSpace {
+  width: number;
+  height: number;
+  origin: "top-left";
 }
 
 export interface KnowledgePreview {
@@ -150,6 +166,11 @@ export interface KnowledgeEvidence {
   conf: number;
   snippet: string;
   risk: string;
+  documentId: string | null;
+  pdfUrl: string | null;
+  bbox: number[];
+  bboxRegions: EvidenceBBoxRegion[];
+  bboxCoordinateSpace: BBoxCoordinateSpace;
 }
 
 export interface KnowledgeData {

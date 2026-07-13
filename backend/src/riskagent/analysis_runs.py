@@ -122,15 +122,31 @@ class RunEvidence(BaseModel):
     evidence_id: str
     finding_id: str
     document_block_id: str
+    document_id: str | None = None
     page_number: int
     section_path: str
     text: str
     bbox: list[float] = Field(default_factory=list)
+    bbox_regions: list["EvidenceBBoxRegion"] = Field(default_factory=list)
+    bbox_coordinate_space: "BBoxCoordinateSpace" = Field(
+        default_factory=lambda: BBoxCoordinateSpace()
+    )
     char_start: int = 0
     char_end: int = 0
     source_hash: str = ""
     confidence: float
     verifier_status: str
+
+
+class EvidenceBBoxRegion(BaseModel):
+    page_number: int
+    bbox: list[float]
+
+
+class BBoxCoordinateSpace(BaseModel):
+    width: int = 1000
+    height: int = 1000
+    origin: str = "top-left"
 
 
 class VerificationResult(BaseModel):
@@ -515,7 +531,22 @@ class AnalysisRunRepository:
         return self.get(run_id).events[after:]
 
     def evidence(self, run_id: str) -> list[RunEvidence]:
-        return self.get(run_id).evidence
+        run = self.get(run_id)
+        document_id = run.input_summary.get("document_id")
+        return [
+            item.model_copy(
+                update={
+                    "document_id": item.document_id or document_id,
+                    "bbox_regions": item.bbox_regions
+                    or (
+                        [EvidenceBBoxRegion(page_number=item.page_number, bbox=item.bbox)]
+                        if len(item.bbox) == 4
+                        else []
+                    ),
+                }
+            )
+            for item in run.evidence
+        ]
 
     def report(self, run_id: str) -> ReportDraft:
         report = self.get(run_id).report
@@ -1177,10 +1208,12 @@ class AnalysisRunRepository:
                         evidence_id=evidence_id,
                         finding_id=finding.finding_id,
                         document_block_id=candidate["block_id"],
+                        document_id=document_id,
                         page_number=candidate["page_number"],
                         section_path=candidate["section_path"],
                         text=candidate["text"][:300],
                         bbox=candidate["bbox"],
+                        bbox_regions=candidate["bbox_regions"],
                         char_start=candidate["char_start"],
                         char_end=candidate["char_end"],
                         source_hash=candidate["source_hash"],
@@ -1444,12 +1477,14 @@ def _dedupe_evidence(evidence: list[RunEvidence]) -> list[RunEvidence]:
 
 def _chunk_evidence_candidate(item: ChunkSearchResult) -> dict[str, Any]:
     metadata = item.metadata if isinstance(item.metadata, dict) else {}
+    bbox_regions = _page_local_bbox_regions(item.merged_bboxes)
     return {
         "block_id": item.chunk_id,
         "page_number": item.page_idx,
         "section_path": str(metadata.get("section_path") or item.chunk_type),
         "text": item.text,
-        "bbox": _merged_bbox_for_page(item.merged_bboxes, item.page_idx),
+        "bbox": _bbox_for_page(bbox_regions, item.page_idx),
+        "bbox_regions": bbox_regions,
         "char_start": int(metadata.get("char_start") or 0),
         "char_end": int(metadata.get("char_end") or 0),
         "source_hash": str(
@@ -1460,21 +1495,49 @@ def _chunk_evidence_candidate(item: ChunkSearchResult) -> dict[str, Any]:
     }
 
 
-def _merged_bbox_for_page(
-    merged_bboxes: list[dict[str, Any]],
+def _bbox_for_page(
+    bbox_regions: list[dict[str, Any]],
     page_idx: int,
 ) -> list[float]:
     selected = next(
         (
             item
-            for item in merged_bboxes
-            if isinstance(item, dict) and int(item.get("page_idx", -1)) == page_idx
+            for item in bbox_regions
+            if int(item.get("page_number", -1)) == page_idx
         ),
-        merged_bboxes[0] if merged_bboxes else {},
+        bbox_regions[0] if bbox_regions else {},
     )
-    if not isinstance(selected, dict):
-        return []
     return [float(value) for value in selected.get("bbox", [])]
+
+
+def _page_local_bbox_regions(
+    merged_bboxes: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Normalize bbox unions without ever combining regions from different pages."""
+    by_page: dict[int, list[list[float]]] = {}
+    for item in merged_bboxes:
+        if not isinstance(item, dict):
+            continue
+        bbox = item.get("bbox")
+        if not isinstance(bbox, list) or len(bbox) != 4:
+            continue
+        page_number = int(item.get("page_idx", -1))
+        if page_number < 0:
+            continue
+        by_page.setdefault(page_number, []).append([float(value) for value in bbox])
+
+    return [
+        {
+            "page_number": page_number,
+            "bbox": [
+                min(box[0] for box in boxes),
+                min(box[1] for box in boxes),
+                max(box[2] for box in boxes),
+                max(box[3] for box in boxes),
+            ],
+        }
+        for page_number, boxes in sorted(by_page.items())
+    ]
 
 
 def _apply_verification(

@@ -146,6 +146,7 @@ export interface AnalysisRun {
     structured_data_keys: string[];
     has_document_id?: boolean;
     has_material_url?: boolean;
+    document_id?: string | null;
   };
   understood?: {
     company_name?: string;
@@ -215,6 +216,9 @@ type BackendEvidence = {
   source_hash: string;
   confidence: number;
   verifier_status: string;
+  document_id?: string | null;
+  bbox_regions?: { page_number: number; bbox: number[] }[];
+  bbox_coordinate_space?: { width: number; height: number; origin: "top-left" };
 };
 
 type BackendAgent = Agent;
@@ -342,6 +346,11 @@ async function fetchEvidenceDetailItems(id: string): Promise<EvidenceDetailItem[
       conf: item.confidence,
       snippet: item.text,
       risk: riskByFinding[item.finding_id] ?? "风险证据",
+      documentId: item.document_id ?? run.input_summary.document_id ?? null,
+      pdfUrl: documentPdfUrl(item.document_id ?? run.input_summary.document_id),
+      bbox: item.bbox,
+      bboxRegions: toBBoxRegions(item),
+      bboxCoordinateSpace: item.bbox_coordinate_space ?? DEFAULT_BBOX_COORDINATE_SPACE,
     }));
   } catch (err) {
     if (isNotFound(err)) return [];
@@ -380,6 +389,11 @@ async function fetchKnowledgeData(): Promise<KnowledgeData> {
       conf: item.confidence,
       snippet: item.text,
       risk: riskByFinding[item.finding_id] ?? item.verifier_status,
+      documentId: item.document_id ?? run.input_summary.document_id ?? null,
+      pdfUrl: documentPdfUrl(item.document_id ?? run.input_summary.document_id),
+      bbox: item.bbox,
+      bboxRegions: toBBoxRegions(item),
+      bboxCoordinateSpace: item.bbox_coordinate_space ?? DEFAULT_BBOX_COORDINATE_SPACE,
     }));
   });
   const companies = [...new Set(runs.map((run) => run.company_name).filter(Boolean))];
@@ -403,6 +417,23 @@ async function fetchKnowledgeData(): Promise<KnowledgeData> {
       linkedConclusions: preview ? [preview.risk] : [],
     },
   };
+}
+
+const DEFAULT_BBOX_COORDINATE_SPACE = {
+  width: 1000,
+  height: 1000,
+  origin: "top-left" as const,
+};
+
+function toBBoxRegions(item: BackendEvidence) {
+  if (item.bbox_regions?.length) {
+    return item.bbox_regions.map((region) => ({ page: region.page_number, bbox: region.bbox }));
+  }
+  return item.bbox.length === 4 ? [{ page: item.page_number, bbox: item.bbox }] : [];
+}
+
+function documentPdfUrl(documentId?: string | null) {
+  return documentId ? `${API_BASE_URL}/documents/${encodeURIComponent(documentId)}/file` : null;
 }
 
 async function fetchBacktestDetailData(id: string): Promise<BacktestDetailData | null> {

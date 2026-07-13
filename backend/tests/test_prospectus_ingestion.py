@@ -58,3 +58,4 @@ def test_register_duplicate_hash_returns_existing_document(tmp_path):
 
     assert second.document_id == first.document_id
     assert second.doc_key == "ysyy"
+    assert repo.get(first.document_id) == first

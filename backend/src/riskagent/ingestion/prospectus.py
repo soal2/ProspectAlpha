@@ -106,6 +106,13 @@ class ProspectusIngestionRepository:
                 raise KeyError(doc_key)
             return _registration_from_row(row)
 
+    def get(self, document_id: str) -> ProspectusRegistration:
+        with self.session_factory() as session:
+            row = session.get(ProspectusDocumentRow, document_id)
+            if row is None:
+                raise KeyError(document_id)
+            return _registration_from_row(row)
+
     def _read_request_content(
         self, request: ProspectusRegisterRequest
     ) -> tuple[bytes, str, Path | None]:
