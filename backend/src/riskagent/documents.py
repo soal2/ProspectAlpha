@@ -1,4 +1,4 @@
-"""Document asset storage and PDF parsing for the analysis pipeline."""
+"""Document storage plus prospectus RAG pipeline orchestration."""
 
 from __future__ import annotations
 
@@ -16,17 +16,17 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from riskagent.database import SessionLocal, init_db
+from riskagent.database import Base, SessionLocal, init_db
 from riskagent.ingestion import (
     ProspectusIngestionRepository,
     ProspectusRegisterRequest,
     ProspectusRegistration,
 )
-from riskagent.database import Base, SessionLocal, init_db
 from riskagent.models import DocumentAssetRow, DocumentBlockRow
 from riskagent.parsing import (
     ChunkResult,
     ChunkerFactory,
+    ImageDescriber,
     PdfProcessResult,
     PdfProcessorFactory,
     build_chunk_request,
@@ -78,8 +78,13 @@ def process_prospectus_document(
     *,
     ingestion_repository: ProspectusIngestionRepository | None = None,
     chunk_indexer: ChunkIndexer | None = None,
+    image_describer: ImageDescriber | None = None,
 ) -> ProspectusPipelineResult:
-    """Run the prospectus RAG pipeline from registration through optional indexing."""
+    """Run registration, MinerU parsing, chunking, and optional chunk indexing.
+
+    This is the canonical prospectus RAG workflow entrypoint. Scripts should call
+    this function instead of duplicating the pipeline steps.
+    """
     settings = load_rag_pipeline_settings(request.config_path)
     ingestion = ingestion_repository or ProspectusIngestionRepository()
     registration = ingestion.register(
@@ -108,8 +113,14 @@ def process_prospectus_document(
         if request.chunk_output_dir is not None
         else processed_root / registration.document_id / "chunks" / settings.chunker.name
     )
-    image_describer = VLLMImageDescriber() if request.enable_image_vlm else None
-    chunked = ChunkerFactory(image_describer=image_describer).create(settings.chunker.name).chunk(
+    active_image_describer = (
+        image_describer
+        if image_describer is not None
+        else VLLMImageDescriber()
+        if request.enable_image_vlm
+        else None
+    )
+    chunked = ChunkerFactory(image_describer=active_image_describer).create(settings.chunker.name).chunk(
         build_chunk_request(
             doc_key=registration.doc_key,
             document_id=registration.document_id,

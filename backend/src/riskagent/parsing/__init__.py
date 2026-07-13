@@ -6,6 +6,7 @@ from riskagent.parsing.chunker import (
     ChunkRequest,
     ChunkResult,
     DocumentChunk,
+    ImageDescriber,
 )
 from riskagent.parsing.config import (
     ChunkerSettings,
@@ -30,6 +31,7 @@ __all__ = [
     "ChunkResult",
     "ChunkerFactory",
     "DocumentChunk",
+    "ImageDescriber",
     "MinerUPdfProcessor",
     "PdfProcessRequest",
     "PdfProcessResult",

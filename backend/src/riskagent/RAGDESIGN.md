@@ -34,6 +34,9 @@ Responsibilities:
   workers, and analysis runs.
 - Coordinate ingestion registration, parsing, chunking, and retrieval indexing
   in order.
+- Keep `process_prospectus_document(...)` as the canonical prospectus RAG
+  pipeline entrypoint. Validation scripts should call it instead of duplicating
+  the workflow.
 - Pass stable identifiers and paths between modules, especially `document_id`,
   raw PDF path, processed output path, and chunk artifact path.
 - Persist or return high-level document status for the rest of the application.
@@ -57,6 +60,10 @@ documents.py
   -> parsing.ChunkerFactory.create(...).chunk(...)
   -> retrieval.ChunkIndexer.index(...)
 ```
+
+`backend/scripts/run_ysyy_pipeline.py` is only an end-to-end smoke runner for the
+sample `ysyy` document. It may add progress logging and a sample retrieval query,
+but it must call `process_prospectus_document(...)` for the actual pipeline.
 
 Final ownership summary:
 
@@ -1117,7 +1124,7 @@ Current caveats:
 
 ```text
 backend/src/riskagent/documents.py
-  -> ingestion registers backend/data/raw/prospectus/{document_id}.pdf
+  -> ingestion registers backend/data/raw/prospectus/{doc_key}.pdf
   -> parsing PdfProcessorFactory.create("mineru")
   -> parsing reads or writes backend/data/processed/{document_id}/ocr/{document_id}_content_list.json
   -> parsing ChunkerFactory.create("block")
