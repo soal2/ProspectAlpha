@@ -64,12 +64,14 @@ def load_rag_pipeline_settings(path: str | Path | None = None) -> RagPipelineSet
 def build_pdf_process_request(
     *,
     doc_key: str,
+    document_id: str | None = None,
     pdf_path: Path | str,
     processed_root: Path | str,
     settings: PdfProcessorSettings,
 ) -> PdfProcessRequest:
     return PdfProcessRequest(
         doc_key=doc_key,
+        document_id=document_id,
         pdf_path=pdf_path,
         processed_root=processed_root,
         method=settings.method,  # type: ignore[arg-type]
@@ -83,12 +85,14 @@ def build_pdf_process_request(
 def build_chunk_request(
     *,
     doc_key: str,
+    document_id: str | None = None,
     content_list_path: Path | str,
     output_dir: Path | str | None,
     settings: ChunkerSettings,
 ) -> ChunkRequest:
     return ChunkRequest(
         doc_key=doc_key,
+        document_id=document_id,
         content_list_path=content_list_path,
         output_dir=output_dir,
         max_chars=settings.max_chars,

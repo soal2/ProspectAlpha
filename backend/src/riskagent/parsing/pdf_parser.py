@@ -25,6 +25,7 @@ MinerUBackend = Literal[
 class PdfProcessRequest:
     doc_key: str
     pdf_path: Path | str
+    document_id: str | None = None
     processed_root: Path | str = DEFAULT_PROCESSED_ROOT
     method: ParseMethod = "ocr"
     backend: MinerUBackend = "pipeline"
@@ -38,6 +39,7 @@ class PdfProcessRequest:
 
 @dataclass(frozen=True)
 class PdfProcessResult:
+    document_id: str
     doc_key: str
     pdf_path: Path
     processed_root: Path
@@ -67,23 +69,27 @@ class MinerUPdfProcessor:
             raise ValueError(f"PDF path is not a file: {pdf_path}")
 
         processed_root = Path(request.processed_root).expanduser().resolve()
-        output_dir = processed_root / request.doc_key / request.method
-        content_list_path = output_dir / f"{request.doc_key}_content_list.json"
+        document_id = request.document_id or request.doc_key
+        output_dir = processed_root / document_id / request.method
+        content_list_path = output_dir / f"{document_id}_content_list.json"
 
         if not (request.reuse_existing and content_list_path.exists()):
             output_dir.mkdir(parents=True, exist_ok=True)
             _apply_mineru_env(output_dir)
-            _run_mineru(request=request, pdf_path=pdf_path, processed_root=processed_root)
+            _run_mineru(
+                request=request,
+                pdf_path=pdf_path,
+                processed_root=processed_root,
+                mineru_file_name=f"{document_id}.pdf",
+            )
 
         if not content_list_path.exists():
-            fallback = _find_content_list(output_dir, request.doc_key)
-            if fallback is None:
-                raise FileNotFoundError(
-                    f"MinerU content list not found after parsing: {content_list_path}"
-                )
-            content_list_path = fallback
+            raise FileNotFoundError(
+                f"MinerU content list not found after parsing: {content_list_path}"
+            )
 
         return PdfProcessResult(
+            document_id=document_id,
             doc_key=request.doc_key,
             pdf_path=pdf_path,
             processed_root=processed_root,
@@ -115,6 +121,7 @@ class PdfProcessorFactory:
 def process_pdf_with_mineru(
     *,
     doc_key: str,
+    document_id: str | None = None,
     pdf_path: Path | str,
     processed_root: Path | str = DEFAULT_PROCESSED_ROOT,
     method: ParseMethod = "ocr",
@@ -129,6 +136,7 @@ def process_pdf_with_mineru(
     return MinerUPdfProcessor().process(
         PdfProcessRequest(
             doc_key=doc_key,
+            document_id=document_id,
             pdf_path=pdf_path,
             processed_root=processed_root,
             method=method,
@@ -143,7 +151,13 @@ def process_pdf_with_mineru(
     )
 
 
-def _run_mineru(*, request: PdfProcessRequest, pdf_path: Path, processed_root: Path) -> None:
+def _run_mineru(
+    *,
+    request: PdfProcessRequest,
+    pdf_path: Path,
+    processed_root: Path,
+    mineru_file_name: str,
+) -> None:
     try:
         from mineru.cli.common import do_parse
     except ModuleNotFoundError as exc:
@@ -158,7 +172,7 @@ def _run_mineru(*, request: PdfProcessRequest, pdf_path: Path, processed_root: P
 
     do_parse(
         output_dir=str(processed_root),
-        pdf_file_names=[f"{request.doc_key}.pdf"],
+        pdf_file_names=[mineru_file_name],
         pdf_bytes_list=[pdf_path.read_bytes()],
         p_lang_list=[request.lang],
         backend=request.backend,
@@ -180,15 +194,3 @@ def _apply_mineru_env(output_dir: Path) -> None:
     for key, value in env_defaults.items():
         os.environ.setdefault(key, value)
         Path(os.environ[key]).mkdir(parents=True, exist_ok=True)
-
-
-def _find_content_list(output_dir: Path, doc_key: str) -> Path | None:
-    candidates = [
-        output_dir / f"{doc_key}_content_list.json",
-        output_dir / f"{doc_key}.pdf_content_list.json",
-    ]
-    candidates.extend(sorted(output_dir.glob("*_content_list.json")))
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-    return None

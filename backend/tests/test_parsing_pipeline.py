@@ -50,12 +50,13 @@ def test_mineru_processor_reuses_existing_content_list(tmp_path):
     pdf = tmp_path / "raw" / "ysyy.pdf"
     pdf.parent.mkdir(parents=True)
     pdf.write_bytes(b"%PDF existing")
-    content_list = tmp_path / "processed" / "ysyy" / "ocr" / "ysyy_content_list.json"
+    content_list = tmp_path / "processed" / "doc_ysyy" / "ocr" / "doc_ysyy_content_list.json"
     _write_content_list(content_list)
 
     result = PdfProcessorFactory().create().process(
         PdfProcessRequest(
             doc_key="ysyy",
+            document_id="doc_ysyy",
             pdf_path=pdf,
             processed_root=tmp_path / "processed",
             reuse_existing=True,
@@ -63,7 +64,7 @@ def test_mineru_processor_reuses_existing_content_list(tmp_path):
     )
 
     assert result.content_list_path == content_list.resolve()
-    assert result.output_dir == (tmp_path / "processed" / "ysyy" / "ocr").resolve()
+    assert result.output_dir == (tmp_path / "processed" / "doc_ysyy" / "ocr").resolve()
 
 
 def test_block_chunker_outputs_unified_text_table_image_chunks(tmp_path):
@@ -82,6 +83,8 @@ def test_block_chunker_outputs_unified_text_table_image_chunks(tmp_path):
 
     assert result.output_path == output_dir.resolve() / "chunks.jsonl"
     assert [chunk.chunk_type for chunk in result.chunks] == ["text", "table", "image"]
+    assert result.chunks[0].document_id == "ysyy"
+    assert result.chunks[0].chunk_id == "ysyy_chunk_000001"
 
     text_chunk = result.chunks[0]
     assert text_chunk.text == "第一段\n第二段"

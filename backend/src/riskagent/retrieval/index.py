@@ -20,7 +20,7 @@ from riskagent.providers.embedding import EmbeddingClient, get_default_embedding
 DEFAULT_INDEX_BACKEND = "postgres"
 DEFAULT_INDEX_SCHEMA = "rag"
 DEFAULT_EMBEDDING_DIM = 1024
-DEFAULT_EMBEDDING_BATCH_SIZE = 25
+DEFAULT_EMBEDDING_BATCH_SIZE = 10
 
 
 class ChunkIndexError(RuntimeError):
@@ -569,6 +569,7 @@ def _chunk_from_dict(payload: dict[str, Any]) -> DocumentChunk:
 
     return DocumentChunk(
         chunk_id=payload["chunk_id"],
+        document_id=payload.get("document_id") or payload["doc_key"],
         doc_key=payload["doc_key"],
         chunk_type=payload["chunk_type"],
         text=payload["text"],

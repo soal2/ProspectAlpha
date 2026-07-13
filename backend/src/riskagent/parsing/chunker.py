@@ -34,6 +34,7 @@ class MergedBBox:
 @dataclass(frozen=True)
 class DocumentChunk:
     chunk_id: str
+    document_id: str
     doc_key: str
     chunk_type: str
     text: str
@@ -55,6 +56,7 @@ class DocumentChunk:
 class ChunkRequest:
     doc_key: str
     content_list_path: Path | str
+    document_id: str | None = None
     output_dir: Path | str | None = None
     max_chars: int = DEFAULT_MAX_CHARS
     include_types: tuple[str, ...] = DEFAULT_INCLUDE_TYPES
@@ -66,6 +68,7 @@ class ChunkRequest:
 
 @dataclass(frozen=True)
 class ChunkResult:
+    document_id: str
     doc_key: str
     chunker_name: str
     chunker_version: str
@@ -92,6 +95,44 @@ class DocumentChunker(Protocol):
         ...
 
 
+class _ImageDescriptionCache:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._data = self._load()
+
+    @classmethod
+    def for_output_dir(cls, output_dir: Path | str | None) -> "_ImageDescriptionCache | None":
+        if output_dir is None:
+            return None
+        path = Path(output_dir).expanduser().resolve()
+        path.mkdir(parents=True, exist_ok=True)
+        return cls(path / "image_descriptions.json")
+
+    def get(self, key: str) -> str:
+        value = self._data.get(key)
+        return value if isinstance(value, str) else ""
+
+    def set(self, key: str, description: str) -> None:
+        self._data[key] = description
+        self._write()
+
+    def _load(self) -> dict[str, str]:
+        if not self.path.exists():
+            return {}
+        try:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+        return {str(key): str(value) for key, value in payload.items() if isinstance(value, str)}
+
+    def _write(self) -> None:
+        tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")
+        tmp_path.write_text(json.dumps(self._data, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp_path.replace(self.path)
+
+
 class BlockChunker:
     name = DEFAULT_CHUNKER_NAME
     version = "block-v1"
@@ -105,6 +146,8 @@ class BlockChunker:
         if not isinstance(content, list):
             raise ValueError(f"MinerU content list must be a JSON array: {content_list_path}")
 
+        document_id = request.document_id or request.doc_key
+        image_description_cache = _ImageDescriptionCache.for_output_dir(request.output_dir)
         chunks: list[DocumentChunk] = []
         text_buffer: list[tuple[int, dict[str, Any]]] = []
         last_table_chunk_indices: list[int] = []
@@ -117,6 +160,7 @@ class BlockChunker:
             chunks.append(
                 self._build_text_chunk(
                     doc_key=request.doc_key,
+                    document_id=document_id,
                     chunk_number=len(chunks) + 1,
                     items=text_buffer,
                     source_file=_project_relative(content_list_path),
@@ -151,6 +195,7 @@ class BlockChunker:
                         chunks.append(
                             self._build_text_chunk(
                                 doc_key=request.doc_key,
+                                document_id=document_id,
                                 chunk_number=len(chunks) + 1,
                                 items=[(source_item_index, split_item)],
                                 source_file=_project_relative(content_list_path),
@@ -173,6 +218,7 @@ class BlockChunker:
                 continuation_items = _collect_table_continuations(content, source_item_index)
                 table_chunks = self._build_table_chunks(
                     doc_key=request.doc_key,
+                    document_id=document_id,
                     start_chunk_number=len(chunks) + 1,
                     source_item_index=source_item_index,
                     item=item,
@@ -199,6 +245,7 @@ class BlockChunker:
                 last_table_chunk_indices = []
                 chunk = self._build_image_chunk(
                     doc_key=request.doc_key,
+                    document_id=document_id,
                     chunk_number=len(chunks) + 1,
                     source_item_index=source_item_index,
                     item=item,
@@ -209,6 +256,7 @@ class BlockChunker:
                         source_item_index=source_item_index,
                         window_blocks=request.image_context_window_blocks,
                     ),
+                    description_cache=image_description_cache,
                 )
             else:
                 last_table_chunk_indices = []
@@ -219,6 +267,7 @@ class BlockChunker:
         flush_text()
         output_path = self._write_chunks(request.output_dir, chunks)
         return ChunkResult(
+            document_id=document_id,
             doc_key=request.doc_key,
             chunker_name=self.name,
             chunker_version=self.version,
@@ -231,6 +280,7 @@ class BlockChunker:
         self,
         *,
         doc_key: str,
+        document_id: str,
         chunk_number: int,
         items: list[tuple[int, dict[str, Any]]],
         source_file: str,
@@ -238,7 +288,8 @@ class BlockChunker:
         texts = [_text_value(item.get("text")) for _, item in items]
         bbox_refs = [_bbox_ref(index, item) for index, item in items if _has_bbox(item)]
         return DocumentChunk(
-            chunk_id=_chunk_id(doc_key, chunk_number),
+            chunk_id=_chunk_id(document_id, chunk_number),
+            document_id=document_id,
             doc_key=doc_key,
             chunk_type="text",
             text="\n".join(text for text in texts if text),
@@ -253,6 +304,7 @@ class BlockChunker:
         self,
         *,
         doc_key: str,
+        document_id: str,
         start_chunk_number: int,
         source_item_index: int,
         item: dict[str, Any],
@@ -308,7 +360,8 @@ class BlockChunker:
             )
             chunks.append(
                 DocumentChunk(
-                    chunk_id=_chunk_id(doc_key, start_chunk_number + offset),
+                    chunk_id=_chunk_id(document_id, start_chunk_number + offset),
+                    document_id=document_id,
                     doc_key=doc_key,
                     chunk_type="table",
                     text=part,
@@ -339,21 +392,28 @@ class BlockChunker:
         self,
         *,
         doc_key: str,
+        document_id: str,
         chunk_number: int,
         source_item_index: int,
         item: dict[str, Any],
         content_list_path: Path,
         require_description: bool,
         context: dict[str, Any],
+        description_cache: "_ImageDescriptionCache | None",
     ) -> DocumentChunk | None:
         image_path = _resolve_mineru_image_path(content_list_path, item.get("img_path"))
         description = ""
         if self.image_describer is not None and image_path:
-            description = self.image_describer.describe(
-                _resolve_mineru_image_absolute_path(content_list_path, item.get("img_path")),
-                item,
-                context,
-            ).strip()
+            cache_key = _image_description_cache_key(source_item_index, item)
+            description = description_cache.get(cache_key) if description_cache is not None else ""
+            if not description:
+                description = self.image_describer.describe(
+                    _resolve_mineru_image_absolute_path(content_list_path, item.get("img_path")),
+                    item,
+                    context,
+                ).strip()
+                if description and description_cache is not None:
+                    description_cache.set(cache_key, description)
         if not description:
             description = "\n".join(
                 part
@@ -368,7 +428,8 @@ class BlockChunker:
 
         bbox_refs = [_bbox_ref(source_item_index, item)] if _has_bbox(item) else []
         return DocumentChunk(
-            chunk_id=_chunk_id(doc_key, chunk_number),
+            chunk_id=_chunk_id(document_id, chunk_number),
+            document_id=document_id,
             doc_key=doc_key,
             chunk_type="image",
             text=description,
@@ -478,8 +539,22 @@ class _TableRowTextExtractor(HTMLParser):
             self._in_row = False
 
 
-def _chunk_id(doc_key: str, chunk_number: int) -> str:
-    return f"{doc_key}_chunk_{chunk_number:06d}"
+def _chunk_id(document_id: str, chunk_number: int) -> str:
+    return f"{document_id}_chunk_{chunk_number:06d}"
+
+
+def _image_description_cache_key(source_item_index: int, item: dict[str, Any]) -> str:
+    bbox = item.get("bbox")
+    return json.dumps(
+        {
+            "source_item_index": source_item_index,
+            "page_idx": item.get("page_idx", ""),
+            "img_path": _text_value(item.get("img_path")),
+            "bbox": bbox if isinstance(bbox, list) else None,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
 
 
 def _page_idx(item: dict[str, Any]) -> int:
@@ -740,6 +815,7 @@ def _attach_table_continuation(
         )
         updated[chunk_index] = DocumentChunk(
             chunk_id=chunk.chunk_id,
+            document_id=chunk.document_id,
             doc_key=chunk.doc_key,
             chunk_type=chunk.chunk_type,
             text=chunk.text,

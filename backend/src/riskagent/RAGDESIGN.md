@@ -34,7 +34,7 @@ Responsibilities:
   workers, and analysis runs.
 - Coordinate ingestion registration, parsing, chunking, and retrieval indexing
   in order.
-- Pass stable identifiers and paths between modules, such as `doc_key`,
+- Pass stable identifiers and paths between modules, especially `document_id`,
   raw PDF path, processed output path, and chunk artifact path.
 - Persist or return high-level document status for the rest of the application.
 - Keep API route handlers thin by hiding workflow coordination behind document
@@ -76,7 +76,7 @@ Responsibilities:
 
 - Accept a source PDF path or uploaded PDF bytes from the caller.
 - Validate or discover original prospectus PDFs.
-- Decide the first-version `doc_key` or future database `document_id`.
+- Decide the database `document_id` and optional human-readable `doc_key`.
 - Register the canonical raw PDF location as
   `backend/data/raw/prospectus/{doc_key}.pdf`.
 - Copy the source PDF into the canonical raw location when needed. If the file is
@@ -101,21 +101,22 @@ Parsing owns PDF processing and chunk construction.
 
 Responsibilities:
 
-- Consume an already registered `doc_key` and raw PDF path from ingestion.
-- Produce or read MinerU output under `backend/data/processed/{doc_key}/ocr`.
-- Read `{doc_key}_content_list.json`.
+- Consume an already registered `document_id`, optional `doc_key`, and raw PDF
+  path from ingestion.
+- Produce or read MinerU output under `backend/data/processed/{document_id}/ocr`.
+- Read the MinerU `content_list.json` artifact for that document.
 - Convert MinerU items into unified text, table, and image chunks.
 - Preserve frontend location metadata: `page_idx`, `bbox_refs`, and
   `merged_bboxes`.
 - Resolve MinerU relative `img_path` values into project-relative `image_path`
-  values under `backend/data/processed/{doc_key}/ocr`.
+  values under `backend/data/processed/{document_id}/ocr`.
 - Request VLM descriptions for image chunks before embedding. The VLM client
   itself belongs to providers; parsing only owns when and how the description is
   attached to the chunk.
 - Ensure emitted text, table, and image chunks all have a unified `text` field
   that retrieval can embed later.
 - Write chunk artifacts such as
-  `backend/data/processed/{doc_key}/chunks/block/chunks.jsonl`.
+  `backend/data/processed/{document_id}/chunks/block/chunks.jsonl`.
 
 Parsing does not own:
 
@@ -264,47 +265,71 @@ Ingestion stores original prospectus PDFs under:
 
 ```text
 backend/data/raw/prospectus/
-  ysyy.pdf
+  {document_id}.pdf
 ```
+
+The original uploaded filename, for example `ysyy.pdf`, is metadata. It should
+not decide the processed artifact directory.
 
 Parsing stores MinerU processed outputs under:
 
 ```text
 backend/data/processed/
-  ysyy/
+  {document_id}/
     ocr/
       images/
-      ysyy_content_list.json
-      ysyy_content_list_v2.json
-      ysyy.md
-      ysyy_middle.json
-      ysyy_model.json
-      ysyy_layout.pdf
-      ysyy_origin.pdf
-      ysyy_span.pdf
+      {document_id}_content_list.json
+      {document_id}_content_list_v2.json
+      {document_id}.md
+      {document_id}_middle.json
+      {document_id}_model.json
+      {document_id}_layout.pdf
+      {document_id}_origin.pdf
+      {document_id}_span.pdf
 ```
 
 Parsing stores chunker outputs under:
 
 ```text
 backend/data/processed/
-  ysyy/
+  {document_id}/
     chunks/
       block/
+        image_descriptions.json
         chunks.jsonl
 ```
 
-`ysyy` is the document key in this first version. Ingestion owns choosing this
-key. It can later be replaced by a database `document_id` without changing the
-chunk schema.
+`chunks.jsonl` is the final chunk artifact. Each line is one unified chunk JSON
+object, so retrieval can stream or batch-read it without loading unrelated
+artifacts.
+
+`image_descriptions.json` is a resumable VLM cache for image chunks. Each image
+description is written immediately after a successful VLM call. If chunking is
+interrupted during image enrichment, the next run reuses cached descriptions and
+continues without paying for already completed image calls again.
+
+`document_id` is the stable processed directory name. The original file name
+and human-readable `doc_key` stay in metadata and database rows. Avoid directory
+names with a PDF extension, such as `processed/ysyy.pdf/ocr`, because they make
+a directory look like a source file and become confusing in scripts.
+
+The implementation should not read `processed/{doc_key}/...` or MinerU-created
+`processed/{filename}.pdf/...` paths as an automatic compatibility fallback. If
+legacy outputs exist, migrate them once into `processed/{document_id}/...` before
+running the pipeline.
 
 ## MinerU Source Contract
 
-The first version reads:
+The parser/chunker reads:
 
 ```text
-backend/data/processed/{doc_key}/ocr/{doc_key}_content_list.json
+backend/data/processed/{document_id}/ocr/{document_id}_content_list.json
 ```
+
+Legacy MinerU files such as `ysyy.pdf_content_list.json` should be renamed or
+copied during migration to the `document_id` naming convention before parsing.
+The runtime parser should fail fast when the expected `document_id` content-list
+path is missing.
 
 This file is a JSON array. MinerU items have fields such as:
 
@@ -365,12 +390,12 @@ backend/src/riskagent/parsing/pdf_parser.py
 Responsibilities:
 
 - Receive the source PDF path from ingestion, usually
-  `backend/data/raw/prospectus/{doc_key}.pdf`.
+  `backend/data/raw/prospectus/{document_id}.pdf`.
 - Locate the MinerU output directory under
-  `backend/data/processed/{doc_key}/ocr`.
+  `backend/data/processed/{document_id}/ocr`.
 - Use existing MinerU output when `reuse_existing` is enabled.
 - Run MinerU when output is missing and the implementation supports execution.
-- Return the path to `{doc_key}_content_list.json` and the raw MinerU output
+- Return the path to the document's MinerU `content_list.json` and the raw MinerU output
   directory.
 
 Factory shape:
@@ -489,12 +514,13 @@ empty.
 
 ```json
 {
-  "chunk_id": "ysyy_chunk_000001",
+  "chunk_id": "doc_269f78d05439_chunk_000001",
+  "document_id": "doc_269f78d05439",
   "doc_key": "ysyy",
   "chunk_type": "text",
   "text": "...",
   "page_idx": 8,
-  "source_file": "backend/data/processed/ysyy/ocr/ysyy_content_list.json",
+  "source_file": "backend/data/processed/doc_269f78d05439/ocr/doc_269f78d05439_content_list.json",
   "source_item_indices": [120, 121, 122],
   "bbox_refs": [
     {
@@ -519,9 +545,11 @@ empty.
 Field notes:
 
 - `chunk_id`: generated by ProspectAlpha for the final embeddable record.
-- `doc_key`: human-readable document key, initially the PDF stem. It is used
-  for deterministic file layout such as `data/processed/{doc_key}` and for
-  debugging. It is not the primary retrieval isolation key.
+- `document_id`: stable database identifier. It is the processed directory name
+  and the required retrieval isolation key.
+- `doc_key`: human-readable document key, initially often derived from the PDF
+  stem. It is a label/debugging field only and is not the primary retrieval
+  isolation key.
 - `chunk_type`: usually `text`, `table`, or `image`.
 - `text`: the single field used for embedding.
 - `page_idx`: the main page index for navigation. This keeps MinerU's 0-based
@@ -532,7 +560,8 @@ Field notes:
 - `bbox_refs`: original bboxes for precise frontend highlighting.
 - `merged_bboxes`: bbox unions grouped by `page_idx` for coarse navigation or
   large highlight boxes.
-- `image_path`: full project-relative path under `backend/data/processed`.
+- `image_path`: full project-relative path under
+  `backend/data/processed/{document_id}/ocr`.
 - `mineru_img_path`: original relative `img_path` from MinerU.
 - `table_html`: raw table HTML from MinerU `table_body`.
 - `metadata`: type-specific details such as VLM model and prompt version.
@@ -754,7 +783,7 @@ Image chunk requirements:
 
 - `chunk_type = "image"`
 - `image_path` must be the full project-relative path, for example:
-  `backend/data/processed/ysyy/ocr/images/example.jpg`
+  `backend/data/processed/{document_id}/ocr/images/example.jpg`
 - `mineru_img_path` keeps the original MinerU value:
   `images/example.jpg`
 - `text` is the VLM-generated description.
@@ -805,6 +834,12 @@ text chunk -> text embedding
 table chunk -> text embedding
 image chunk -> VLM description text embedding
 ```
+
+The current implementation writes `chunks.jsonl` after the full chunk pass has
+completed. VLM image descriptions are checkpointed earlier in
+`image_descriptions.json`, so the expensive part can resume. If later text/table
+chunking becomes long-running too, the chunker can be extended to stream chunks
+to a temporary JSONL and atomically rename it when complete.
 
 ## PostgreSQL Storage
 
@@ -914,6 +949,9 @@ The retrieval writer should:
    matching. Chinese full-text search requires `pg_jieba` and `jiebacfg`; the
    indexer should fail fast if the extension or config is missing.
 
+DashScope embedding currently rejects batches larger than 10 input strings, so
+the default PostgreSQL indexer embedding batch size is 10.
+
 Retrieval has three explicit entrypoints:
 
 - `retrieval/vector.py`: vector search using `ORDER BY embedding <=> query_vector`.
@@ -922,8 +960,8 @@ Retrieval has three explicit entrypoints:
 
 Every retrieval entrypoint must accept `document_id` and use it as the required
 filter for RAG over a single prospectus. `doc_key` is not a tokenizer workaround
-and should not be part of the retrieval API. It remains only as a file-layout and
-debugging field for paths such as `data/processed/{doc_key}`.
+and should not be part of the retrieval API. It remains only as a human-readable
+label and debugging field.
 
 There is no application-side tokenizer fallback in retrieval. Full-text and
 hybrid search rely on PostgreSQL `content_tsv @@ plainto_tsquery('jiebacfg', ...)`.
@@ -1060,8 +1098,10 @@ Current caveats:
   This is acceptable for the first index backend, but later we should decide
   whether `rag.prospectus_documents` remains an index-owned mirror or becomes
   the single canonical prospectus table.
-- `content_list_v2.json`, `middle.json`, and `ysyy.md` are useful diagnostics,
-  but the implemented chunker reads only `{doc_key}_content_list.json`.
+- `content_list_v2.json`, `middle.json`, and MinerU markdown output are useful
+  diagnostics, but the implemented chunker reads only the resolved
+  `content_list.json` path returned by the parser:
+  `{document_id}_content_list.json`.
   Extending the parser to fall back to `middle.json` or markdown should be a
   deliberate parser/chunker version change.
 - Cross-page table continuation detection is intentionally local: it attaches
@@ -1077,13 +1117,13 @@ Current caveats:
 
 ```text
 backend/src/riskagent/documents.py
-  -> ingestion registers backend/data/raw/prospectus/ysyy.pdf
+  -> ingestion registers backend/data/raw/prospectus/{document_id}.pdf
   -> parsing PdfProcessorFactory.create("mineru")
-  -> parsing reads or writes backend/data/processed/ysyy/ocr/ysyy_content_list.json
+  -> parsing reads or writes backend/data/processed/{document_id}/ocr/{document_id}_content_list.json
   -> parsing ChunkerFactory.create("block")
   -> parsing creates text/table/image chunks
   -> providers VLM client describes image chunks when requested by parsing
-  -> parsing writes backend/data/processed/ysyy/chunks/block/chunks.jsonl
+  -> parsing writes backend/data/processed/{document_id}/chunks/block/chunks.jsonl
   -> retrieval ChunkIndexer reads chunks.jsonl
   -> providers embedding client embeds chunk.text
   -> retrieval writes PostgreSQL / pgvector
@@ -1097,7 +1137,7 @@ own behavior and storage contracts.
 - `source_item_indices` are generated from the array position in
   `content_list.json`; they are not written by MinerU.
 - `image_path` must not be the raw MinerU relative path. It should include
-  `backend/data/processed/{doc_key}/ocr/`.
+  `backend/data/processed/{document_id}/ocr/`.
 - `page_idx` remains 0-based to match MinerU and frontend PDF navigation.
 - Bbox coordinates remain MinerU's original coordinate system.
 - Text, table, and image chunks must share one schema so embedding and storage

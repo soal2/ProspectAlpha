@@ -20,5 +20,5 @@ chunker:
       - footer
       - page_number
     merge_text: true
-    require_image_description: false
+    require_image_description: true
     image_context_window_blocks: 3

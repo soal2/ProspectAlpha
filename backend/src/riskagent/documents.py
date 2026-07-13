@@ -95,6 +95,7 @@ def process_prospectus_document(
     parsed = PdfProcessorFactory().create(settings.pdf_processor.name).process(
         build_pdf_process_request(
             doc_key=registration.doc_key,
+            document_id=registration.document_id,
             pdf_path=registration.raw_pdf_path,
             processed_root=processed_root,
             settings=settings.pdf_processor,
@@ -104,12 +105,13 @@ def process_prospectus_document(
     chunk_output_dir = (
         Path(request.chunk_output_dir).expanduser().resolve()
         if request.chunk_output_dir is not None
-        else processed_root / registration.doc_key / "chunks" / settings.chunker.name
+        else processed_root / registration.document_id / "chunks" / settings.chunker.name
     )
     image_describer = VLLMImageDescriber() if request.enable_image_vlm else None
     chunked = ChunkerFactory(image_describer=image_describer).create(settings.chunker.name).chunk(
         build_chunk_request(
             doc_key=registration.doc_key,
+            document_id=registration.document_id,
             content_list_path=parsed.content_list_path,
             output_dir=chunk_output_dir,
             settings=settings.chunker,

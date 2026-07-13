@@ -74,7 +74,8 @@ def _registration(tmp_path: Path) -> ProspectusRegistration:
 
 def _chunk() -> DocumentChunk:
     return DocumentChunk(
-        chunk_id="ysyy_chunk_000001",
+        chunk_id="doc_ysyy_chunk_000001",
+        document_id="doc_ysyy",
         doc_key="ysyy",
         chunk_type="image",
         text="研发管线图展示产品进度和风险。",
@@ -122,7 +123,7 @@ def test_postgres_chunk_indexer_inserts_project_doc_and_chunk_fields(tmp_path):
     assert "tags" not in sql
     assert ".assets" not in sql
     chunk_call = [call for call in conn.calls if 'INSERT INTO "rag_test".prospectus_chunks' in call["sql"]][0]
-    assert chunk_call["params"][0] == "ysyy_chunk_000001"
+    assert chunk_call["params"][0] == "doc_ysyy_chunk_000001"
     assert chunk_call["params"][1] == "doc_ysyy"
     assert chunk_call["params"][2] == "ysyy"
     assert chunk_call["params"][5] == "[1.0,1.0,0.0]"
@@ -135,7 +136,7 @@ def test_postgres_chunk_indexer_vector_full_text_and_hybrid_search_use_distinct_
     conn = FakeConnection()
     conn.rows = [
         (
-            "ysyy_chunk_000001",
+            "doc_ysyy_chunk_000001",
             "doc_ysyy",
             "ysyy",
             "image",
@@ -164,7 +165,7 @@ def test_postgres_chunk_indexer_vector_full_text_and_hybrid_search_use_distinct_
 
     vector_results = indexer.vector_search(query="研发管线风险", document_id="doc_ysyy", limit=3)
     vector_call = conn.calls[-1]
-    assert vector_results[0].chunk_id == "ysyy_chunk_000001"
+    assert vector_results[0].chunk_id == "doc_ysyy_chunk_000001"
     assert vector_results[0].doc_key == "ysyy"
     assert "AND document_id = %s" in vector_call["sql"]
     assert "AND doc_key = %s" not in vector_call["sql"]

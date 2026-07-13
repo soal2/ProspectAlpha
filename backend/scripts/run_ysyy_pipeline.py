@@ -67,6 +67,7 @@ def main() -> int:
     parsed = PdfProcessorFactory().create(settings.pdf_processor.name).process(
         build_pdf_process_request(
             doc_key=registration.doc_key,
+            document_id=registration.document_id,
             pdf_path=registration.raw_pdf_path,
             processed_root=processed_root,
             settings=settings.pdf_processor,
@@ -80,8 +81,9 @@ def main() -> int:
     ).chunk(
         build_chunk_request(
             doc_key=registration.doc_key,
+            document_id=registration.document_id,
             content_list_path=parsed.content_list_path,
-            output_dir=processed_root / registration.doc_key / "chunks" / settings.chunker.name,
+            output_dir=processed_root / registration.document_id / "chunks" / settings.chunker.name,
             settings=settings.chunker,
         )
     )
