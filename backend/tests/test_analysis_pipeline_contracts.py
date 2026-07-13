@@ -40,6 +40,7 @@ def test_clarifying_patch_start_freezes_inputs_and_generates_artifacts(
         run.run_id,
         AnalysisRunInputPatch(
             company_name="测试 IPO",
+            document_id="doc_test",
             document_text="风险因素\n公司存在关联交易、对赌和赎回安排，经营活动现金流持续为负。",
             confirm_defaults=True,
             structured_data={"经营活动现金流": "连续两期为负"},
@@ -50,9 +51,12 @@ def test_clarifying_patch_start_freezes_inputs_and_generates_artifacts(
     completed = repo.start(run.run_id)
     assert completed.status == "completed"
     assert completed.inputs_frozen is True
-    assert completed.document_blocks
+    assert completed.document_blocks == []
     assert completed.findings
     assert completed.evidence
+    assert all(item.page_number == 0 for item in completed.evidence)
+    assert all(item.bbox == [1.0, 2.0, 3.0, 4.0] for item in completed.evidence)
+    assert all(item.document_block_id == "chunk_doc_test_001" for item in completed.evidence)
     assert completed.report is not None
     assert completed.report.review_status == "draft"
     assert all(item.text for item in completed.evidence)
@@ -82,6 +86,7 @@ def test_analysis_api_exposes_minimal_pipeline_resources(
         "/analysis-runs",
         json={
             "company_name": "测试 IPO",
+            "document_id": "doc_test",
             "document_text": "风险因素\n招股书披露对赌、赎回、关联交易和供应商集中度风险。",
             "structured_data": {"供应商集中度": "Top5 采购占比 80%"},
         },

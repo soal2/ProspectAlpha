@@ -18,6 +18,7 @@ def test_analysis_run_uses_rule_snapshot_and_evidence(tmp_path, analysis_repo_fa
     run = repo.create_and_run(
         AnalysisRunCreate(
             company_name="测试 IPO",
+            document_id="doc_test",
             document_text="公司存在关联交易、赎回安排，经营活动现金流持续为负。",
             structured_data={"经营活动现金流": "连续两期为负"},
         )
@@ -50,6 +51,7 @@ def test_analysis_api_creates_ready_run_then_start_completes(
         "/analysis-runs",
         json={
             "company_name": "测试 IPO",
+            "document_id": "doc_test",
             "document_text": "招股书披露对赌和赎回安排，同时存在供应商集中度风险。",
             "structured_data": {"供应商集中度": "Top5 采购占比 80%"},
         },
@@ -122,6 +124,7 @@ def test_analysis_run_persists_dynamic_strategy_agents_and_depth(
     run = repo.create_and_run(
         AnalysisRunCreate(
             company_name="测试 IPO",
+            document_id="doc_test",
             document_text="公司存在关联交易、赎回安排，经营活动现金流持续为负。",
             risk_rule_set_id="hk_ipo_prospectus_risk_framework_v1",
             analysis_depth="quick",
@@ -151,6 +154,7 @@ def test_dynamic_domain_skills_keep_rule_counts_and_skill_ids(
     run = repo.create_and_run(
         AnalysisRunCreate(
             company_name="Skill 测试 IPO",
+            document_id="doc_test",
             document_text="风险因素\n公司存在关联交易、赎回安排，经营活动现金流持续为负。",
             analysis_depth="standard",
         )
@@ -191,6 +195,7 @@ def test_invalid_strategy_pauses_and_api_selection_resumes(
         "/analysis-runs",
         json={
             "company_name": "人工恢复 IPO",
+            "document_id": "doc_test",
             "document_text": "公司存在关联交易和赎回安排。",
         },
     ).json()

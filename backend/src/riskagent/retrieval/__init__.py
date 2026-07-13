@@ -1,5 +1,6 @@
 """Evidence retrieval boundary for source-grounded risk analysis."""
 
+from riskagent.retrieval.hybrid import prospectus_hybrid_search
 from riskagent.retrieval.index import (
     ChunkIndexer,
     ChunkIndexError,
@@ -16,6 +17,7 @@ __all__ = [
     "ChunkIndexError",
     "ChunkSearchResult",
     "PostgresChunkIndexer",
+    "prospectus_hybrid_search",
     "connect_postgres",
     "create_chunk_indexer",
     "ensure_extensions",

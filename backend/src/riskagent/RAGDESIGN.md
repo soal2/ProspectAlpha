@@ -1149,3 +1149,44 @@ own behavior and storage contracts.
 - Bbox coordinates remain MinerU's original coordinate system.
 - Text, table, and image chunks must share one schema so embedding and storage
   stay simple.
+
+## Main Agent Retrieval Entry Migration
+
+The main analysis-agent workflow must consume the public chunk retrieval
+boundary owned by `retrieval`; it must not create or query the legacy
+run-scoped `HybridSearchIndex`.
+
+Migration scope:
+
+- Export `prospectus_hybrid_search(...)` from `riskagent.retrieval` as the
+  package-level hybrid chunk retrieval entrypoint.
+- Pass the stable prospectus `document_id` through the analysis run and the
+  dynamic Agent supervisor. Do not pass the complete prospectus text into each
+  expert thread.
+- Each expert builds retrieval queries from its strategic assignment, Domain
+  Skill, and frozen risk rules, retrieves the relevant chunks, and evaluates
+  only the retrieved source text.
+- Replacement experts use the same retrieval boundary as the initially
+  selected experts.
+- Evidence extraction reuses the same public retrieval entrypoint instead of
+  querying a run-scoped search index.
+- Prospectus parsing and chunk indexing remain owned by
+  `process_prospectus_document(...)`; the analysis-agent workflow must not
+  re-index locally constructed `document_blocks`.
+
+`ChunkSearchResult` maps into analysis evidence as follows:
+
+- `chunk_id` -> `document_block_id`
+- `page_idx` -> `page_number` without an offset; both remain 0-based
+- the `merged_bboxes` entry matching `page_idx` -> `bbox`; fall back to the
+  first merged bbox when no page-matched entry exists
+- `text` -> evidence text
+- `metadata.section_path` -> `section_path`, with `chunk_type` as the fallback
+- `metadata.char_start`, `metadata.char_end`, and `metadata.source_hash` -> the
+  corresponding traceability fields when present
+- when `metadata.source_hash` is absent, hash the retrieved chunk text so
+  evidence deduplication still has a stable source-content key
+
+The migration changes retrieval orchestration and evidence data handling. It
+does not change embedding, hybrid ranking, model-provider behavior, or report
+generation contracts.

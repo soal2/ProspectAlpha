@@ -30,12 +30,14 @@ from riskagent.agents.orchestrator import (
     validate_replacement_decision,
     validate_strategy_decision,
 )
+from riskagent.retrieval import ChunkSearchResult, prospectus_hybrid_search
 from riskagent.risk_rules import RiskRule, RiskRuleRepository
 from riskagent.seed_data import AGENT_SPECS
 from riskagent.skills.risk_extract import RuleEvaluation, evaluate_text_against_rules
 from riskagent.skills.risk_skill_registry import (
     rules_for_skill,
     rules_from_snapshot,
+    rule_search_query,
     skill_for_agent,
 )
 
@@ -48,6 +50,7 @@ TEAM_SHUTDOWN_TIMEOUT_SECONDS = 10.0
 
 StrategyProvider = Callable[..., Any]
 ReplacementProvider = Callable[..., Any]
+ChunkRetriever = Callable[..., list[ChunkSearchResult]]
 
 
 class ExpertModuleResult(BaseModel):
@@ -92,7 +95,7 @@ class AgentState(TypedDict, total=False):
     company_name: str
     user_requirement: str
     document_summary: str
-    text: str
+    document_id: str
     max_findings: int
     rule_snapshot: dict[str, Any]
     available_agents: list[dict[str, Any]]
@@ -121,6 +124,7 @@ class AgentTeamSupervisor:
         agent_specs: list[AgentSpec] | None = None,
         strategy_provider: StrategyProvider | None = None,
         replacement_provider: ReplacementProvider | None = None,
+        chunk_retriever: ChunkRetriever | None = None,
         checkpointer: Any | None = None,
         runtime_root: Path | str | None = None,
     ) -> None:
@@ -129,6 +133,7 @@ class AgentTeamSupervisor:
         self._agent_specs_override = list(agent_specs) if agent_specs is not None else None
         self.strategy_provider = strategy_provider or orchestrate
         self.replacement_provider = replacement_provider or select_replacement
+        self.chunk_retriever = chunk_retriever or prospectus_hybrid_search
         self.runtime_root = resolve_agent_runtime_root(runtime_root)
         self._runtime_events: dict[str, list[dict[str, Any]]] = {}
         self._runtime_events_lock = threading.Lock()
@@ -153,7 +158,7 @@ class AgentTeamSupervisor:
         company_name: str,
         user_requirement: str,
         document_summary: str,
-        text: str,
+        document_id: str,
         max_findings: int,
         rule_snapshot: dict[str, Any] | None = None,
         manual_agent_names: list[str] | None = None,
@@ -163,7 +168,7 @@ class AgentTeamSupervisor:
             "company_name": company_name,
             "user_requirement": user_requirement,
             "document_summary": document_summary[:4000],
-            "text": text,
+            "document_id": document_id,
             "max_findings": max_findings,
             "rule_snapshot": rule_snapshot or self.repository.snapshot(),
             "available_agents": self.agent_options(),
@@ -375,7 +380,7 @@ class AgentTeamSupervisor:
                         self._expert_handler(
                             spec=spec,
                             assignment=assignment,
-                            text=state["text"],
+                            document_id=state["document_id"],
                             rules=all_rules,
                             rule_snapshot=state["rule_snapshot"],
                         ),
@@ -485,7 +490,7 @@ class AgentTeamSupervisor:
                             self._expert_handler(
                                 spec=replacement_spec,
                                 assignment=replacement_assignment,
-                                text=state["text"],
+                                document_id=state["document_id"],
                                 rules=all_rules,
                                 rule_snapshot=state["rule_snapshot"],
                             ),
@@ -712,7 +717,7 @@ class AgentTeamSupervisor:
         *,
         spec: AgentSpec,
         assignment: StrategyAssignment,
-        text: str,
+        document_id: str,
         rules: list[RiskRule],
         rule_snapshot: dict[str, Any],
     ):
@@ -731,9 +736,11 @@ class AgentTeamSupervisor:
             selected_rules = (
                 rules_for_skill(skill, rules, set()) if skill else _rules_for_spec(spec, rules)
             )
-            evaluations = evaluate_text_against_rules(
-                text,
+            evaluations = _evaluate_rules_against_chunks(
+                document_id=document_id,
                 rules=selected_rules,
+                query_context=f"{assignment.module} {assignment.goal}",
+                chunk_retriever=self.chunk_retriever,
                 repository=self.repository,
                 rule_set_snapshot=rule_snapshot,
             )
@@ -939,6 +946,34 @@ def _rules_for_spec(spec: AgentSpec, all_rules: list[RiskRule]) -> list[RiskRule
         if spec.categories and rule.category in spec.categories:
             selected.append(rule)
     return selected or (all_rules if spec.default else [])
+
+
+def _evaluate_rules_against_chunks(
+    *,
+    document_id: str,
+    rules: list[RiskRule],
+    query_context: str,
+    chunk_retriever: ChunkRetriever,
+    repository: RiskRuleRepository,
+    rule_set_snapshot: dict[str, Any],
+) -> list[RuleEvaluation]:
+    evaluations: list[RuleEvaluation] = []
+    for rule in rules:
+        chunks = chunk_retriever(
+            query=f"{query_context} {rule_search_query(rule)}".strip(),
+            document_id=document_id,
+            limit=5,
+        )
+        retrieved_text = "\n\n".join(chunk.text for chunk in chunks if chunk.text.strip())
+        evaluations.extend(
+            evaluate_text_against_rules(
+                retrieved_text,
+                rules=[rule],
+                repository=repository,
+                rule_set_snapshot=rule_set_snapshot,
+            )
+        )
+    return evaluations
 
 
 def _validate_expert_output(

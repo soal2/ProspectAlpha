@@ -16,7 +16,6 @@ from typing import Any, Callable, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
-from sqlalchemy.orm import sessionmaker
 
 from riskagent.agent_experts import AgentSpec
 from riskagent.agents.orchestrator import (
@@ -27,7 +26,7 @@ from riskagent.agents.orchestrator import (
 )
 from riskagent.agents.supervisor import AgentTeamSupervisor
 from riskagent.common.cache import TTLCache
-from riskagent.database import Base, SessionLocal, init_db, make_engine
+from riskagent.database import Base, SessionLocal, init_db
 from riskagent.risk_rules import RiskRuleRepository, get_default_repository
 from riskagent.skills.risk_extract import RuleEvaluation
 from riskagent.skills.risk_skill_registry import (
@@ -36,7 +35,7 @@ from riskagent.skills.risk_skill_registry import (
 )
 from riskagent.seed_data import AGENT_SPECS
 from riskagent.models import AnalysisRunRow, EvidenceLibraryRow
-from riskagent.retrieval.hybrid import HybridSearchIndex
+from riskagent.retrieval import ChunkSearchResult, prospectus_hybrid_search
 from riskagent.workers.analysis import dispatch_analysis_job
 
 
@@ -49,7 +48,7 @@ _FILE_LOCKS_GUARD = threading.Lock()
 
 PIPELINE_STAGES: list[tuple[str, str, str]] = [
     ("task_understanding", "任务理解", "任务理解专家"),
-    ("pdf_parsing", "PDF 解析", "PDF 解析器"),
+    ("pdf_parsing", "材料准备", "招股书检索服务"),
     ("expert_orchestration", "专家编排", "沈北辰"),
     ("evidence_extraction", "证据抽取", "证据检索专家"),
     ("risk_identification", "风险识别", "专业 Agent 团队"),
@@ -247,7 +246,7 @@ class AnalysisRunRepository:
         evidence_library_path: Path | str | None = None,
         session_factory=SessionLocal,
         use_database: bool | None = None,
-        search_index: HybridSearchIndex | None = None,
+        chunk_retriever: Callable[..., list[ChunkSearchResult]] | None = None,
         agent_supervisor: AgentTeamSupervisor | None = None,
         report_provider: Callable[..., Any] | None = None,
     ) -> None:
@@ -268,21 +267,13 @@ class AnalysisRunRepository:
                 Base.metadata.create_all(bind=bind)
             self.session_factory = session_factory
         else:
-            retrieval_path = self.path.with_suffix(".retrieval.db")
-            retrieval_path.parent.mkdir(parents=True, exist_ok=True)
-            retrieval_engine = make_engine(f"sqlite:///{retrieval_path}")
-            Base.metadata.create_all(bind=retrieval_engine)
-            self.session_factory = sessionmaker(
-                bind=retrieval_engine,
-                autoflush=False,
-                autocommit=False,
-                future=True,
-            )
+            self.session_factory = session_factory
         self.search_cache: TTLCache[list[dict[str, Any]]] = TTLCache(ttl_seconds=30, max_items=256)
-        self.search_index = search_index or HybridSearchIndex(session_factory=self.session_factory)
+        self.chunk_retriever = chunk_retriever or prospectus_hybrid_search
         self.agent_supervisor = agent_supervisor or AgentTeamSupervisor(
             repository=self.rule_repository,
             agent_specs=None if self.use_database else _seed_agent_specs(),
+            chunk_retriever=self.chunk_retriever,
         )
         self.report_provider = report_provider or synthesize_report
 
@@ -566,52 +557,49 @@ class AnalysisRunRepository:
                 run,
                 "pdf_parsing",
                 "stage_started",
-                "PDF 解析器开始解析招股书材料",
-                "解析文本、页码、章节、bbox，并为后续 Agent 建立可回溯材料底座。",
-                actor_name="pdf_parser",
-                action_label="解析中",
+                "开始确认已解析并入库的招股书材料",
+                "检查稳定 document_id，后续 Agent 将按需检索带页码和 bbox 的 chunk。",
+                actor_name="prospectus_retrieval",
+                action_label="材料确认",
             )
-            parsed_blocks = self._document_blocks(payload)
-            run.document_blocks = _run_blocks_from_document(run.run_id, payload, parsed_blocks)
-            text = _merge_text_and_data(
-                "\n\n".join(block.text for block in run.document_blocks),
-                payload.structured_data,
-            )
-            block_stats = _document_block_stats(run.document_blocks)
+            if not payload.document_id:
+                raise ValueError(
+                    "document_id is required; process and index the prospectus before starting analysis."
+                )
+            document_id = payload.document_id
+            run.document_blocks = []
             run.events.append(
                 _event(
                     "tool_completed",
-                    "pdf_parser",
-                    "招股书原文块解析完成",
-                    f"已提取 {len(run.document_blocks)} 个关键段落、{block_stats['table_blocks']} 张表格、{block_stats['risk_tagged_blocks']} 条风险相关原文块。",
+                    "prospectus_retrieval",
+                    "招股书检索材料确认完成",
+                    f"已确认索引文档 {document_id}，Agent 将通过 retrieval 公共入口按需读取 chunk。",
                     stage_key="pdf_parsing",
-                    action_label="解析完成",
-                    metrics=block_stats,
+                    action_label="材料确认完成",
                 )
             )
             run.events.append(
                 _event(
                     "tool_started",
                     "hybrid_search",
-                    "建立材料检索索引",
-                    "将 document_blocks 写入轻量全文和语义检索索引，后续 Agent 不重复读取原始 PDF。",
+                    "连接材料检索入口",
+                    "复用 documents 流程已写入 PostgreSQL 的 chunk 索引，分析流程不再重复建索引。",
                     stage_key="pdf_parsing",
-                    action_label="建立索引",
+                    action_label="连接检索",
                     metrics={"tool_calls": 1},
                 )
             )
             self.search_cache.clear()
-            indexed_count = self.search_index.index_blocks(run_id=run.run_id, blocks=run.document_blocks)
             run.events.append(
                 _event(
                     "stage_completed",
                     "hybrid_search",
                     "PDF 解析与材料索引已就绪",
-                    f"已索引 {indexed_count} 个 document_blocks，索引以原文块为事实源。",
+                    f"文档 {document_id} 的公共 chunk 检索入口已就绪。",
                     stage_key="pdf_parsing",
                     stage_status="completed",
                     action_label="材料库就绪",
-                    metrics={"indexed_blocks": indexed_count, **block_stats},
+                    metrics={"reused_chunk_index": True},
                 )
             )
             self._save_run(run)
@@ -626,7 +614,12 @@ class AnalysisRunRepository:
                 action_label="专家编排",
             )
             payload_for_orchestra = _payload_from_run(run)
-            doc_summary = payload_for_orchestra.document_text[:4000]
+            summary_chunks = self.chunk_retriever(
+                query="公司概况 业务模式 风险因素 财务状况",
+                document_id=document_id,
+                limit=3,
+            )
+            doc_summary = "\n\n".join(item.text for item in summary_chunks)[:4000]
             manual_agent_names = list(
                 run.analysis_config.pop("manual_agent_names", []) or []
             )
@@ -643,7 +636,7 @@ class AnalysisRunRepository:
                     or payload_for_orchestra.company_name
                     or "对招股书进行风险分析",
                     document_summary=doc_summary,
-                    text=text,
+                    document_id=document_id,
                     max_findings=_effective_max_findings(payload),
                     rule_snapshot=run.frozen_rule_snapshot,
                 )
@@ -748,7 +741,7 @@ class AnalysisRunRepository:
             self._save_run(run)
             max_findings = _effective_max_findings(payload)
             candidate_findings = self._findings_from_evaluations(team_result.evaluations, max_findings)
-            run.evidence = self._evidence_for_findings(run.run_id, candidate_findings, run.document_blocks)
+            run.evidence = self._evidence_for_findings(document_id, candidate_findings)
             before_dedupe = len(run.evidence)
             run.evidence = _dedupe_evidence(run.evidence)
             findings_by_agent_rule = {
@@ -1111,14 +1104,6 @@ class AnalysisRunRepository:
             self._save_run(run)
             raise
 
-    def _document_text(self, payload: AnalysisRunCreate) -> str:
-        if payload.document_text.strip():
-            return payload.document_text
-        return ""
-
-    def _document_blocks(self, payload: AnalysisRunCreate) -> list[DocumentBlock]:
-        return _parse_document_blocks("draft", payload, payload.document_text)
-
     def _transition(
         self,
         run: AnalysisRun,
@@ -1179,15 +1164,12 @@ class AnalysisRunRepository:
 
     def _evidence_for_findings(
         self,
-        run_id: str,
+        document_id: str,
         findings: list[RiskFinding],
-        blocks: list[DocumentBlock],
     ) -> list[RunEvidence]:
         evidence: list[RunEvidence] = []
         for finding in findings:
-            candidates = self._hybrid_search(run_id, finding)
-            if not candidates:
-                candidates = _block_candidates_for_finding(finding, blocks)
+            candidates = self._hybrid_search(document_id, finding)
             for candidate in candidates[:2]:
                 evidence_id = f"ev_{uuid.uuid4().hex[:10]}"
                 evidence.append(
@@ -1209,27 +1191,17 @@ class AnalysisRunRepository:
                 finding.evidence_ids.append(evidence_id)
         return evidence
 
-    def _hybrid_search(self, run_id: str, finding: RiskFinding) -> list[dict[str, Any]]:
+    def _hybrid_search(self, document_id: str, finding: RiskFinding) -> list[dict[str, Any]]:
         query_terms = tuple(sorted(set(finding.matched_terms + [finding.category, finding.title])))
-        cache_key = hashlib.sha256(f"{run_id}|{'|'.join(query_terms)}".encode("utf-8")).hexdigest()
+        cache_key = hashlib.sha256(f"{document_id}|{'|'.join(query_terms)}".encode("utf-8")).hexdigest()
         cached = self.search_cache.get(cache_key)
         if cached is not None:
             return cached
         candidates = [
-            {
-                "block_id": item.block_id,
-                "page_number": item.page_number,
-                "section_path": item.section_path,
-                "text": item.text,
-                "bbox": item.bbox,
-                "char_start": item.char_start,
-                "char_end": item.char_end,
-                "source_hash": item.source_hash,
-                "score": item.score,
-            }
-            for item in self.search_index.search(
-                run_id=run_id,
+            _chunk_evidence_candidate(item)
+            for item in self.chunk_retriever(
                 query=" ".join(query_terms),
+                document_id=document_id,
                 limit=5,
             )
         ]
@@ -1361,6 +1333,7 @@ def _payload_from_run(run: AnalysisRun) -> AnalysisRunCreate:
     summary = run.input_summary
     return AnalysisRunCreate(
         company_name=run.company_name,
+        document_id=summary.get("document_id"),
         document_text=summary.get("document_text_preview", ""),
         structured_data={key: "" for key in summary.get("structured_data_keys", [])},
     )
@@ -1369,11 +1342,11 @@ def _payload_from_run(run: AnalysisRun) -> AnalysisRunCreate:
 def _blocking_questions(payload: AnalysisRunCreate) -> list[str]:
     questions = []
     has_subject = any([payload.company_name and payload.company_name != "待确认公司", payload.ipo_project_hint])
-    has_material = any([payload.document_text.strip(), payload.material_url])
+    has_material = bool(payload.document_id)
     if not has_subject:
         questions.append("请提供公司名称、申请编号或明确的 IPO 项目线索。")
     if not has_material:
-        questions.append("请提供招股书文本或可下载 URL。")
+        questions.append("请先完成招股书处理与 chunk 入库，并提供 document_id。")
     if not payload.confirm_defaults:
         questions.append("请确认是否使用默认风险规则和默认分析深度；专家编队将由战略层动态生成。")
     return questions
@@ -1402,7 +1375,7 @@ def _effective_max_findings(payload: AnalysisRunCreate) -> int:
 def _understood(payload: AnalysisRunCreate) -> dict[str, Any]:
     return {
         "company_name": payload.company_name or "待确认",
-        "material_hint": "已提供材料" if any([payload.document_text, payload.material_url]) else "待补充",
+        "material_hint": "已提供已索引材料" if payload.document_id else "待补充",
         "focus": sorted(payload.structured_data.keys())[:5],
     }
 
@@ -1411,6 +1384,7 @@ def _input_summary(payload: AnalysisRunCreate) -> dict[str, Any]:
     return {
         "document_text_chars": len(payload.document_text),
         "document_text_preview": payload.document_text[:300],
+        "document_id": payload.document_id,
         "structured_data_keys": sorted(payload.structured_data.keys()),
         "has_document_id": bool(payload.document_id),
         "has_material_url": bool(payload.material_url),
@@ -1425,82 +1399,6 @@ def _compact_rule_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         "totals": snapshot["totals"],
         "source_workbook": snapshot.get("source_workbook"),
     }
-
-
-def _parse_document_blocks(run_id: str, payload: AnalysisRunCreate, text: str) -> list[DocumentBlock]:
-    document_id = payload.document_id or f"doc_{hashlib.sha256(text.encode('utf-8')).hexdigest()[:12]}"
-    chunks = _chunk_text(text)
-    blocks = []
-    section = "招股书正文"
-    for idx, chunk in enumerate(chunks, start=1):
-        maybe_section = _detect_section(chunk)
-        if maybe_section:
-            section = maybe_section
-        source_hash = hashlib.sha256(chunk.encode("utf-8")).hexdigest()
-        blocks.append(
-            DocumentBlock(
-                block_id=f"block_{run_id}_{idx:04d}",
-                document_id=document_id,
-                page_number=idx,
-                section_path=section,
-                text=chunk,
-                bbox=[0.0, 0.0, 595.0, 842.0],
-                char_start=(idx - 1) * 900,
-                char_end=(idx - 1) * 900 + len(chunk),
-                source_hash=source_hash,
-            )
-        )
-    return blocks
-
-
-def _run_blocks_from_document(
-    run_id: str,
-    payload: AnalysisRunCreate,
-    blocks: list[DocumentBlock],
-) -> list[DocumentBlock]:
-    if not blocks:
-        return _parse_document_blocks(run_id, payload, payload.document_text)
-    return [
-        DocumentBlock(
-            block_id=block.block_id,
-            document_id=block.document_id,
-            page_number=block.page_number,
-            section_path=block.section_path,
-            block_type=block.block_type,
-            text=block.text,
-            bbox=block.bbox,
-            char_start=block.char_start,
-            char_end=block.char_end,
-            source_hash=block.source_hash,
-            parser_version=block.parser_version,
-        )
-        for block in blocks
-    ]
-
-
-def _chunk_text(text: str, *, size: int = 900) -> list[str]:
-    paragraphs = [part.strip() for part in re.split(r"\n{2,}|\f", text) if part.strip()]
-    if not paragraphs:
-        paragraphs = [text.strip()] if text.strip() else []
-    chunks: list[str] = []
-    for paragraph in paragraphs:
-        for start in range(0, len(paragraph), size):
-            chunk = paragraph[start : start + size].strip()
-            if chunk:
-                chunks.append(chunk)
-    return chunks or ["未提供可解析文本。"]
-
-
-def _detect_section(text: str) -> str | None:
-    for marker in ["风险因素", "关联交易", "财务资料", "业务", "历史及公司架构"]:
-        if marker in text[:80]:
-            return marker
-    return None
-
-
-def _score_block(text: str, terms: tuple[str, ...]) -> int:
-    lower = text.lower()
-    return sum(1 for term in terms if term and term.lower() in lower)
 
 
 def _verify_findings(findings: list[RiskFinding], evidence: list[RunEvidence]) -> list[VerificationResult]:
@@ -1532,34 +1430,6 @@ def _verify_findings(findings: list[RiskFinding], evidence: list[RunEvidence]) -
     return results
 
 
-def _document_block_stats(blocks: list[DocumentBlock]) -> dict[str, int]:
-    risk_terms = [
-        "风险",
-        "现金流",
-        "客户",
-        "供应商",
-        "关联交易",
-        "诉讼",
-        "合规",
-        "毛利率",
-        "破发",
-        "估值",
-        "redemption",
-        "cash flow",
-        "litigation",
-    ]
-    return {
-        "text_blocks": sum(1 for block in blocks if block.block_type == "text"),
-        "table_blocks": sum(1 for block in blocks if block.block_type == "table"),
-        "image_blocks": sum(1 for block in blocks if block.block_type == "image_ocr"),
-        "risk_tagged_blocks": sum(
-            1
-            for block in blocks
-            if any(term.lower() in block.text.lower() for term in risk_terms)
-        ),
-    }
-
-
 def _dedupe_evidence(evidence: list[RunEvidence]) -> list[RunEvidence]:
     seen: set[tuple[str, str]] = set()
     deduped: list[RunEvidence] = []
@@ -1572,37 +1442,39 @@ def _dedupe_evidence(evidence: list[RunEvidence]) -> list[RunEvidence]:
     return deduped
 
 
-def _block_candidates_for_finding(
-    finding: RiskFinding,
-    blocks: list[DocumentBlock],
-) -> list[dict[str, Any]]:
-    terms = [
-        term
-        for term in [finding.category, finding.title, *finding.matched_terms]
-        if term
-    ]
-    candidates = []
-    for block in blocks:
-        text = block.text.lower()
-        hits = [term for term in terms if term.lower() in text]
-        if not hits:
-            continue
-        score = min(0.95, 0.62 + len(set(hits)) * 0.08)
-        candidates.append(
-            {
-                "block_id": block.block_id,
-                "page_number": block.page_number,
-                "section_path": block.section_path,
-                "text": block.text,
-                "bbox": block.bbox,
-                "char_start": block.char_start,
-                "char_end": block.char_end,
-                "source_hash": block.source_hash,
-                "score": score,
-            }
-        )
-    candidates.sort(key=lambda item: item["score"], reverse=True)
-    return candidates
+def _chunk_evidence_candidate(item: ChunkSearchResult) -> dict[str, Any]:
+    metadata = item.metadata if isinstance(item.metadata, dict) else {}
+    return {
+        "block_id": item.chunk_id,
+        "page_number": item.page_idx,
+        "section_path": str(metadata.get("section_path") or item.chunk_type),
+        "text": item.text,
+        "bbox": _merged_bbox_for_page(item.merged_bboxes, item.page_idx),
+        "char_start": int(metadata.get("char_start") or 0),
+        "char_end": int(metadata.get("char_end") or 0),
+        "source_hash": str(
+            metadata.get("source_hash")
+            or hashlib.sha256(item.text.encode("utf-8")).hexdigest()
+        ),
+        "score": item.score,
+    }
+
+
+def _merged_bbox_for_page(
+    merged_bboxes: list[dict[str, Any]],
+    page_idx: int,
+) -> list[float]:
+    selected = next(
+        (
+            item
+            for item in merged_bboxes
+            if isinstance(item, dict) and int(item.get("page_idx", -1)) == page_idx
+        ),
+        merged_bboxes[0] if merged_bboxes else {},
+    )
+    if not isinstance(selected, dict):
+        return []
+    return [float(value) for value in selected.get("bbox", [])]
 
 
 def _apply_verification(
@@ -1626,7 +1498,7 @@ def _quality_review(run: AnalysisRun) -> dict[str, Any]:
         if not linked:
             issues.append(f"{finding.finding_id} / {finding.title} 缺少 PDF 原文证据。")
             continue
-        if any(item.page_number <= 0 or not item.bbox or not item.source_hash for item in linked):
+        if any(item.page_number < 0 or not item.bbox or not item.source_hash for item in linked):
             issues.append(f"{finding.finding_id} / {finding.title} 的页码、bbox 或 source_hash 不完整。")
         if finding.severity == "high" and all(item.verifier_status != "supported" for item in linked):
             issues.append(f"{finding.finding_id} / {finding.title} 为高风险但缺少 supported 证据。")
@@ -1912,15 +1784,6 @@ def _relative_time(start: str, current: str) -> str:
         return "00:00"
     seconds = max(0, int((current_dt - start_dt).total_seconds()))
     return f"{seconds // 60:02d}:{seconds % 60:02d}"
-
-
-def _merge_text_and_data(document_text: str, structured_data: dict[str, Any]) -> str:
-    if not structured_data:
-        return document_text
-    data_lines = ["结构化数据："]
-    for key, value in sorted(structured_data.items()):
-        data_lines.append(f"{key}: {value}")
-    return f"{document_text}\n\n" + "\n".join(data_lines)
 
 
 def _severity(item: RuleEvaluation) -> str:
