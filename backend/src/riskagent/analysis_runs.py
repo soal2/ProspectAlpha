@@ -28,11 +28,6 @@ from riskagent.agents.orchestrator import (
 from riskagent.agents.supervisor import AgentTeamSupervisor
 from riskagent.common.cache import TTLCache
 from riskagent.database import Base, SessionLocal, init_db, make_engine
-from riskagent.documents import (
-    DocumentBlock as ParsedDocumentBlock,
-    DocumentRepository,
-    get_default_document_repository,
-)
 from riskagent.risk_rules import RiskRuleRepository, get_default_repository
 from riskagent.skills.risk_extract import RuleEvaluation
 from riskagent.skills.risk_skill_registry import (
@@ -250,7 +245,6 @@ class AnalysisRunRepository:
         path: Path | str | None = None,
         rule_repository: RiskRuleRepository | None = None,
         evidence_library_path: Path | str | None = None,
-        document_repository: DocumentRepository | None = None,
         session_factory=SessionLocal,
         use_database: bool | None = None,
         search_index: HybridSearchIndex | None = None,
@@ -265,7 +259,6 @@ class AnalysisRunRepository:
             or os.getenv("EVIDENCE_LIBRARY_PATH")
             or DEFAULT_EVIDENCE_LIBRARY_PATH
         )
-        self.document_repository = document_repository or get_default_document_repository()
         self.use_database = use_database if use_database is not None else os.getenv("USE_DATABASE", "1") != "0"
         if self.use_database:
             bind = getattr(session_factory, "kw", {}).get("bind")
@@ -634,13 +627,6 @@ class AnalysisRunRepository:
             )
             payload_for_orchestra = _payload_from_run(run)
             doc_summary = payload_for_orchestra.document_text[:4000]
-            if not doc_summary and payload_for_orchestra.document_id:
-                try:
-                    doc_summary = self.document_repository.get_text(
-                        payload_for_orchestra.document_id
-                    )[:4000]
-                except Exception:
-                    doc_summary = ""
             manual_agent_names = list(
                 run.analysis_config.pop("manual_agent_names", []) or []
             )
@@ -1128,30 +1114,10 @@ class AnalysisRunRepository:
     def _document_text(self, payload: AnalysisRunCreate) -> str:
         if payload.document_text.strip():
             return payload.document_text
-        if payload.document_id:
-            return self.document_repository.get_text(payload.document_id)
         return ""
 
-    def _document_blocks(self, payload: AnalysisRunCreate) -> list[ParsedDocumentBlock]:
-        if payload.document_id:
-            return self.document_repository.get_blocks(payload.document_id)
-        document_id = f"doc_{hashlib.sha256(payload.document_text.encode('utf-8')).hexdigest()[:12]}"
-        return [
-            ParsedDocumentBlock(
-                block_id=block.block_id,
-                document_id=document_id,
-                page_number=block.page_number,
-                section_path=block.section_path,
-                block_type=block.block_type,
-                text=block.text,
-                bbox=block.bbox,
-                char_start=0,
-                char_end=len(block.text),
-                source_hash=block.source_hash,
-                parser_version=block.parser_version,
-            )
-            for block in _parse_document_blocks("draft", payload, payload.document_text)
-        ]
+    def _document_blocks(self, payload: AnalysisRunCreate) -> list[DocumentBlock]:
+        return _parse_document_blocks("draft", payload, payload.document_text)
 
     def _transition(
         self,
@@ -1403,11 +1369,11 @@ def _payload_from_run(run: AnalysisRun) -> AnalysisRunCreate:
 def _blocking_questions(payload: AnalysisRunCreate) -> list[str]:
     questions = []
     has_subject = any([payload.company_name and payload.company_name != "待确认公司", payload.ipo_project_hint])
-    has_material = any([payload.document_text.strip(), payload.document_id, payload.material_url])
+    has_material = any([payload.document_text.strip(), payload.material_url])
     if not has_subject:
         questions.append("请提供公司名称、申请编号或明确的 IPO 项目线索。")
     if not has_material:
-        questions.append("请上传招股书 PDF、提供可下载 URL 或选择已有 document_id。")
+        questions.append("请提供招股书文本或可下载 URL。")
     if not payload.confirm_defaults:
         questions.append("请确认是否使用默认风险规则和默认分析深度；专家编队将由战略层动态生成。")
     return questions
@@ -1436,7 +1402,7 @@ def _effective_max_findings(payload: AnalysisRunCreate) -> int:
 def _understood(payload: AnalysisRunCreate) -> dict[str, Any]:
     return {
         "company_name": payload.company_name or "待确认",
-        "material_hint": "已提供材料" if any([payload.document_text, payload.document_id, payload.material_url]) else "待补充",
+        "material_hint": "已提供材料" if any([payload.document_text, payload.material_url]) else "待补充",
         "focus": sorted(payload.structured_data.keys())[:5],
     }
 
@@ -1490,7 +1456,7 @@ def _parse_document_blocks(run_id: str, payload: AnalysisRunCreate, text: str) -
 def _run_blocks_from_document(
     run_id: str,
     payload: AnalysisRunCreate,
-    blocks: list[ParsedDocumentBlock],
+    blocks: list[DocumentBlock],
 ) -> list[DocumentBlock]:
     if not blocks:
         return _parse_document_blocks(run_id, payload, payload.document_text)

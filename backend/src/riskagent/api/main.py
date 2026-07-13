@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from riskagent.a2a import build_dynamic_expert_a2a_routes
 from riskagent.agent_experts import AgentSpec, AgentSpecRepository
-from riskagent.api import agents, analysis, analysis_options, chat, documents, risk_rules
+from riskagent.api import agents, analysis, analysis_options, chat, risk_rules
 from riskagent.seed_data import AGENT_SPECS
 
 
@@ -42,8 +42,6 @@ def create_app() -> FastAPI:
     app.include_router(risk_rules.router)
     app.include_router(agents.router)
     app.include_router(analysis_options.router)
-    app.include_router(documents.router)
-    app.include_router(chat.router)
     app.include_router(chat.general_router)
     app.include_router(analysis.router)
     app.router.routes.extend(

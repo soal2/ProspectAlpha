@@ -8,46 +8,6 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from riskagent.database import Base
 
 
-class DocumentAssetRow(Base):
-    __tablename__ = "documents"
-
-    document_id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    filename: Mapped[str] = mapped_column(String(512))
-    content_type: Mapped[str] = mapped_column(String(128))
-    file_sha256: Mapped[str] = mapped_column(String(64), unique=True, index=True)
-    storage_uri: Mapped[str] = mapped_column(String(1024))
-    file_size_bytes: Mapped[int] = mapped_column(Integer)
-    page_count: Mapped[int] = mapped_column(Integer)
-    text_chars: Mapped[int] = mapped_column(Integer)
-    block_count: Mapped[int] = mapped_column(Integer)
-    source_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
-    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now())
-
-    blocks: Mapped[list["DocumentBlockRow"]] = relationship(
-        back_populates="document",
-        cascade="all, delete-orphan",
-        lazy="selectin",
-    )
-
-
-class DocumentBlockRow(Base):
-    __tablename__ = "document_blocks"
-
-    block_id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    document_id: Mapped[str] = mapped_column(ForeignKey("documents.document_id"), index=True)
-    page_number: Mapped[int] = mapped_column(Integer)
-    section_path: Mapped[str] = mapped_column(String(512))
-    block_type: Mapped[str] = mapped_column(String(64))
-    text: Mapped[str] = mapped_column(Text)
-    bbox: Mapped[list[float]] = mapped_column(JSON)
-    char_start: Mapped[int] = mapped_column(Integer)
-    char_end: Mapped[int] = mapped_column(Integer)
-    source_hash: Mapped[str] = mapped_column(String(64), index=True)
-    parser_version: Mapped[str] = mapped_column(String(128))
-
-    document: Mapped[DocumentAssetRow] = relationship(back_populates="blocks")
-
-
 class ProspectusDocumentRow(Base):
     __tablename__ = "prospectus_documents"
 
