@@ -54,6 +54,39 @@ export interface OrchestraPlan {
   stages: OrchestraStage[];
 }
 
+export interface StrategyAssignment {
+  module_id: string;
+  agent_name: string;
+  module: string;
+  goal: string;
+  expected_outputs: string[];
+}
+
+export interface StrategyPlan {
+  summary: string;
+  focus_areas?: string[];
+  selected_agents?: string[];
+  assignments: StrategyAssignment[];
+}
+
+export interface AgentTeamState {
+  agent_name: string;
+  status: string;
+  current_module?: string | null;
+  replacement_round?: number;
+}
+
+export interface ReplacementHistoryEntry {
+  module_id?: string;
+  failed_agent?: string;
+  replacement_agent?: string;
+  agent_name?: string;
+  reason?: string;
+  status?: string;
+  round?: number;
+  [key: string]: unknown;
+}
+
 export interface AskCitation {
   block_id: string;
   page_number: number;
@@ -66,7 +99,7 @@ export interface AskResult {
   citations: AskCitation[];
 }
 
-export type OrchestraStageStatus = "queued" | "running" | "done" | "failed";
+export type OrchestraStageStatus = "queued" | "running" | "done" | "failed" | "paused";
 
 export interface AnalysisRunEvent {
   event_type: string;
@@ -88,6 +121,8 @@ export interface AnalysisRun {
   company_name: string;
   status: string;
   current_stage: string;
+  failed_stage?: string | null;
+  error_summary?: string | null;
   created_at: string;
   completed_at: string | null;
   data_cutoff_date: string;
@@ -99,7 +134,10 @@ export interface AnalysisRun {
   analysis_config: {
     risk_rule_set_id: string;
     analysis_depth: "quick" | "standard" | "deep";
-    selected_agents: { agent_name: string; title: string }[];
+    selection_mode?: "dynamic_strategy";
+    available_agent_count?: number;
+    strategy_selected_agents?: string[];
+    selected_agents?: { agent_name: string; title: string }[];
     max_findings: number;
   };
   input_summary: {
@@ -118,8 +156,14 @@ export interface AnalysisRun {
   optional_questions?: string[];
   assumed_defaults?: Record<string, string>;
   findings: AnalysisFinding[];
-  events: { event_type: string; actor_name: string; title: string; summary: string }[];
-  orchestra_plan?: OrchestraPlan;
+  events: AnalysisRunEvent[];
+  strategy_plan?: StrategyPlan;
+  team_state?: AgentTeamState[];
+  interrupt_reason?: string | null;
+  replacement_history?: ReplacementHistoryEntry[];
+  module_results?: Record<string, unknown>[];
+  /** Read-only compatibility shape for runs created before dynamic strategy planning. */
+  orchestra_plan?: OrchestraPlan | StrategyPlan;
 }
 
 type BackendReport = {
@@ -153,7 +197,6 @@ export type AnalysisRunPayload = {
   ipo_project_hint?: string;
   confirm_defaults?: boolean;
   risk_rule_set_id?: string;
-  selected_agent_names?: string[];
   analysis_depth?: "quick" | "standard" | "deep";
   structured_data?: Record<string, string>;
   max_findings?: number;
@@ -187,7 +230,10 @@ export type AnalysisOptions = {
   agents: {
     agent_name: string;
     title: string;
-    default: boolean;
+    default?: boolean;
+    description?: string;
+    capabilities?: string[];
+    agent_card_url?: string;
   }[];
   analysis_depths: {
     depth: "quick" | "standard" | "deep";
@@ -531,6 +577,13 @@ export async function startAnalysisRun(runId: string) {
   return response.json() as Promise<AnalysisRun>;
 }
 
+export async function selectAnalysisExperts(runId: string, agentNames: string[]) {
+  return apiRequest<AnalysisRun>(`/analysis-runs/${runId}/expert-selection`, {
+    method: "POST",
+    body: JSON.stringify({ agent_names: agentNames }),
+  });
+}
+
 export async function createAnalysisRun(payload: AnalysisRunPayload) {
   const draft = await createAnalysisDraft(payload);
   if (draft.status !== "ready") return draft;
@@ -725,10 +778,21 @@ export async function streamAnalysisRun(
       } else if ("type" in evt && evt.type === "done" && evt.run) {
         onDone(evt.run);
         return;
+      } else if ("type" in evt && evt.type === "paused") {
+        onDone(evt.run ?? (await getAnalysisRun(runId)));
+        return;
       } else if ("type" in evt && evt.type === "error") {
         throw new Error(evt.message || "stream error");
       } else if ("event_type" in evt && evt.event_type) {
-        onEvent(evt as AnalysisRunEvent);
+        const event = evt as AnalysisRunEvent;
+        onEvent(event);
+        if (
+          event.event_type === "analysis_paused" ||
+          event.event_type === "expert_selection_required"
+        ) {
+          onDone(await getAnalysisRun(runId));
+          return;
+        }
       }
     }
   }
@@ -797,7 +861,11 @@ function toAnalysisSummary(run: AnalysisRun): AnalysisSummary {
     highConfidence,
     mode: "expert",
     createdAt: run.created_at,
-    experts: new Set(run.findings.map((finding) => finding.agent_name)).size || 4,
+    experts:
+      run.strategy_plan?.assignments?.length ||
+      run.team_state?.length ||
+      new Set(run.findings.map((finding) => finding.agent_name)).size ||
+      0,
   };
 }
 
@@ -808,8 +876,11 @@ async function pollAnalysisRun(runId: string) {
     latest.status === "queued" ||
     latest.status === "parsing" ||
     latest.status === "indexing" ||
+    latest.status === "spawning_experts" ||
     latest.status === "agent_running" ||
+    latest.status === "replanning" ||
     latest.status === "verifying" ||
+    latest.status === "synthesizing" ||
     latest.status === "reporting"
   ) {
     if (Date.now() > deadline) return latest;

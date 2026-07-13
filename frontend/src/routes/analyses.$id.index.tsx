@@ -1,4 +1,4 @@
-import { createFileRoute, getRouteApi } from "@tanstack/react-router";
+import { createFileRoute, getRouteApi, Link } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
@@ -12,6 +12,7 @@ import {
   AlertCircle,
   ArrowLeft,
   Database,
+  PauseCircle,
   Users,
 } from "lucide-react";
 import {
@@ -42,13 +43,20 @@ export const Route = createFileRoute("/analyses/$id/")({
 });
 
 type TraceView = {
-  stages: { key: string; label: string; owner: string; status: string; cost?: string }[];
+  stages: { key: string; label: string; owner: string; status: string; cost?: string | null }[];
   seed: { who: string; kind: string; text: string; t: string }[];
   flow: { who: string; kind: string; text: string; t: string }[];
   evidenceFeed: { id: string; source: string; title: string; conf: number; time: string }[];
 } | null;
 
-type EvidenceFeedItem = { id: string; source: string; title: string; conf: number; time: string };
+type EvidenceFeedItem = {
+  id: string;
+  source: string;
+  title: string;
+  conf: number;
+  time: string;
+  snippet?: string | null;
+};
 type Bubble = { who: string; kind: string; text: string; t: string };
 
 const kindLabel: Record<string, string> = {
@@ -67,6 +75,7 @@ const kindClass: Record<string, string> = {
 };
 
 const terminalStatuses = new Set(["completed", "failed"]);
+const pausedStatuses = new Set(["awaiting_expert_selection"]);
 
 function RealtimeStream() {
   const api = getRouteApi("/analyses/$id");
@@ -132,7 +141,7 @@ function RealtimeStream() {
         }
       }
 
-      if (terminalStatuses.has(activeRun.status)) {
+      if (terminalStatuses.has(activeRun.status) || pausedStatuses.has(activeRun.status)) {
         await refreshTrace().catch(() => undefined);
         return;
       }
@@ -180,8 +189,9 @@ function RealtimeStream() {
     return mergeBubbles(traceFlow, eventFlow);
   }, [liveEvents, run.created_at, trace]);
   const liveEvidenceFeed = useMemo(
-    () => mergeEvidenceFeed(evidenceFeed, liveEvents),
-    [evidenceFeed, liveEvents],
+    () =>
+      terminalStatuses.has(run.status) ? evidenceFeed : mergeEvidenceFeed(evidenceFeed, liveEvents),
+    [evidenceFeed, liveEvents, run.status],
   );
   const filteredLiveEvidence = liveEvidenceFeed.filter((item) =>
     `${item.source} ${item.title} ${item.id} ${item.snippet ?? ""}`
@@ -190,10 +200,20 @@ function RealtimeStream() {
   );
   const completedStages = stages.filter((stage) => stage.status === "done").length;
   const progress = stages.length ? Math.round((completedStages / stages.length) * 100) : 0;
-  const visibleAgents = agentsList.slice(0, Math.max(analysis.experts, 6));
+  const selectedAgentNames = new Set([
+    ...(run.strategy_plan?.assignments?.map((assignment) => assignment.agent_name) ?? []),
+    ...(run.team_state?.map((member) => member.agent_name) ?? []),
+    ...(run.analysis_config.selected_agents?.map((agent) => agent.agent_name) ?? []),
+  ]);
+  const selectedAgentMeta = agentsList.filter(
+    (agent) => selectedAgentNames.has(agent.id) || selectedAgentNames.has(agent.name),
+  );
+  const visibleAgents = selectedAgentMeta.length
+    ? selectedAgentMeta
+    : agentsList.slice(0, Math.max(analysis.experts, 6));
   const activeAgentCount =
     new Set([
-      ...run.analysis_config.selected_agents.map((agent) => agent.agent_name),
+      ...selectedAgentNames,
       ...liveEvents
         .filter((event) => ["agent_selected", "rules_assigned"].includes(event.event_type))
         .map((event) => event.actor_name)
@@ -234,9 +254,11 @@ function RealtimeStream() {
               <span className="size-1.5 animate-pulse rounded-full bg-[color:var(--gold)]" />
               {starting
                 ? "正在启动 Agent 编队"
-                : terminalStatuses.has(run.status)
-                  ? "分析已结束"
-                  : "实时同步中"}
+                : pausedStatuses.has(run.status)
+                  ? "等待人工选择专家"
+                  : terminalStatuses.has(run.status)
+                    ? "分析已结束"
+                    : "实时同步中"}
             </span>
           )}
           <span className="inline-flex items-center gap-1">
@@ -245,6 +267,13 @@ function RealtimeStream() {
           <span className="inline-flex items-center gap-1">
             <Users className="size-3.5" /> {activeAgentCount || visibleAgents.length} 位专家
           </span>
+          <Link
+            to="/analyses/$id/orchestra"
+            params={{ id }}
+            className="inline-flex items-center gap-1 rounded-sm border border-border bg-background px-2 py-1 text-foreground hover:bg-muted"
+          >
+            <Activity className="size-3.5 text-primary" /> 动态编排
+          </Link>
           <div className="flex items-center gap-2">
             <div className="h-1.5 w-28 overflow-hidden rounded-full bg-muted">
               <div
@@ -256,6 +285,22 @@ function RealtimeStream() {
           </div>
         </div>
       </header>
+
+      {pausedStatuses.has(run.status) ? (
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-amber-500/30 bg-amber-500/8 px-5 py-3 text-xs">
+          <span className="inline-flex items-center gap-2 text-amber-800">
+            <PauseCircle className="size-4" />
+            {run.interrupt_reason ?? "战略层专家名单需要人工确认，实时流已安全暂停。"}
+          </span>
+          <Link
+            to="/analyses/$id/orchestra"
+            params={{ id }}
+            className="rounded-full bg-primary px-3 py-1.5 font-medium text-primary-foreground hover:bg-primary/90"
+          >
+            选择专家并恢复
+          </Link>
+        </div>
+      ) : null}
 
       <div className="grid min-h-0 flex-1 grid-cols-[260px_minmax(0,1fr)_360px] overflow-hidden max-xl:grid-cols-[220px_minmax(0,1fr)_320px] max-lg:grid-cols-1">
         <aside className="overflow-y-auto border-r border-border bg-card/50 px-5 py-6 max-lg:hidden">
@@ -363,7 +408,7 @@ function RealtimeStream() {
                   </motion.div>
                 );
               })}
-              {!terminalStatuses.has(run.status) ? (
+              {!terminalStatuses.has(run.status) && !pausedStatuses.has(run.status) ? (
                 <motion.div
                   animate={{ opacity: [0.4, 1, 0.4] }}
                   transition={{ duration: 1.4, repeat: Infinity }}
@@ -440,29 +485,63 @@ function RealtimeStream() {
 }
 
 function fallbackStages(run: AnalysisRun) {
-  const order = [
-    ["task_understanding", "任务理解", "任务理解专家"],
-    ["pdf_parsing", "PDF 解析", "PDF 解析器"],
-    ["expert_orchestration", "专家编排", "沈北辰"],
-    ["evidence_extraction", "证据抽取", "证据检索专家"],
-    ["risk_identification", "风险识别", "专业 Agent 团队"],
-    ["cross_validation", "交叉验证", "证据审计专家"],
-    ["report_generation", "报告生成", "报告撰写专家"],
-    ["quality_review", "质检审裁", "质检审裁专家"],
+  const lifecycle = [
+    ["task_understanding", "任务理解", "战略层 Agent"],
+    ["parsing", "PDF 解析", "解析服务"],
+    ["indexing", "检索索引", "检索服务"],
+    ["orchestra_planning", "动态规划", "战略层 Agent"],
+    ["spawning_experts", "线程与邮箱初始化", "A2A Runtime"],
+  ];
+  const tail = [
+    ["verifying", "证据门禁", "Verifier"],
+    ["synthesizing", "战略整合", "战略层 Agent"],
     ["completed", "交付完成", "analysis_run"],
   ];
-  const current = order.findIndex(([key]) => key === run.current_stage);
-  return order.map(([key, label, owner], index) => ({
-    key,
-    label,
-    owner,
-    status:
-      run.status === "completed" || (current >= 0 && index < current)
-        ? "done"
-        : run.current_stage === key
-          ? "running"
-          : "queued",
-  }));
+  const dynamicAssignments = (run.strategy_plan?.assignments ?? []).map((assignment) => [
+    assignment.module_id,
+    assignment.module,
+    assignment.agent_name,
+  ]);
+  const order = [...lifecycle, ...dynamicAssignments, ...tail];
+  const pipelineOrder = [
+    "task_understanding",
+    "parsing",
+    "indexing",
+    "orchestra_planning",
+    "spawning_experts",
+    "agent_running",
+    "verifying",
+    "synthesizing",
+    "completed",
+  ];
+  const currentPipelineIndex = pipelineOrder.indexOf(run.current_stage);
+  return order.map(([key, label, owner]) => {
+    const assignment = run.strategy_plan?.assignments?.find((item) => item.module_id === key);
+    if (assignment) {
+      const member = run.team_state?.find((item) => item.agent_name === assignment.agent_name);
+      const state = member?.status.toLowerCase() ?? "";
+      const done =
+        state.includes("complete") ||
+        state.includes("done") ||
+        ["verifying", "synthesizing", "completed"].includes(run.current_stage);
+      const running =
+        state.includes("run") || state.includes("work") || Boolean(member?.current_module);
+      return { key, label, owner, status: done ? "done" : running ? "running" : "queued" };
+    }
+    const stageIndex = pipelineOrder.indexOf(key);
+    return {
+      key,
+      label,
+      owner,
+      status:
+        run.status === "completed" ||
+        (currentPipelineIndex >= 0 && stageIndex >= 0 && stageIndex < currentPipelineIndex)
+          ? "done"
+          : run.current_stage === key
+            ? "running"
+            : "queued",
+    };
+  });
 }
 
 function mergeEvidenceFeed(

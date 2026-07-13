@@ -1,38 +1,109 @@
-"""Controller agent boundary."""
+"""Strategic agent contracts for dynamic expert selection and report synthesis."""
 
 from __future__ import annotations
 
 import json
+import re
+from collections.abc import Mapping
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from riskagent.providers.llm import get_default_llm_client
 
 
-_ALLOWED_AGENTS = {"financial_agent", "legal_agent", "business_agent", "market_agent"}
+STRATEGY_SYSTEM_PROMPT = """\
+你是 ProspectAlpha 的战略层 Agent「沈北辰」。你必须依据用户目标、招股书摘要和本次实时专家名册，
+选择最小但完整的专家编队，并为每位专家分配一个互不重复的风险分析模块。不得使用名册之外的专家，
+不得创建固定顺序或虚构能力。专家启动后会通过 A2A 邮箱自主通信，因此这里只定义主模块，不定义专家间固定连线。
+
+AVAILABLE_EXPERTS_JSON:
+{available_experts_json}
+
+只输出 JSON：
+{{"summary":str,"focus_areas":[str],"selected_agents":[str],"assignments":[
+{{"module_id":str,"agent_name":str,"module":str,"goal":str,"expected_outputs":[str]}}
+]}}
+"""
 
 
-class OrchestraStage(BaseModel):
-    key: str
-    label: str
-    agent: str
-    goal: str
-    depends_on: list[str] = Field(default_factory=list)
-    expected_outputs: list[str] = Field(default_factory=list)
-
-    @field_validator("agent")
-    @classmethod
-    def validate_agent(cls, value: str) -> str:
-        if value not in _ALLOWED_AGENTS:
-            raise ValueError("agent must be one of financial_agent, legal_agent, business_agent, market_agent")
-        return value
+class StrictContract(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
 
-class OrchestraPlan(BaseModel):
-    summary: str
-    focus_areas: list[str]
-    stages: list[OrchestraStage]
+class StrategyAssignment(StrictContract):
+    module_id: str = Field(min_length=1, max_length=96)
+    agent_name: str = Field(min_length=1, max_length=64)
+    module: str = Field(min_length=1, max_length=160)
+    goal: str = Field(min_length=1, max_length=1200)
+    expected_outputs: list[str] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def normalize_module_id(self) -> "StrategyAssignment":
+        if not re.fullmatch(r"[a-zA-Z0-9_-]+", self.module_id):
+            raise ValueError("module_id must contain only letters, numbers, underscore, or dash")
+        return self
+
+
+class StrategyDecision(StrictContract):
+    summary: str = Field(min_length=1, max_length=2000)
+    focus_areas: list[str] = Field(default_factory=list)
+    selected_agents: list[str] = Field(min_length=1)
+    assignments: list[StrategyAssignment] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_internal_consistency(self) -> "StrategyDecision":
+        selected = [name.strip() for name in self.selected_agents]
+        if any(not name for name in selected):
+            raise ValueError("selected_agents must not contain blank names")
+        if len(selected) != len(set(selected)):
+            raise ValueError("selected_agents must be unique")
+        assignment_names = [item.agent_name for item in self.assignments]
+        if len(assignment_names) != len(set(assignment_names)):
+            raise ValueError("each selected expert must receive exactly one primary assignment")
+        if set(assignment_names) != set(selected):
+            raise ValueError("assignments must cover every selected expert exactly once")
+        module_ids = [item.module_id for item in self.assignments]
+        if len(module_ids) != len(set(module_ids)):
+            raise ValueError("assignment module_id values must be unique")
+        self.selected_agents = selected
+        return self
+
+
+class ReplacementDecision(StrictContract):
+    module_id: str = Field(min_length=1)
+    agent_name: str = Field(min_length=1)
+    reason: str = Field(min_length=1, max_length=1200)
+
+
+class IntegratedReportSection(StrictContract):
+    module_id: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    analysis: str = Field(min_length=1)
+    finding_ids: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class IntegratedCrossModuleRisk(StrictContract):
+    title: str = Field(min_length=1)
+    analysis: str = Field(min_length=1)
+    finding_ids: list[str] = Field(min_length=1)
+    evidence_ids: list[str] = Field(min_length=1)
+
+
+class IntegratedRiskReport(StrictContract):
+    title: str = Field(min_length=1)
+    executive_summary: str = Field(min_length=1)
+    overall_risk_level: str = Field(min_length=1)
+    sections: list[IntegratedReportSection]
+    cross_module_risks: list[IntegratedCrossModuleRisk] = Field(default_factory=list)
+    recommendations: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
+# Compatibility aliases retained for callers during the API transition.
+OrchestraStage = StrategyAssignment
+OrchestraPlan = StrategyDecision
 
 
 async def orchestrate(
@@ -41,110 +112,397 @@ async def orchestrate(
     company_name: str,
     document_summary: str,
     available_agents: list[dict[str, Any]],
-) -> OrchestraPlan:
-    agent_names = [str(item.get("agent_name", "")).strip() for item in available_agents]
-    try:
-        messages = _messages(
+) -> StrategyDecision:
+    """Ask the strategic model for a plan and strictly validate it against the live roster."""
+
+    if not available_agents:
+        raise ValueError("No executable expert agents are available.")
+    raw = await get_default_llm_client().chat_json(
+        _strategy_messages(
             user_requirement=user_requirement,
             company_name=company_name,
-            document_summary=document_summary[:2000],
+            document_summary=document_summary[:4000],
             available_agents=available_agents,
-        )
-        raw = await get_default_llm_client().chat_json(messages, temperature=0.2)
-        plan = OrchestraPlan.model_validate(raw)
-        available = {name for name in agent_names if name}
-        if not plan.stages or any(stage.agent not in available for stage in plan.stages):
-            return default_plan(agent_names)
-        if not any(not stage.depends_on for stage in plan.stages):
-            return default_plan(agent_names)
-        return plan
-    except Exception:
-        return default_plan(agent_names)
+        ),
+        temperature=0.1,
+    )
+    return validate_strategy_decision(raw, available_agents)
 
 
-def default_plan(agent_names: list[str]) -> OrchestraPlan:
-    names = [name for name in agent_names if name in _ALLOWED_AGENTS] or [
-        "financial_agent",
-        "legal_agent",
-        "business_agent",
-        "market_agent",
-    ]
-    stages = []
-    for index, agent_name in enumerate(names, start=1):
-        key = f"stage_{index}_{agent_name.replace('_agent', '')}"
-        depends_on = [] if index == 1 else [stages[-1].key]
-        stages.append(
-            OrchestraStage(
-                key=key,
-                label=_label_for_agent(agent_name),
-                agent=agent_name,
-                goal=_goal_for_agent(agent_name),
-                depends_on=depends_on,
-                expected_outputs=_outputs_for_agent(agent_name),
+def validate_strategy_decision(
+    raw: dict[str, Any] | StrategyDecision,
+    available_agents: list[dict[str, Any]],
+) -> StrategyDecision:
+    plan = raw if isinstance(raw, StrategyDecision) else StrategyDecision.model_validate(raw)
+    available = {
+        str(item.get("agent_name", "")).strip()
+        for item in available_agents
+        if str(item.get("agent_name", "")).strip()
+    }
+    unknown = sorted(set(plan.selected_agents) - available)
+    if unknown:
+        raise ValueError(f"Strategy selected unavailable experts: {', '.join(unknown)}")
+    return plan
+
+
+def manual_strategy_decision(
+    *,
+    agent_names: list[str],
+    available_agents: list[dict[str, Any]],
+    summary: str = "战略规划中断后由用户选择专家，系统依据 Agent Card 自动派题。",
+) -> StrategyDecision:
+    by_name = {
+        str(item.get("agent_name", "")).strip(): item
+        for item in available_agents
+        if str(item.get("agent_name", "")).strip()
+    }
+    selected = [name.strip() for name in agent_names]
+    if not selected or any(not name for name in selected):
+        raise ValueError("Every selected expert name must be non-empty.")
+    if len(selected) != len(set(selected)):
+        raise ValueError("Selected expert names must be unique.")
+    unknown = sorted(set(selected) - set(by_name))
+    if unknown:
+        raise ValueError(f"Unknown experts: {', '.join(unknown)}")
+    assignments = []
+    focus_areas = []
+    for name in selected:
+        spec = by_name[name]
+        role = str(spec.get("role") or spec.get("title") or name)
+        capabilities = [str(item) for item in spec.get("capabilities") or []]
+        focus = "、".join(capabilities[:5]) or role
+        focus_areas.append(focus)
+        assignments.append(
+            StrategyAssignment(
+                module_id=f"module_{name.removesuffix('_agent')}",
+                agent_name=name,
+                module=role,
+                goal=f"围绕 {focus} 独立分析招股书风险，并返回可追溯 finding 与 evidence 引用。",
+                expected_outputs=[
+                    str(spec.get("output_schema") or "RiskFinding + RunEvidence"),
+                    "模块分析摘要与局限性",
+                ],
             )
         )
-    return OrchestraPlan(
-        summary="按默认线性编队完成招股书风险分析。",
-        focus_areas=["财务风险", "法律合规", "业务经营", "市场竞争"],
-        stages=stages,
+    return StrategyDecision(
+        summary=summary,
+        focus_areas=focus_areas,
+        selected_agents=selected,
+        assignments=assignments,
     )
 
 
-def _messages(
+def manual_recovery_strategy_decision(
+    *,
+    agent_names: list[str],
+    failed_assignments: list[StrategyAssignment],
+    available_agents: list[dict[str, Any]],
+) -> StrategyDecision:
+    """Map human-selected experts onto failed modules using live Agent Cards."""
+
+    by_name = {
+        str(item.get("agent_name", "")).strip(): item
+        for item in available_agents
+        if str(item.get("agent_name", "")).strip()
+    }
+    selected = [name.strip() for name in agent_names]
+    if not selected or any(not name for name in selected):
+        raise ValueError("Every selected expert name must be non-empty.")
+    if len(selected) != len(set(selected)):
+        raise ValueError("Selected expert names must be unique.")
+    unknown = sorted(set(selected) - set(by_name))
+    if unknown:
+        raise ValueError(f"Unknown experts: {', '.join(unknown)}")
+    if len(selected) != len(failed_assignments):
+        raise ValueError(
+            "Manual recovery requires exactly one selected expert per failed module: "
+            f"selected={len(selected)}, failed_modules={len(failed_assignments)}"
+        )
+
+    remaining = set(selected)
+    ordered_names: list[str] = []
+    for assignment in failed_assignments:
+        name = sorted(
+            remaining,
+            key=lambda candidate: (
+                -_capability_match_score(by_name[candidate], assignment),
+                candidate,
+            ),
+        )[0]
+        ordered_names.append(name)
+        remaining.remove(name)
+    assignments = []
+    for name, failed in zip(ordered_names, failed_assignments, strict=True):
+        card = by_name[name]
+        capabilities = [str(item) for item in card.get("capabilities") or []]
+        capability_summary = "、".join(capabilities[:5]) or str(
+            card.get("role") or card.get("title") or name
+        )
+        assignments.append(
+            failed.model_copy(
+                update={
+                    "agent_name": name,
+                    "goal": (
+                        f"{failed.goal} 人工恢复阶段由 {name} 承接；"
+                        f"结合其 Agent Card 能力（{capability_summary}）完成原模块。"
+                    ),
+                    "expected_outputs": list(
+                        dict.fromkeys(
+                            [
+                                *failed.expected_outputs,
+                                str(card.get("output_schema") or "RiskFinding + RunEvidence"),
+                            ]
+                        )
+                    ),
+                }
+            )
+        )
+    return StrategyDecision(
+        summary="动态替补耗尽后由用户选择专家，系统按 Agent Card 映射到未完成模块。",
+        focus_areas=[assignment.module for assignment in failed_assignments],
+        selected_agents=list(ordered_names),
+        assignments=assignments,
+    )
+
+
+def _capability_match_score(
+    agent: dict[str, Any], assignment: StrategyAssignment
+) -> int:
+    target = " ".join(
+        [assignment.module, assignment.goal, *assignment.expected_outputs]
+    ).lower()
+    terms = [
+        str(value).strip().lower()
+        for key in ("capabilities", "rule_types", "categories")
+        for value in agent.get(key) or []
+        if str(value).strip()
+    ]
+    description = " ".join(
+        str(agent.get(key) or "").lower()
+        for key in ("role", "title", "description", "output_schema")
+    )
+    return sum(3 for term in terms if term in target) + sum(
+        1 for token in re.findall(r"[a-z0-9_\u4e00-\u9fff]+", target) if token in description
+    )
+
+
+async def select_replacement(
+    *,
+    company_name: str,
+    failed_assignment: StrategyAssignment,
+    failure_reason: str,
+    available_candidates: list[dict[str, Any]],
+) -> ReplacementDecision:
+    if not available_candidates:
+        raise ValueError("No untried replacement experts are available.")
+    roster = json.dumps(available_candidates, ensure_ascii=False)
+    raw = await get_default_llm_client().chat_json(
+        [
+            {
+                "role": "system",
+                "content": (
+                    "你是 ProspectAlpha 战略层 Agent。为失败模块选择一位能力匹配且尚未尝试的替补专家。"
+                    "agent_name 必须来自候选名册；module_id 必须保持不变。只输出 JSON "
+                    '{"module_id":str,"agent_name":str,"reason":str}。'
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"公司：{company_name}\n失败任务：{failed_assignment.model_dump_json()}\n"
+                    f"失败原因：{failure_reason}\n候选专家：{roster}"
+                ),
+            },
+        ],
+        temperature=0.1,
+    )
+    return validate_replacement_decision(
+        raw,
+        failed_assignment=failed_assignment,
+        available_candidates=available_candidates,
+    )
+
+
+def validate_replacement_decision(
+    value: ReplacementDecision | dict[str, Any],
+    *,
+    failed_assignment: StrategyAssignment,
+    available_candidates: list[dict[str, Any]],
+) -> ReplacementDecision:
+    decision = ReplacementDecision.model_validate(value)
+    candidates = {
+        str(item.get("agent_name", "")).strip()
+        for item in available_candidates
+        if str(item.get("agent_name", "")).strip()
+    }
+    if decision.module_id != failed_assignment.module_id:
+        raise ValueError("Replacement must preserve module_id.")
+    if decision.agent_name not in candidates:
+        raise ValueError("Replacement expert is not in the eligible candidate roster.")
+    return decision
+
+
+async def synthesize_report(
+    *,
+    company_name: str,
+    data_cutoff_date: str,
+    module_results: list[dict[str, Any]],
+    verified_findings: list[dict[str, Any]],
+    evidence_index: list[dict[str, Any]],
+) -> IntegratedRiskReport:
+    raw = await get_default_llm_client().chat_json(
+        _report_messages(
+            company_name=company_name,
+            data_cutoff_date=data_cutoff_date,
+            module_results=module_results,
+            verified_findings=verified_findings,
+            evidence_index=evidence_index,
+        ),
+        temperature=0.2,
+    )
+    return IntegratedRiskReport.model_validate(raw)
+
+
+def validate_report_references(
+    report: IntegratedRiskReport,
+    *,
+    module_ids: set[str],
+    finding_ids: set[str],
+    finding_ids_by_module: Mapping[str, set[str]],
+    evidence_by_finding: Mapping[str, set[str]],
+) -> None:
+    section_module_ids = [section.module_id for section in report.sections]
+    duplicate_modules = sorted(
+        module_id
+        for module_id in set(section_module_ids)
+        if section_module_ids.count(module_id) > 1
+    )
+    missing_modules = sorted(module_ids - set(section_module_ids))
+    unknown_modules = sorted(set(section_module_ids) - module_ids)
+    if duplicate_modules or missing_modules or unknown_modules:
+        raise ValueError(
+            "Integrated report must cover every expert module exactly once: "
+            f"duplicates={duplicate_modules}, missing={missing_modules}, "
+            f"unknown={unknown_modules}"
+        )
+    referenced_findings = {
+        finding_id
+        for section in [*report.sections, *report.cross_module_risks]
+        for finding_id in section.finding_ids
+    }
+    referenced_evidence = {
+        evidence_id
+        for section in [*report.sections, *report.cross_module_risks]
+        for evidence_id in section.evidence_ids
+    }
+    evidence_ids = {
+        evidence_id
+        for linked_ids in evidence_by_finding.values()
+        for evidence_id in linked_ids
+    }
+    unknown_findings = sorted(referenced_findings - finding_ids)
+    unknown_evidence = sorted(referenced_evidence - evidence_ids)
+    if unknown_findings or unknown_evidence:
+        raise ValueError(
+            "Integrated report contains unknown references: "
+            f"findings={unknown_findings}, evidence={unknown_evidence}"
+        )
+    foreign_module_findings = {
+        section.module_id: sorted(
+            set(section.finding_ids)
+            - finding_ids_by_module.get(section.module_id, set())
+        )
+        for section in report.sections
+        if set(section.finding_ids)
+        - finding_ids_by_module.get(section.module_id, set())
+    }
+    if foreign_module_findings:
+        raise ValueError(
+            "Integrated report section contains findings from another module: "
+            f"{foreign_module_findings}"
+        )
+    mismatched_evidence: list[str] = []
+    findings_without_evidence: list[str] = []
+    for section in [*report.sections, *report.cross_module_risks]:
+        section_findings = set(section.finding_ids)
+        section_evidence = set(section.evidence_ids)
+        for finding_id in section_findings:
+            if not section_evidence.intersection(
+                evidence_by_finding.get(finding_id, set())
+            ):
+                findings_without_evidence.append(finding_id)
+        for evidence_id in section_evidence:
+            owners = {
+                finding_id
+                for finding_id, linked_ids in evidence_by_finding.items()
+                if evidence_id in linked_ids
+            }
+            if not owners.intersection(section_findings):
+                mismatched_evidence.append(evidence_id)
+    if mismatched_evidence or findings_without_evidence:
+        raise ValueError(
+            "Integrated report evidence must belong to a finding in the same section: "
+            f"mismatched_evidence={sorted(set(mismatched_evidence))}, "
+            "findings_without_section_evidence="
+            f"{sorted(set(findings_without_evidence))}"
+        )
+
+
+def _strategy_messages(
     *,
     user_requirement: str,
     company_name: str,
     document_summary: str,
     available_agents: list[dict[str, Any]],
 ) -> list[dict[str, str]]:
-    roster = json.dumps(available_agents, ensure_ascii=False)
+    roster = json.dumps(available_agents, ensure_ascii=False, sort_keys=True)
     return [
         {
             "role": "system",
-            "content": (
-                "你是 ProspectAlpha 的首席指挥官「沈北辰」，负责基于用户需求与招股书摘要，组织一支多阶段分析编队。"
-                "约束：stages 数量 3-6；每个 stage.agent 必须来自 available_agents 的 agent_name；"
-                "必须包含至少 1 个起始 stage（depends_on=[]）。"
-                '输出 JSON schema exactly {"summary":str,"focus_areas":[str],"stages":[{"key","label","agent","goal","depends_on":[],"expected_outputs":[]}]}。'
-            ),
+            "content": STRATEGY_SYSTEM_PROMPT.format(available_experts_json=roster),
         },
         {
             "role": "user",
             "content": (
                 f"公司名称：{company_name}\n"
                 f"用户需求：{user_requirement}\n"
-                f"招股书摘要：{document_summary}\n"
-                f"可用 Agent 编队：{roster}"
+                f"招股书摘要：{document_summary}"
             ),
         },
     ]
 
 
-def _label_for_agent(agent_name: str) -> str:
-    labels = {
-        "financial_agent": "财务风险扫描",
-        "legal_agent": "法律合规核验",
-        "business_agent": "业务经营分析",
-        "market_agent": "市场竞争研判",
-    }
-    return labels.get(agent_name, agent_name)
-
-
-def _goal_for_agent(agent_name: str) -> str:
-    goals = {
-        "financial_agent": "识别财务指标、现金流、偿债能力和盈利质量风险。",
-        "legal_agent": "识别诉讼、监管、关联交易、担保和特殊权利安排风险。",
-        "business_agent": "识别业务模式、客户供应商、持续经营和运营稳定性风险。",
-        "market_agent": "识别行业竞争、市场空间、政策变化和外部环境风险。",
-    }
-    return goals.get(agent_name, "完成指定专业风险分析。")
-
-
-def _outputs_for_agent(agent_name: str) -> list[str]:
-    outputs = {
-        "financial_agent": ["财务风险 finding", "财务证据片段"],
-        "legal_agent": ["合规风险 finding", "法律证据片段"],
-        "business_agent": ["经营风险 finding", "业务证据片段"],
-        "market_agent": ["市场风险 finding", "行业证据片段"],
-    }
-    return outputs.get(agent_name, ["风险 finding", "证据片段"])
+def _report_messages(
+    *,
+    company_name: str,
+    data_cutoff_date: str,
+    module_results: list[dict[str, Any]],
+    verified_findings: list[dict[str, Any]],
+    evidence_index: list[dict[str, Any]],
+) -> list[dict[str, str]]:
+    payload = json.dumps(
+        {
+            "company_name": company_name,
+            "data_cutoff_date": data_cutoff_date,
+            "module_results": module_results,
+            "verified_findings": verified_findings,
+            "evidence_index": evidence_index,
+        },
+        ensure_ascii=False,
+    )
+    return [
+        {
+            "role": "system",
+            "content": (
+                "你是 ProspectAlpha 战略层 Agent「沈北辰」。整合所有专家模块结果，输出完整、连贯的 IPO 风险报告。"
+                "不得新增输入中不存在的 finding_id 或 evidence_id；每个专家模块都必须有对应 section，即使结论是未发现重大风险。"
+                "每个被引用的 finding 必须在同一 section 中附带至少一条归属于它的 evidence；没有可验证引用时不得创建跨模块风险。"
+                "只输出 JSON："
+                '{"title":str,"executive_summary":str,"overall_risk_level":str,'
+                '"sections":[{"module_id":str,"title":str,"analysis":str,"finding_ids":[str],"evidence_ids":[str]}],'
+                '"cross_module_risks":[{"title":str,"analysis":str,"finding_ids":[str],"evidence_ids":[str]}],'
+                '"recommendations":[str],"limitations":[str]}。'
+            ),
+        },
+        {"role": "user", "content": payload},
+    ]

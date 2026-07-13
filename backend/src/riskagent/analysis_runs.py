@@ -4,21 +4,30 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import os
 import re
+import threading
 import uuid
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
+from sqlalchemy.orm import sessionmaker
 
-from riskagent.agents.orchestrator import orchestrate
+from riskagent.agent_experts import AgentSpec
+from riskagent.agents.orchestrator import (
+    IntegratedRiskReport,
+    StrategyDecision,
+    synthesize_report,
+    validate_report_references,
+)
 from riskagent.agents.supervisor import AgentTeamSupervisor
 from riskagent.common.cache import TTLCache
-from riskagent.database import SessionLocal, init_db
+from riskagent.database import Base, SessionLocal, init_db, make_engine
 from riskagent.documents import (
     DocumentBlock as ParsedDocumentBlock,
     DocumentRepository,
@@ -30,6 +39,7 @@ from riskagent.skills.risk_skill_registry import (
     skill_for_rule,
     skills_for_agents,
 )
+from riskagent.seed_data import AGENT_SPECS
 from riskagent.models import AnalysisRunRow, EvidenceLibraryRow
 from riskagent.retrieval.hybrid import HybridSearchIndex
 from riskagent.workers.analysis import dispatch_analysis_job
@@ -39,6 +49,8 @@ BACKEND_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ANALYSIS_RUNS_PATH = BACKEND_ROOT / "data" / "processed" / "analysis_runs.yaml"
 DEFAULT_EVIDENCE_LIBRARY_PATH = BACKEND_ROOT / "data" / "processed" / "evidence_library.yaml"
 PARSER_VERSION = "local-text-parser-v1"
+_FILE_LOCKS: dict[str, threading.RLock] = {}
+_FILE_LOCKS_GUARD = threading.Lock()
 
 PIPELINE_STAGES: list[tuple[str, str, str]] = [
     ("task_understanding", "任务理解", "任务理解专家"),
@@ -54,6 +66,8 @@ PIPELINE_STAGES: list[tuple[str, str, str]] = [
 
 
 class AnalysisRunCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     company_name: str = "待确认公司"
     document_text: str = ""
     document_id: str | None = None
@@ -61,13 +75,14 @@ class AnalysisRunCreate(BaseModel):
     ipo_project_hint: str | None = None
     confirm_defaults: bool = True
     risk_rule_set_id: str | None = None
-    selected_agent_names: list[str] = Field(default_factory=list)
     analysis_depth: Literal["quick", "standard", "deep"] = "standard"
     structured_data: dict[str, Any] = Field(default_factory=dict)
     max_findings: int = 30
 
 
 class AnalysisRunInputPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     company_name: str | None = None
     document_text: str | None = None
     document_id: str | None = None
@@ -75,10 +90,24 @@ class AnalysisRunInputPatch(BaseModel):
     ipo_project_hint: str | None = None
     confirm_defaults: bool | None = None
     risk_rule_set_id: str | None = None
-    selected_agent_names: list[str] | None = None
     analysis_depth: Literal["quick", "standard", "deep"] | None = None
     structured_data: dict[str, Any] | None = None
     max_findings: int | None = None
+
+
+class ExpertSelectionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    agent_names: list[str] = Field(min_length=1)
+
+    @classmethod
+    def validate_names(cls, names: list[str]) -> list[str]:
+        selected = [name.strip() for name in names]
+        if not selected or any(not name for name in selected):
+            raise ValueError("At least one expert must be selected.")
+        if len(selected) != len(set(selected)):
+            raise ValueError("Selected expert names must be unique.")
+        return selected
 
 
 class DocumentBlock(BaseModel):
@@ -186,6 +215,8 @@ class AnalysisRun(BaseModel):
     company_name: str
     status: str
     current_stage: str
+    failed_stage: str | None = None
+    error_summary: str | None = None
     created_at: str
     completed_at: str | None = None
     data_cutoff_date: str
@@ -198,6 +229,11 @@ class AnalysisRun(BaseModel):
     assumed_defaults: dict[str, str] = Field(default_factory=dict)
     inputs_frozen: bool = False
     orchestra_plan: dict[str, Any] = Field(default_factory=dict)
+    strategy_plan: dict[str, Any] = Field(default_factory=dict)
+    team_state: list[dict[str, Any]] = Field(default_factory=list)
+    interrupt_reason: str | None = None
+    replacement_history: list[dict[str, Any]] = Field(default_factory=list)
+    module_results: list[dict[str, Any]] = Field(default_factory=list)
     frozen_rule_snapshot: dict[str, Any] = Field(default_factory=dict, exclude=True)
     document_blocks: list[DocumentBlock] = Field(default_factory=list, exclude=True)
     findings: list[RiskFinding] = Field(default_factory=list)
@@ -219,6 +255,7 @@ class AnalysisRunRepository:
         use_database: bool | None = None,
         search_index: HybridSearchIndex | None = None,
         agent_supervisor: AgentTeamSupervisor | None = None,
+        report_provider: Callable[..., Any] | None = None,
     ) -> None:
         configured = path or os.getenv("ANALYSIS_RUNS_PATH") or DEFAULT_ANALYSIS_RUNS_PATH
         self.path = Path(configured)
@@ -229,13 +266,32 @@ class AnalysisRunRepository:
             or DEFAULT_EVIDENCE_LIBRARY_PATH
         )
         self.document_repository = document_repository or get_default_document_repository()
-        self.session_factory = session_factory
         self.use_database = use_database if use_database is not None else os.getenv("USE_DATABASE", "1") != "0"
         if self.use_database:
-            init_db()
+            bind = getattr(session_factory, "kw", {}).get("bind")
+            if bind is None:
+                init_db()
+            else:
+                Base.metadata.create_all(bind=bind)
+            self.session_factory = session_factory
+        else:
+            retrieval_path = self.path.with_suffix(".retrieval.db")
+            retrieval_path.parent.mkdir(parents=True, exist_ok=True)
+            retrieval_engine = make_engine(f"sqlite:///{retrieval_path}")
+            Base.metadata.create_all(bind=retrieval_engine)
+            self.session_factory = sessionmaker(
+                bind=retrieval_engine,
+                autoflush=False,
+                autocommit=False,
+                future=True,
+            )
         self.search_cache: TTLCache[list[dict[str, Any]]] = TTLCache(ttl_seconds=30, max_items=256)
-        self.search_index = search_index or HybridSearchIndex(session_factory=session_factory)
-        self.agent_supervisor = agent_supervisor or AgentTeamSupervisor(repository=self.rule_repository)
+        self.search_index = search_index or HybridSearchIndex(session_factory=self.session_factory)
+        self.agent_supervisor = agent_supervisor or AgentTeamSupervisor(
+            repository=self.rule_repository,
+            agent_specs=None if self.use_database else _seed_agent_specs(),
+        )
+        self.report_provider = report_provider or synthesize_report
 
     def create_draft(self, payload: AnalysisRunCreate) -> AnalysisRun:
         now = _now()
@@ -260,14 +316,14 @@ class AnalysisRunRepository:
             assumed_defaults={
                 "risk_rule_version": payload.risk_rule_set_id or rule_snapshot["rule_set_id"],
                 "analysis_depth": payload.analysis_depth,
-                "agent_group": "selected" if payload.selected_agent_names else "default",
+                "agent_selection": "dynamic_strategy",
             },
             events=[
                 _event(
                     "stage_started",
                     "analysis_run",
                     "创建分析任务",
-                    "已完成信息完整性检查，等待用户确认默认规则、专家队伍与分析深度。",
+                    "已完成信息完整性检查，等待用户确认规则与分析深度；专家编队将在启动后动态生成。",
                     stage_key="task_understanding",
                     stage_status="ready" if status == "ready" else "waiting_user",
                     action_label="任务创建",
@@ -303,7 +359,7 @@ class AnalysisRunRepository:
         self._save_run(run)
         return run
 
-    def start(self, run_id: str) -> AnalysisRun:
+    def start(self, run_id: str, *, dispatch_mode: str | None = None) -> AnalysisRun:
         run = self.get(run_id)
         if run.status != "ready":
             raise ValueError("Run is not ready to start.")
@@ -323,17 +379,69 @@ class AnalysisRunRepository:
             )
         )
         self._save_run(run)
-        job_id = dispatch_analysis_job(run.run_id, self)
-        run = self.get(run.run_id)
         run.events.append(
             _event(
                 "tool_started",
                 "worker_dispatcher",
                 "后台任务已创建",
-                f"job_id={job_id}",
+                "分析任务已提交给后台执行器。",
                 stage_key="task_understanding",
                 action_label="worker dispatch",
                 metrics={"tool_calls": 1},
+            )
+        )
+        self._save_run(run)
+        job_id = dispatch_analysis_job(run.run_id, self, mode=dispatch_mode)
+        if dispatch_mode == "thread":
+            return run
+        run = self.get(run.run_id)
+        run.events.append(
+            _event(
+                "tool_completed",
+                "worker_dispatcher",
+                "后台任务执行完成",
+                f"job_id={job_id}",
+                stage_key="task_understanding",
+                action_label="worker dispatch",
+            )
+        )
+        self._save_run(run)
+        return run
+
+    def resume(self, run_id: str, *, dispatch_mode: str | None = None) -> AnalysisRun:
+        run = self.get(run_id)
+        if run.status in {"completed", "failed"}:
+            return run
+        if run.status == "ready":
+            return self.start(run_id, dispatch_mode=dispatch_mode)
+        if not run.inputs_frozen:
+            raise ValueError("Run inputs are not frozen; start the run first.")
+        run.status = "queued"
+        run.current_stage = "queued"
+        run.events.append(
+            _event(
+                "tool_started",
+                "worker_dispatcher",
+                "恢复后台任务",
+                "检测到分析任务停留在非终态阶段，已重新投递后台执行。",
+                stage_key="task_understanding",
+                action_label="resume dispatch",
+                metrics={"tool_calls": 1},
+            )
+        )
+        self._save_run(run)
+        job_id = dispatch_analysis_job(run.run_id, self, mode=dispatch_mode)
+        if dispatch_mode == "thread":
+            return run
+        run = self.get(run.run_id)
+        run.events.append(
+            _event(
+                "tool_completed",
+                "worker_dispatcher",
+                "后台恢复任务已创建",
+                f"job_id={job_id}",
+                stage_key="task_understanding",
+                action_label="resume dispatch",
             )
         )
         self._save_run(run)
@@ -345,6 +453,60 @@ class AnalysisRunRepository:
             raise ValueError("Run is not queued.")
         payload = _payload_from_run(run)
         return self._execute_pipeline(run, payload)
+
+    def select_experts(
+        self,
+        run_id: str,
+        agent_names: list[str],
+        *,
+        dispatch_mode: str | None = None,
+    ) -> AnalysisRun:
+        run = self.get(run_id)
+        if run.status != "awaiting_expert_selection":
+            raise ValueError("Run is not waiting for expert selection.")
+        selected = ExpertSelectionRequest.validate_names(agent_names)
+        available = {
+            str(item.get("agent_name", ""))
+            for item in self.agent_supervisor.agent_options()
+        }
+        unknown = sorted(set(selected) - available)
+        if unknown:
+            raise ValueError(f"Unknown experts: {', '.join(unknown)}")
+        if run.strategy_plan:
+            plan = StrategyDecision.model_validate(run.strategy_plan)
+            completed_modules = {
+                str(item.get("module_id"))
+                for item in run.module_results
+                if item.get("module_id")
+            }
+            pending_modules = [
+                item.module_id
+                for item in plan.assignments
+                if item.module_id not in completed_modules
+            ]
+            if pending_modules and len(selected) != len(pending_modules):
+                raise ValueError(
+                    "Select exactly one expert for each pending module: "
+                    f"pending_modules={len(pending_modules)}"
+                )
+        run.analysis_config["manual_agent_names"] = selected
+        run.interrupt_reason = None
+        run.status = "queued"
+        run.current_stage = "expert_orchestration"
+        run.events.append(
+            _event(
+                "manual_expert_selection_submitted",
+                "user",
+                "人工专家选择已提交",
+                f"选择 {len(selected)} 位专家，系统将依据 Agent Card 自动派题并恢复 LangGraph。",
+                stage_key="expert_orchestration",
+                action_label="恢复协作",
+                payload={"agent_names": selected},
+            )
+        )
+        self._save_run(run)
+        dispatch_analysis_job(run.run_id, self, mode=dispatch_mode)
+        return self.get(run.run_id)
 
     def get(self, run_id: str) -> AnalysisRun:
         if self.use_database:
@@ -470,72 +632,120 @@ class AnalysisRunRepository:
                 actor_name="orchestrator",
                 action_label="专家编排",
             )
-            try:
-                payload_for_orchestra = _payload_from_run(run)
-                doc_summary = payload_for_orchestra.document_text[:2000]
-                if not doc_summary and payload_for_orchestra.document_id:
-                    try:
-                        doc_summary = self.document_repository.get_text(payload_for_orchestra.document_id)[:2000]
-                    except Exception:
-                        doc_summary = ""
-                plan = asyncio.run(
-                    orchestrate(
-                        user_requirement=payload_for_orchestra.ipo_project_hint
-                        or payload_for_orchestra.company_name
-                        or "对招股书进行风险分析",
-                        company_name=run.company_name,
-                        document_summary=doc_summary,
-                        available_agents=self.agent_supervisor.agent_options(),
-                    )
-                )
-                run.orchestra_plan = plan.model_dump()
-                run.events.append(
-                    _event(
-                        "orchestra_plan_generated",
-                        "orchestrator",
-                        "Orchestra 编排完成",
-                        "已生成多阶段分析计划。",
-                        stage_key="expert_orchestration",
-                        action_label="计划生成",
-                        payload=run.orchestra_plan,
-                    )
-                )
-            except Exception as exc:
-                run.events.append(
-                    _event(
-                        "stage_failed",
-                        "orchestrator",
-                        "Orchestra 编排失败（降级运行）",
-                        str(exc)[:200],
-                        stage_key="expert_orchestration",
-                        action_label="降级",
-                    )
-                )
-            selected_skills = skills_for_agents(payload.selected_agent_names)
-            run.events.extend(
-                _event(
-                    "agent_selected",
-                    skill.agent_name,
-                    f"{skill.role_zh}加入本次风险调研",
-                    f"启用 {skill.skill_id}，将按冻结规则快照检索和输出结构化证据。",
-                    stage_key="expert_orchestration",
-                    skill_id=skill.skill_id,
-                    agent_role=skill.role_zh,
-                    action_label="专家入场",
-                    payload={"skill_id": skill.skill_id, "agent_name": skill.agent_name},
-                )
-                for skill in selected_skills
+            payload_for_orchestra = _payload_from_run(run)
+            doc_summary = payload_for_orchestra.document_text[:4000]
+            if not doc_summary and payload_for_orchestra.document_id:
+                try:
+                    doc_summary = self.document_repository.get_text(
+                        payload_for_orchestra.document_id
+                    )[:4000]
+                except Exception:
+                    doc_summary = ""
+            manual_agent_names = list(
+                run.analysis_config.pop("manual_agent_names", []) or []
             )
+            if manual_agent_names:
+                team_result = self.agent_supervisor.resume_with_selection(
+                    run_id=run.run_id,
+                    agent_names=manual_agent_names,
+                )
+            else:
+                team_result = self.agent_supervisor.run(
+                    run_id=run.run_id,
+                    company_name=run.company_name,
+                    user_requirement=payload_for_orchestra.ipo_project_hint
+                    or payload_for_orchestra.company_name
+                    or "对招股书进行风险分析",
+                    document_summary=doc_summary,
+                    text=text,
+                    max_findings=_effective_max_findings(payload),
+                    rule_snapshot=run.frozen_rule_snapshot,
+                )
+            run.events = _merge_events(run.events, team_result.events)
+            run.strategy_plan = team_result.strategy_plan
+            run.orchestra_plan = team_result.strategy_plan
+            run.team_state = team_result.team_state
+            run.replacement_history = team_result.replacement_history
+            run.module_results = team_result.module_results
+            if team_result.paused:
+                run.status = "awaiting_expert_selection"
+                run.current_stage = "expert_orchestration"
+                run.interrupt_reason = team_result.interrupt_reason or "战略层等待人工选择专家。"
+                run.events.append(
+                    _event(
+                        "analysis_paused",
+                        "orchestrator",
+                        "动态协作已暂停",
+                        run.interrupt_reason,
+                        stage_key="expert_orchestration",
+                        stage_status="waiting_user",
+                        action_label="等待人工接管",
+                        payload={"available_agents": self.agent_supervisor.agent_options()},
+                    )
+                )
+                self._save_run(run)
+                return run
+            plan = StrategyDecision.model_validate(run.strategy_plan)
+            available_by_name = {
+                str(item["agent_name"]): item
+                for item in self.agent_supervisor.agent_options()
+            }
+            active_agent_names = list(
+                dict.fromkeys(
+                    str(item.get("agent_name"))
+                    for item in run.module_results
+                    if item.get("agent_name")
+                )
+            ) or plan.selected_agents
+            selected_skills = skills_for_agents(active_agent_names)
+            skills_by_agent = {skill.agent_name: skill for skill in selected_skills}
+            run.analysis_config["strategy_selected_agents"] = plan.selected_agents
+            run.analysis_config["selected_agents"] = [
+                {
+                    "agent_name": name,
+                    "title": str(available_by_name.get(name, {}).get("title") or name),
+                }
+                for name in active_agent_names
+            ]
+            run.interrupt_reason = None
+            for agent_name in active_agent_names:
+                skill = skills_by_agent.get(agent_name)
+                option = available_by_name.get(agent_name, {})
+                role = str(
+                    (skill.role_zh if skill else None)
+                    or option.get("role")
+                    or option.get("title")
+                    or agent_name
+                )
+                skill_id = skill.skill_id if skill else option.get("skill_id")
+                summary = (
+                    f"启用 {skill_id}，将按冻结规则快照检索和输出结构化证据。"
+                    if skill_id
+                    else "按实时 Agent Card 能力与战略任务执行本次分析。"
+                )
+                run.events.append(
+                    _event(
+                        "agent_selected",
+                        agent_name,
+                        f"{role}加入本次风险调研",
+                        summary,
+                        stage_key="expert_orchestration",
+                        skill_id=str(skill_id) if skill_id else None,
+                        agent_role=role,
+                        action_label="专家入场",
+                        payload={"skill_id": skill_id, "agent_name": agent_name},
+                    )
+                )
             run.events.append(
                 _event(
                     "stage_completed",
                     "orchestrator",
                     "专家编排完成",
-                    f"已选择 {len(selected_skills)} 位专家参与本次风险调研。",
+                    f"已选择 {len(active_agent_names)} 位专家参与本次风险调研。",
                     stage_key="expert_orchestration",
                     stage_status="completed",
                     action_label="编排完成",
-                    metrics={"selected_agents": len(selected_skills)},
+                    metrics={"selected_agents": len(active_agent_names)},
                 )
             )
             self._save_run(run)
@@ -549,18 +759,30 @@ class AnalysisRunRepository:
                 actor_name="orchestrator",
                 action_label="证据抽取",
             )
+            self._save_run(run)
             max_findings = _effective_max_findings(payload)
-            team_result = self.agent_supervisor.run(
-                text=text,
-                max_findings=max_findings,
-                selected_agent_names=payload.selected_agent_names,
-                rule_snapshot=run.frozen_rule_snapshot,
-            )
             candidate_findings = self._findings_from_evaluations(team_result.evaluations, max_findings)
-            run.events.extend(team_result.events)
             run.evidence = self._evidence_for_findings(run.run_id, candidate_findings, run.document_blocks)
             before_dedupe = len(run.evidence)
             run.evidence = _dedupe_evidence(run.evidence)
+            findings_by_agent_rule = {
+                (item.agent_name, item.rule_id): item for item in candidate_findings
+            }
+            for module_result in run.module_results:
+                module_agent = str(module_result.get("agent_name") or "")
+                linked_findings = [
+                    findings_by_agent_rule[(module_agent, rule_id)]
+                    for rule_id in module_result.get("rule_ids", [])
+                    if (module_agent, rule_id) in findings_by_agent_rule
+                ]
+                module_result["finding_ids"] = [item.finding_id for item in linked_findings]
+                module_result["evidence_ids"] = list(
+                    dict.fromkeys(
+                        evidence_id
+                        for finding in linked_findings
+                        for evidence_id in finding.evidence_ids
+                    )
+                )
             for item in run.evidence[:50]:
                 finding = next((candidate for candidate in candidate_findings if candidate.finding_id == item.finding_id), None)
                 run.events.append(
@@ -680,7 +902,7 @@ class AnalysisRunRepository:
                     "stage_completed",
                     "verifier",
                     "交叉验证完成",
-                    "仅 supported/weakly_supported/needs_human_review 进入报告。",
+                    "仅 supported/weakly_supported 进入正式结论；needs_human_review 保留为待人工补证事项。",
                     stage_key="cross_validation",
                     stage_status="completed",
                     skill_id="evidence_audit_skill",
@@ -693,18 +915,93 @@ class AnalysisRunRepository:
                 run,
                 "report_generation",
                 "stage_started",
-                "报告撰写专家开始生成风险报告",
-                "报告只读取已验证 finding 与证据引用。",
-                actor_name="reporter",
+                "战略层 Agent 开始整合风险报告",
+                "战略层只读取全部专家模块结果、已验证 finding 与证据引用。",
+                actor_name="orchestrator",
                 action_label="报告生成",
             )
-            run.report = _build_report(run)
+            allowed_statuses = {"supported", "weakly_supported"}
+            admitted_finding_ids = {
+                item.finding_id
+                for item in run.verification_results
+                if item.status in allowed_statuses
+            }
+            admitted_findings = [
+                item for item in run.findings if item.finding_id in admitted_finding_ids
+            ]
+            admitted_evidence = [
+                item
+                for item in run.evidence
+                if item.finding_id in admitted_finding_ids
+                and item.verifier_status in allowed_statuses
+            ]
+            integrated: IntegratedRiskReport | None = None
+            synthesis_error: Exception | None = None
+            for _attempt in range(2):
+                try:
+                    integrated = IntegratedRiskReport.model_validate(
+                        _resolve_provider_result(
+                            self.report_provider(
+                                company_name=run.company_name,
+                                data_cutoff_date=run.data_cutoff_date,
+                                module_results=run.module_results,
+                                verified_findings=[
+                                    item.model_dump() for item in admitted_findings
+                                ],
+                                evidence_index=[
+                                    {
+                                        "evidence_id": item.evidence_id,
+                                        "finding_id": item.finding_id,
+                                        "page_number": item.page_number,
+                                        "section_path": item.section_path,
+                                        "confidence": item.confidence,
+                                    }
+                                    for item in admitted_evidence
+                                ],
+                            )
+                        )
+                    )
+                    validate_report_references(
+                        integrated,
+                        module_ids={
+                            str(item["module_id"])
+                            for item in run.module_results
+                            if item.get("module_id")
+                        },
+                        finding_ids=admitted_finding_ids,
+                        finding_ids_by_module={
+                            str(module["module_id"]): {
+                                str(finding_id)
+                                for finding_id in module.get("finding_ids", [])
+                                if str(finding_id) in admitted_finding_ids
+                            }
+                            for module in run.module_results
+                            if module.get("module_id")
+                        },
+                        evidence_by_finding={
+                            finding_id: {
+                                item.evidence_id
+                                for item in admitted_evidence
+                                if item.finding_id == finding_id
+                            }
+                            for finding_id in admitted_finding_ids
+                        },
+                    )
+                    synthesis_error = None
+                    break
+                except Exception as exc:
+                    synthesis_error = exc
+            if integrated is None or synthesis_error is not None:
+                raise ValueError(
+                    f"Strategic report synthesis failed validation: {synthesis_error}"
+                )
+            run.report = _build_integrated_report(run, integrated)
             run.events.append(
                 _event(
                     "report_section_generated",
-                    "reporter",
-                    "报告草案已生成",
-                    "已完成公司基本信息、核心风险、各风险维度、证据引用与总结建议章节。",
+                    "orchestrator",
+                    "战略层完整报告已生成",
+                    f"已融合 {len(run.module_results)} 个专家模块并完成跨模块风险整合。",
                     stage_key="report_generation",
                     action_label="章节生成",
                     metrics={"report_chars": len(run.report.markdown)},
@@ -713,7 +1010,7 @@ class AnalysisRunRepository:
             run.events.append(
                 _event(
                     "stage_completed",
-                    "reporter",
+                    "orchestrator",
                     "报告生成完成",
                     "等待质检审裁。",
                     stage_key="report_generation",
@@ -809,9 +1106,21 @@ class AnalysisRunRepository:
             self._save_run(run)
             return run
         except Exception as exc:
+            failed_stage = run.current_stage
             run.status = "failed"
             run.current_stage = "failed"
-            run.events.append(_event("stage_failed", "analysis_run", "分析失败", str(exc), stage_key=run.current_stage))
+            run.failed_stage = failed_stage
+            run.error_summary = str(exc)
+            run.events.append(
+                _event(
+                    "stage_failed",
+                    "analysis_run",
+                    "分析失败",
+                    str(exc),
+                    stage_key=failed_stage,
+                    stage_status="failed",
+                )
+            )
             self.search_cache.collect_garbage()
             self._save_run(run)
             raise
@@ -881,7 +1190,7 @@ class AnalysisRunRepository:
             findings.append(
                 RiskFinding(
                     finding_id=f"finding_{idx:03d}",
-                    agent_name=item.source_type if item.source_type.endswith("_agent") else _agent_for_evaluation(item),
+                    agent_name=item.source_type.strip() or "unattributed_expert",
                     skill_id=item.skill_id or _skill_id_for_evaluation(item),
                     rule_set_id=item.rule_set_id,
                     rule_version=item.rule_version,
@@ -990,11 +1299,11 @@ class AnalysisRunRepository:
         dumped = run.model_dump()
         dumped["input_payload"] = _payload_from_run(run).model_dump()
         dumped["frozen_rule_snapshot"] = run.frozen_rule_snapshot
-        dumped["document_blocks"] = [item.model_dump() for item in run.document_blocks]
         dumped["evidence"] = [item.model_dump() for item in run.evidence]
         dumped["verification_results"] = [item.model_dump() for item in run.verification_results]
         dumped["report"] = run.report.model_dump() if run.report else None
         if self.use_database:
+            dumped["document_blocks"] = [item.model_dump() for item in run.document_blocks]
             with self.session_factory() as session:
                 row = session.get(AnalysisRunRow, run.run_id)
                 if row is None:
@@ -1019,15 +1328,20 @@ class AnalysisRunRepository:
                     row.payload = dumped
                 session.commit()
             return
-        data = self._load_all()
-        data[run.run_id] = dumped
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
+        with _path_lock(self.path):
+            data = _read_yaml_unlocked(self.path, {})
+            existing = data.get(run.run_id, {})
+            existing_blocks = existing.get("document_blocks") or []
+            if existing_blocks and len(existing_blocks) == len(run.document_blocks):
+                dumped["document_blocks"] = existing_blocks
+            else:
+                dumped["document_blocks"] = [item.model_dump() for item in run.document_blocks]
+            data[run.run_id] = dumped
+            _write_yaml_atomic_unlocked(self.path, data)
 
     def _load_all(self) -> dict[str, Any]:
-        if not self.path.exists():
-            return {}
-        return yaml.safe_load(self.path.read_text(encoding="utf-8")) or {}
+        with _path_lock(self.path):
+            return _read_yaml_unlocked(self.path, {})
 
     def _load_evidence_library(self) -> list[dict[str, Any]]:
         if self.use_database:
@@ -1045,9 +1359,8 @@ class AnalysisRunRepository:
                     }
                     for row in rows
                 ]
-        if not self.evidence_library_path.exists():
-            return []
-        return yaml.safe_load(self.evidence_library_path.read_text(encoding="utf-8")) or []
+        with _path_lock(self.evidence_library_path):
+            return _read_yaml_unlocked(self.evidence_library_path, [])
 
     def _save_evidence_library(self, items: list[dict[str, Any]]) -> None:
         if self.use_database:
@@ -1069,11 +1382,8 @@ class AnalysisRunRepository:
                     )
                 session.commit()
             return
-        self.evidence_library_path.parent.mkdir(parents=True, exist_ok=True)
-        self.evidence_library_path.write_text(
-            yaml.safe_dump(items, allow_unicode=True, sort_keys=False),
-            encoding="utf-8",
-        )
+        with _path_lock(self.evidence_library_path):
+            _write_yaml_atomic_unlocked(self.evidence_library_path, items)
 
 
 def _payload_from_run(run: AnalysisRun) -> AnalysisRunCreate:
@@ -1099,7 +1409,7 @@ def _blocking_questions(payload: AnalysisRunCreate) -> list[str]:
     if not has_material:
         questions.append("请上传招股书 PDF、提供可下载 URL 或选择已有 document_id。")
     if not payload.confirm_defaults:
-        questions.append("请确认是否使用默认风险规则、默认 Agent 队伍和默认分析深度。")
+        questions.append("请确认是否使用默认风险规则和默认分析深度；专家编队将由战略层动态生成。")
     return questions
 
 
@@ -1109,15 +1419,11 @@ def _validate_rule_set(payload: AnalysisRunCreate, snapshot: dict[str, Any]) -> 
 
 
 def _analysis_config(payload: AnalysisRunCreate, agent_options: list[dict[str, Any]]) -> dict[str, Any]:
-    selected = payload.selected_agent_names or [item["agent_name"] for item in agent_options]
-    titles = {item["agent_name"]: item["title"] for item in agent_options}
     return {
         "risk_rule_set_id": payload.risk_rule_set_id or "active",
         "analysis_depth": payload.analysis_depth,
-        "selected_agents": [
-            {"agent_name": agent_name, "title": titles.get(agent_name, agent_name)}
-            for agent_name in selected
-        ],
+        "selection_mode": "dynamic_strategy",
+        "available_agent_count": len(agent_options),
         "max_findings": _effective_max_findings(payload),
     }
 
@@ -1365,7 +1671,7 @@ def _quality_review(run: AnalysisRun) -> dict[str, Any]:
 
 
 def _build_report(run: AnalysisRun) -> ReportDraft:
-    allowed = {"supported", "weakly_supported", "needs_human_review"}
+    allowed = {"supported", "weakly_supported"}
     status_by_finding = {item.finding_id: item.status for item in run.verification_results}
     report_findings = [
         finding for finding in run.findings if status_by_finding.get(finding.finding_id) in allowed
@@ -1475,6 +1781,81 @@ def _build_report(run: AnalysisRun) -> ReportDraft:
         report_id=f"report_{uuid.uuid4().hex[:10]}",
         markdown=markdown,
         html=html,
+        created_at=_now(),
+    )
+
+
+def _build_integrated_report(run: AnalysisRun, integrated: IntegratedRiskReport) -> ReportDraft:
+    """Render a validated strategic report without allowing new evidence claims."""
+
+    evidence_by_id = {item.evidence_id: item for item in run.evidence}
+    report_evidence = [
+        item
+        for item in run.evidence
+        if item.verifier_status in {"supported", "weakly_supported"}
+    ]
+    lines = [
+        f"# {integrated.title}",
+        "",
+        f"- 公司：{run.company_name}",
+        f"- 数据截止日期：{run.data_cutoff_date}",
+        f"- 规则版本：{run.rule_snapshot['rule_set_id']} / {run.rule_snapshot['version']}",
+        f"- 综合风险等级：{integrated.overall_risk_level}",
+        "- 复核状态：待质检",
+        "",
+        "## 执行摘要",
+        "",
+        integrated.executive_summary,
+    ]
+    for section in integrated.sections:
+        lines.extend(["", f"## {section.title}", "", section.analysis])
+        if section.finding_ids:
+            lines.append(f"- 风险判断：{', '.join(section.finding_ids)}")
+        if section.evidence_ids:
+            refs = []
+            for evidence_id in section.evidence_ids:
+                item = evidence_by_id[evidence_id]
+                refs.append(
+                    f"{evidence_id}（第 {item.page_number} 页，{item.section_path}）"
+                )
+            lines.append(f"- 证据引用：{'；'.join(refs)}")
+    if integrated.cross_module_risks:
+        lines.extend(["", "## 跨模块风险关联"])
+        for item in integrated.cross_module_risks:
+            lines.extend(["", f"### {item.title}", item.analysis])
+            if item.finding_ids:
+                lines.append(f"- 关联判断：{', '.join(item.finding_ids)}")
+            if item.evidence_ids:
+                lines.append(f"- 关联证据：{', '.join(item.evidence_ids)}")
+    lines.extend(["", "## 建议"])
+    lines.extend(f"- {item}" for item in integrated.recommendations)
+    if integrated.limitations:
+        lines.extend(["", "## 局限与人工复核"])
+        lines.extend(f"- {item}" for item in integrated.limitations)
+    pending_review = {
+        item.finding_id
+        for item in run.verification_results
+        if item.status == "needs_human_review"
+    }
+    if pending_review:
+        lines.extend(["", "## 待人工补证事项"])
+        for finding in run.findings:
+            if finding.finding_id in pending_review:
+                lines.append(
+                    f"- {finding.finding_id} / {finding.title}：未通过证据门禁，"
+                    "不作为正式风险结论。"
+                )
+    lines.extend(["", "## 证据索引"])
+    for item in report_evidence[:50]:
+        lines.append(
+            f"- {item.evidence_id}：第 {item.page_number} 页 / {item.section_path} / "
+            f"可信度 {item.confidence:.2f} / {item.text[:120]}"
+        )
+    markdown = "\n".join(lines)
+    return ReportDraft(
+        report_id=f"report_{uuid.uuid4().hex[:10]}",
+        markdown=markdown,
+        html=markdown.replace("\n", "<br>"),
         created_at=_now(),
     )
 
@@ -1599,18 +1980,6 @@ def _severity(item: RuleEvaluation) -> str:
     return "low"
 
 
-def _agent_for_evaluation(item: RuleEvaluation) -> str:
-    if item.rule_type == "quantitative_financial":
-        return "financial_agent"
-    if item.category in {"关联交易", "对赌/赎回条款", "政策监管", "诉讼与纠纷", "担保与质押", "税务风险"}:
-        return "legal_agent"
-    if item.rule_type == "textual_nlp":
-        return "business_agent"
-    if item.category in {"行业竞争"}:
-        return "market_agent"
-    return "business_agent"
-
-
 def _skill_id_for_evaluation(item: RuleEvaluation) -> str | None:
     try:
         rule = RiskRuleRepository().get_rule(item.rule_id)
@@ -1637,8 +2006,79 @@ def _event(
     return event
 
 
+def _merge_events(
+    existing: list[dict[str, Any]],
+    incoming: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    merged = list(existing)
+    seen = {
+        (
+            item.get("created_at"),
+            item.get("event_type"),
+            item.get("actor_name"),
+            item.get("title"),
+        )
+        for item in existing
+    }
+    for item in incoming:
+        key = (
+            item.get("created_at"),
+            item.get("event_type"),
+            item.get("actor_name"),
+            item.get("title"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(item)
+    return merged
+
+
+def _resolve_provider_result(value: Any) -> Any:
+    return asyncio.run(value) if inspect.isawaitable(value) else value
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _path_lock(path: Path) -> threading.RLock:
+    key = str(path.resolve() if path.exists() else path.absolute())
+    with _FILE_LOCKS_GUARD:
+        lock = _FILE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _FILE_LOCKS[key] = lock
+        return lock
+
+
+def _read_yaml_unlocked(path: Path, default: Any) -> Any:
+    if not path.exists():
+        return default
+    return yaml.safe_load(path.read_text(encoding="utf-8")) or default
+
+
+def _write_yaml_atomic_unlocked(path: Path, data: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
+    temp_path.write_text(
+        yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    temp_path.replace(path)
+
+
+def _seed_agent_specs() -> list[AgentSpec]:
+    return [
+        AgentSpec(
+            name=str(item["agent_name"]),
+            title=str(item["title"]),
+            rule_types=tuple(item.get("rule_types") or []),
+            categories=tuple(item.get("categories") or []),
+            default=bool(item.get("is_default")),
+        )
+        for item in AGENT_SPECS
+    ]
 
 
 def get_default_analysis_repository() -> AnalysisRunRepository:

@@ -1,8 +1,10 @@
+import pytest
 from sqlalchemy.orm import sessionmaker
 
-from riskagent.agent_experts import AgentExpertRepository
+from riskagent.agent_experts import AgentExpertRepository, AgentSpec
 from riskagent.database import Base, make_engine
 from riskagent.models import AgentExpertRow
+from riskagent.skills.risk_skill_registry import skills_for_agents
 
 
 def test_agent_experts_empty_table_has_no_fallback(tmp_path):
@@ -13,6 +15,32 @@ def test_agent_experts_empty_table_has_no_fallback(tmp_path):
     repo = AgentExpertRepository(session_factory=session_factory, ensure_schema=False)
 
     assert repo.list_agents() == []
+
+
+def test_unknown_dynamic_expert_does_not_expand_to_fixed_default_team():
+    assert skills_for_agents(["new_dynamic_expert"]) == []
+
+
+def test_dynamic_agent_without_bundled_skill_still_has_complete_capability_contract():
+    payload = AgentSpec(
+        name="new_dynamic_expert",
+        title="New dynamic expert",
+        categories=("新风险域",),
+    ).capability_payload(public_base_url="http://agents.test")
+
+    assert payload["role"] == "New dynamic expert"
+    assert payload["capabilities"] == ["新风险域"]
+    assert payload["input_modes"] == ["application/json"]
+    assert payload["output_modes"] == ["application/json"]
+    assert payload["output_schema"] == "ExpertTaskOutput"
+    assert payload["agent_card_url"].endswith(
+        "/a2a/new_dynamic_expert/.well-known/agent-card.json"
+    )
+
+
+def test_dynamic_agent_name_is_safe_for_mailbox_and_a2a_routes():
+    with pytest.raises(ValueError, match="agent name"):
+        AgentSpec(name="unsafe/agent", title="Unsafe")
 
 
 def test_agent_experts_seed_empty_database(tmp_path):

@@ -7,7 +7,10 @@ import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from riskagent.a2a import build_dynamic_expert_a2a_routes
+from riskagent.agent_experts import AgentSpec, AgentSpecRepository
 from riskagent.api import agents, analysis, analysis_options, chat, documents, risk_rules
+from riskagent.seed_data import AGENT_SPECS
 
 
 def _cors_origins() -> list[str]:
@@ -43,12 +46,37 @@ def create_app() -> FastAPI:
     app.include_router(chat.router)
     app.include_router(chat.general_router)
     app.include_router(analysis.router)
+    app.router.routes.extend(
+        build_dynamic_expert_a2a_routes(
+            _a2a_expert_directory,
+            public_base_url=os.getenv("A2A_PUBLIC_BASE_URL", "http://localhost:8000"),
+            send_timeout=float(os.getenv("A2A_SEND_TIMEOUT_SECONDS", "300")),
+            runtime_root=os.getenv("AGENT_RUNTIME_DATA_DIR") or None,
+        )
+    )
     for route in app.routes:
         if not hasattr(route, "path") and hasattr(route, "effective_candidates"):
             candidates = list(route.effective_candidates())
             if candidates:
                 route.path = candidates[0].path
     return app
+
+
+def _a2a_expert_directory() -> list[dict[str, object]]:
+    if os.getenv("USE_DATABASE", "1") == "0":
+        specs = [
+            AgentSpec(
+                name=str(item["agent_name"]),
+                title=str(item["title"]),
+                rule_types=tuple(item.get("rule_types") or []),
+                categories=tuple(item.get("categories") or []),
+                default=bool(item.get("is_default")),
+            )
+            for item in AGENT_SPECS
+        ]
+    else:
+        specs = AgentSpecRepository().list_specs()
+    return [spec.capability_payload() for spec in specs]
 
 
 app = create_app()

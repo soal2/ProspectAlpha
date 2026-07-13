@@ -1,5 +1,9 @@
 import sys
+import threading
+import time
 import types
+
+import pytest
 
 from riskagent.workers.analysis import dispatch_analysis_job
 from riskagent.workers import rq_worker
@@ -21,6 +25,36 @@ def test_dispatch_inline_executes_immediately(monkeypatch):
 
     assert job_id == "inline:run_inline"
     assert executor.executed == ["run_inline"]
+
+
+def test_dispatch_rejects_unknown_execution_mode():
+    with pytest.raises(ValueError, match="ANALYSIS_EXECUTION_MODE"):
+        dispatch_analysis_job("run_invalid", InlineExecutor(), mode="typo")
+
+
+def test_dispatch_thread_executes_once_for_active_run(monkeypatch):
+    monkeypatch.setenv("ANALYSIS_EXECUTION_MODE", "thread")
+    release = threading.Event()
+
+    class BlockingExecutor(InlineExecutor):
+        def execute_queued(self, run_id: str) -> None:
+            self.executed.append(run_id)
+            release.wait(timeout=2)
+
+    executor = BlockingExecutor()
+
+    job_id = dispatch_analysis_job("run_thread", executor)
+    for _ in range(50):
+        if executor.executed:
+            break
+        time.sleep(0.02)
+
+    duplicate_job_id = dispatch_analysis_job("run_thread", executor)
+    release.set()
+
+    assert job_id == "thread:run_thread"
+    assert duplicate_job_id == "thread-existing:run_thread"
+    assert executor.executed == ["run_thread"]
 
 
 def test_dispatch_rq_enqueues_job_with_configured_queue(monkeypatch):

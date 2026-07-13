@@ -1,39 +1,89 @@
-graph_id: hk_ipo_risk_agent_team_v1
-mode: fixed_supervisor_dag
-supervisor: orchestrator
-agents:
-  - name: financial_agent
-    title: Financial specialist
-    rule_types:
-      - quantitative_financial
-  - name: legal_agent
-    title: Legal and compliance specialist
-    categories:
-      - 关联交易
-      - 对赌/赎回条款
-      - 政策监管
-      - 诉讼与纠纷
-      - 担保与质押
-      - 税务风险
-  - name: market_agent
-    title: Market and industry specialist
-    categories:
-      - 行业竞争
-  - name: business_agent
-    title: Business and disclosure specialist
-    default: true
-edges:
-  - from: orchestrator
-    to:
-      - financial_agent
-      - legal_agent
-      - business_agent
-      - market_agent
-  - from:
-      - financial_agent
-      - legal_agent
-      - business_agent
-      - market_agent
-    to: verifier
-  - from: verifier
-    to: reporter
+# Documentation and observability manifest for the dynamic collaboration
+# contract. Runtime values are implemented in the Python services; this file is
+# intentionally not an execution driver or a source of fixed expert edges.
+graph_id: hk_ipo_risk_dynamic_team_v2
+mode: dynamic_strategist_langgraph
+strategist: orchestrator
+
+expert_catalog:
+  source: agent_spec_repository
+  availability_semantics: catalog_membership
+  system_prompt_variable: AVAILABLE_EXPERTS_JSON
+  agent_card_url_template: /a2a/{agent_name}/.well-known/agent-card.json
+
+strategy:
+  structured_output: StrategyDecision
+  require_validated_output: true
+  minimum_experts: 1
+  manual_selection_interrupt: awaiting_expert_selection
+  max_replacements_per_module: 2
+
+langgraph:
+  # These are protocol lifecycle stages, not hard-coded expert nodes or edges.
+  lifecycle:
+    - strategy_plan
+    - validate_strategy
+    - spawn_experts
+    - await_expert_idle
+    - dispatch_assignments
+    - collect_module_results
+    - verify_evidence
+    - synthesize_report
+    - shutdown_team
+  dynamic_fan_out: true
+  thread_id_source: run_id
+  checkpointer:
+    backend_env: LANGGRAPH_CHECKPOINT_BACKEND
+    backend_values:
+      - sqlite
+      - postgres
+    sqlite_path: ./data/agent_runtime/langgraph_checkpoints.sqlite
+    postgres_url_env: DATABASE_URL
+
+a2a:
+  protocol_version: "1.0"
+  binding: JSONRPC
+  endpoint_template: /a2a/{agent_name}
+  public_base_url_env: A2A_PUBLIC_BASE_URL
+  send_timeout_seconds_env: A2A_SEND_TIMEOUT_SECONDS
+  require_version_header: true
+  streaming: false
+  task_id_semantics: server_generated_globally_unique
+  module_id_location: assignment_metadata
+  data_model:
+    - AgentCard
+    - Task
+    - Message
+    - Artifact
+
+mailbox:
+  format: jsonl
+  root_env: AGENT_RUNTIME_DATA_DIR
+  root_default: ./data/agent_runtime
+  poll_interval_ms: 500
+  file_mode: "0600"
+  directory_mode: "0700"
+  delivery: at_least_once
+  deduplicate_by: message_id
+  atomic_claim: true
+  claim_lease_seconds: 300
+  renew_claim_while_working: true
+  request_correlation_field: request_id
+  response_correlation_fields:
+    - sender
+    - in_reply_to
+  dead_letter_enabled: true
+
+expert_runtime:
+  thread_per_expert: true
+  daemon_threads: false
+  start_timeout_seconds: 10
+  task_timeout_seconds: 300
+  shutdown_timeout_seconds: 10
+  max_peer_rounds_per_task: 3
+  initial_state: idle
+
+reporting:
+  verifier_required: true
+  require_all_modules: true
+  final_synthesizer: orchestrator
