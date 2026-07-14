@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import func, inspect, select, text
+from sqlalchemy import delete, func, inspect, select, text
 from sqlalchemy.orm import sessionmaker
 
 from riskagent.models import AgentExpertRow, AgentSpecRow, RiskRuleDimensionRow, RiskRuleRow, RiskRuleSetRow
@@ -14,6 +15,8 @@ from riskagent.models import AgentExpertRow, AgentSpecRow, RiskRuleDimensionRow,
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 RISK_RULE_SEED_PATH = BACKEND_ROOT / "configs" / "hk_ipo_risk_rules_v1.json"
+
+logger = logging.getLogger(__name__)
 
 
 AGENT_EXPERTS: list[dict[str, Any]] = [
@@ -318,8 +321,61 @@ def seed_reference_data(session_factory: sessionmaker) -> None:
 
         if not session.scalar(select(func.count()).select_from(RiskRuleSetRow)):
             seed_risk_rules(session)
+        else:
+            verify_risk_rule_seed(session)
 
         session.commit()
+
+
+def verify_risk_rule_seed(session) -> None:
+    """Repair stale or partially seeded risk-rule data, idempotently.
+
+    Re-seeds the bundled rule set only when the stored copy is unusable
+    (missing rules/dimensions) or predates the current seed version.
+    User CRUD on a fully seeded set — added, edited, disabled, or deleted
+    rules — is left untouched; a count drift is only logged.
+    """
+
+    data = json.loads(RISK_RULE_SEED_PATH.read_text(encoding="utf-8"))
+    rule_set_id = data["rule_set_id"]
+    seed_version = data.get("version", "v1.0")
+    seed_rule_count = len(data.get("rules", []))
+
+    row = session.get(RiskRuleSetRow, rule_set_id)
+    rule_count = session.scalar(
+        select(func.count()).select_from(RiskRuleRow).where(RiskRuleRow.rule_set_id == rule_set_id)
+    ) or 0
+    dimension_count = session.scalar(
+        select(func.count())
+        .select_from(RiskRuleDimensionRow)
+        .where(RiskRuleDimensionRow.rule_set_id == rule_set_id)
+    ) or 0
+
+    stale_version = row is not None and row.version != seed_version
+    broken = row is None or rule_count == 0 or dimension_count == 0
+    if not (stale_version or broken):
+        if rule_count != seed_rule_count:
+            logger.info(
+                "risk rule set %s holds %d rules (seed has %d) — user-curated, keeping as is",
+                rule_set_id,
+                rule_count,
+                seed_rule_count,
+            )
+        return
+
+    logger.warning(
+        "risk rule set %s is stale or incomplete (version=%s rules=%d dims=%d) — re-seeding %d rules",
+        rule_set_id,
+        row.version if row else None,
+        rule_count,
+        dimension_count,
+        seed_rule_count,
+    )
+    session.execute(delete(RiskRuleRow).where(RiskRuleRow.rule_set_id == rule_set_id))
+    session.execute(delete(RiskRuleDimensionRow).where(RiskRuleDimensionRow.rule_set_id == rule_set_id))
+    session.execute(delete(RiskRuleSetRow).where(RiskRuleSetRow.rule_set_id == rule_set_id))
+    session.flush()
+    seed_risk_rules(session)
 
 
 def _refresh_agent_specs_if_stale(session) -> None:
