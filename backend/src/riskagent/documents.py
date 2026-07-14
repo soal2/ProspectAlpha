@@ -159,6 +159,29 @@ class DocumentRepository:
             raise KeyError(document_id)
         return DocumentAsset.model_validate(item)
 
+    def get_file(self, document_id: str) -> tuple[bytes, str, str]:
+        """Return (content, content_type, filename) for the original uploaded file."""
+        asset = self.get(document_id)
+        suffix = ".pdf" if asset.content_type == "application/pdf" else ".txt"
+        key = f"documents/{document_id}{suffix}"
+        content = self.object_store.get_bytes(key=key)
+        return content, asset.content_type, asset.filename
+
+    def list_assets(self) -> list[DocumentAsset]:
+        if self.use_database:
+            with self.session_factory() as session:
+                rows = session.scalars(
+                    select(DocumentAssetRow).order_by(DocumentAssetRow.created_at.desc())
+                ).all()
+                return [_asset_from_row(row, include_blocks=False) for row in rows]
+        items = []
+        for item in self._load_all().values():
+            data = dict(item)
+            data["blocks"] = []
+            items.append(DocumentAsset.model_validate(data))
+        items.sort(key=lambda asset: asset.created_at, reverse=True)
+        return items
+
     def get_text(self, document_id: str) -> str:
         return "\n\n".join(block.text for block in self.get_blocks(document_id))
 
@@ -349,7 +372,7 @@ def _upsert_asset(session: Session, asset: DocumentAsset) -> None:
     session.add(row)
 
 
-def _asset_from_row(row: DocumentAssetRow) -> DocumentAsset:
+def _asset_from_row(row: DocumentAssetRow, include_blocks: bool = True) -> DocumentAsset:
     return DocumentAsset(
         document_id=row.document_id,
         filename=row.filename,
@@ -362,7 +385,7 @@ def _asset_from_row(row: DocumentAssetRow) -> DocumentAsset:
         block_count=row.block_count,
         source_url=row.source_url,
         created_at=row.created_at.isoformat() if hasattr(row.created_at, "isoformat") else str(row.created_at),
-        blocks=[_block_from_row(block) for block in row.blocks],
+        blocks=[] if not include_blocks else [_block_from_row(block) for block in row.blocks],
     )
 
 

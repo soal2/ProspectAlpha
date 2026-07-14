@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
@@ -135,6 +135,7 @@ class RunEvidence(BaseModel):
     evidence_id: str
     finding_id: str
     document_block_id: str
+    document_id: str = ""
     page_number: int
     section_path: str
     text: str
@@ -144,6 +145,16 @@ class RunEvidence(BaseModel):
     source_hash: str = ""
     confidence: float
     verifier_status: str
+
+    @model_validator(mode="after")
+    def _backfill_document_id(self) -> "RunEvidence":
+        # Legacy runs persisted evidence without document_id; recover it from the
+        # block_id format `block_{doc_id}_{page:04d}_{idx:03d}`.
+        if not self.document_id and self.document_block_id:
+            match = re.match(r"^block_(.+)_\d{4}_\d{3}$", self.document_block_id)
+            if match:
+                self.document_id = match.group(1)
+        return self
 
 
 class VerificationResult(BaseModel):
@@ -1290,6 +1301,7 @@ class AnalysisRunRepository:
                         evidence_id=evidence_id,
                         finding_id=finding.finding_id,
                         document_block_id=candidate["block_id"],
+                        document_id=str(candidate.get("document_id") or ""),
                         page_number=candidate["page_number"],
                         section_path=candidate["section_path"],
                         text=candidate["text"][:300],
@@ -1313,6 +1325,7 @@ class AnalysisRunRepository:
         candidates = [
             {
                 "block_id": item.block_id,
+                "document_id": item.document_id,
                 "page_number": item.page_number,
                 "section_path": item.section_path,
                 "text": item.text,
@@ -1377,6 +1390,7 @@ class AnalysisRunRepository:
                     evidence_id=evidence_id,
                     finding_id=target_finding.finding_id,
                     document_block_id=candidate.block_id,
+                    document_id=candidate.document_id,
                     page_number=candidate.page_number,
                     section_path=candidate.section_path,
                     text=candidate.text[:300],
@@ -2193,6 +2207,7 @@ def _block_candidates_for_finding(
         candidates.append(
             {
                 "block_id": block.block_id,
+                "document_id": block.document_id,
                 "page_number": block.page_number,
                 "section_path": block.section_path,
                 "text": block.text,

@@ -26,6 +26,7 @@ class _SupplementSearchIndex:
         return [
             SimpleNamespace(
                 block_id="block-supplement",
+                document_id="doc-supplement",
                 page_number=9,
                 section_path="风险因素/补充证据",
                 text="补充证据显示客户集中度和回款风险仍需关注。",

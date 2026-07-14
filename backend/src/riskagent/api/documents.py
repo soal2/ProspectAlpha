@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
+from urllib.parse import quote
+
+from fastapi import APIRouter, File, Form, HTTPException, Response, UploadFile, status
 
 from riskagent.documents import (
     DocumentAsset,
@@ -43,6 +45,27 @@ async def upload_document(
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.get("", response_model=list[DocumentAsset])
+def list_documents() -> list[DocumentAsset]:
+    return _repo().list_assets()
+
+
+@router.get("/{document_id}/file")
+def get_document_file(document_id: str) -> Response:
+    repo = _repo()
+    try:
+        content, content_type, filename = repo.get_file(document_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document file not found") from exc
+    ascii_name = filename.encode("ascii", errors="ignore").decode() or "document.pdf"
+    disposition = f"inline; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(filename)}"
+    return Response(
+        content=content,
+        media_type=content_type,
+        headers={"Content-Disposition": disposition},
+    )
 
 
 @router.get("/{document_id}", response_model=DocumentAsset)

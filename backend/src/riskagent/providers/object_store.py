@@ -27,6 +27,9 @@ class ObjectStore(Protocol):
     ) -> StoredObject:
         ...
 
+    def get_bytes(self, *, key: str) -> bytes:
+        ...
+
 
 class LocalObjectStore:
     def __init__(self, root: Path | str, bucket: str = "prospect-alpha") -> None:
@@ -49,6 +52,12 @@ class LocalObjectStore:
             key=key,
             size_bytes=len(content),
         )
+
+    def get_bytes(self, *, key: str) -> bytes:
+        path = self.root / self.bucket / key
+        if not path.exists():
+            raise KeyError(key)
+        return path.read_bytes()
 
 
 class MinioObjectStore:
@@ -93,6 +102,19 @@ class MinioObjectStore:
             key=key,
             size_bytes=len(content),
         )
+
+    def get_bytes(self, *, key: str) -> bytes:
+        from minio.error import S3Error
+
+        try:
+            response = self.client.get_object(self.bucket, key)
+        except S3Error as exc:
+            raise KeyError(key) from exc
+        try:
+            return response.read()
+        finally:
+            response.close()
+            response.release_conn()
 
 
 def get_default_object_store() -> ObjectStore:
