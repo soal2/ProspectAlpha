@@ -218,6 +218,7 @@ type BackendEvidence = {
   evidence_id: string;
   finding_id: string;
   document_block_id: string;
+  document_id: string;
   page_number: number;
   section_path: string;
   text: string;
@@ -365,6 +366,8 @@ async function fetchEvidenceDetailItems(id: string): Promise<EvidenceDetailItem[
       conf: item.confidence,
       snippet: item.text,
       risk: riskByFinding[item.finding_id] ?? "风险证据",
+      documentId: item.document_id,
+      bbox: item.bbox,
     }));
   } catch (err) {
     if (isNotFound(err)) return [];
@@ -403,6 +406,9 @@ async function fetchKnowledgeData(): Promise<KnowledgeData> {
       conf: item.confidence,
       snippet: item.text,
       risk: riskByFinding[item.finding_id] ?? item.verifier_status,
+      documentId: item.document_id,
+      bbox: item.bbox,
+      createdAt: run.created_at,
     }));
   });
   const companies = [...new Set(runs.map((run) => run.company_name).filter(Boolean))];
@@ -629,6 +635,14 @@ export async function uploadDocument(file: File) {
     method: "POST",
     body: form,
   });
+}
+
+export function getDocumentFileUrl(documentId: string) {
+  return `${API_BASE_URL}/documents/${documentId}/file`;
+}
+
+export async function listDocuments() {
+  return apiRequest<UploadedDocument[]>("/documents");
 }
 
 // PDF Q&A — SSE stream from POST /documents/{id}/ask

@@ -18,6 +18,7 @@ import {
   createAnalysisDraft,
   getAnalysisOptions,
   getIntakeData,
+  listDocuments,
   startAnalysisRun,
   updateAnalysisInputs,
   uploadDocument,
@@ -26,6 +27,7 @@ import {
   type AnalysisOptions,
   type AskCitation,
 } from "@/lib/data-service";
+import { toast } from "sonner";
 
 export const Route = createFileRoute("/intake")({
   head: () => ({
@@ -87,6 +89,63 @@ function IntakePage() {
   const [pdfError, setPdfError] = useState<string | null>(null);
   const pdfAbortRef = useRef<AbortController | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [matching, setMatching] = useState(false);
+  const [matchResults, setMatchResults] = useState<
+    {
+      document_id: string;
+      filename: string;
+      page_count: number;
+      file_size_bytes: number;
+      created_at: string;
+    }[]
+  >([]);
+
+  const handleMatchTarget = async () => {
+    const query = companyName.trim();
+    if (!query) {
+      toast.warning("请先输入公司名称或关键词");
+      return;
+    }
+    setMatching(true);
+    try {
+      const documents = await listDocuments();
+      const tokens = query
+        .toLowerCase()
+        .split(/[\s·、,，/]+/)
+        .filter((token) => token.length >= 2);
+      const hits = documents.filter((doc) => {
+        const name = doc.filename.toLowerCase();
+        return tokens.length
+          ? tokens.some((token) => name.includes(token))
+          : name.includes(query.toLowerCase());
+      });
+      const results = (hits.length ? hits : documents).slice(0, 5);
+      setMatchResults(results);
+      if (!documents.length) {
+        toast.info("知识库暂无已上传的招股书，请先上传 PDF");
+      } else if (!hits.length) {
+        toast.info(`未找到与「${query}」匹配的文档，已列出最近上传的 ${results.length} 份`);
+      } else {
+        toast.success(`匹配到 ${hits.length} 份相关文档`);
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "匹配标的失败");
+    } finally {
+      setMatching(false);
+    }
+  };
+
+  const selectMatchedDocument = (doc: (typeof matchResults)[number]) => {
+    setUploadedDocument({
+      document_id: doc.document_id,
+      filename: doc.filename,
+      page_count: doc.page_count,
+      file_size_bytes: doc.file_size_bytes,
+      created_at: doc.created_at,
+    });
+    setMatchResults([]);
+    toast.success(`已选用文档：${doc.filename}`);
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -147,10 +206,39 @@ function IntakePage() {
                 className="h-10 flex-1 rounded-md border border-border bg-background px-3 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
                 aria-label="分析标的"
               />
-              <button className="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-border bg-background px-4 text-sm font-medium hover:bg-accent">
-                <Search className="size-4" /> 匹配标的
+              <button
+                onClick={() => void handleMatchTarget()}
+                disabled={matching}
+                className="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-border bg-background px-4 text-sm font-medium hover:bg-accent disabled:opacity-60"
+              >
+                {matching ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <Search className="size-4" />
+                )}{" "}
+                匹配标的
               </button>
             </div>
+            {matchResults.length ? (
+              <div className="mt-4 space-y-2">
+                <div className="text-xs text-muted-foreground">
+                  匹配到以下已入库招股书，点击选用（无需重新上传）：
+                </div>
+                {matchResults.map((doc) => (
+                  <button
+                    key={doc.document_id}
+                    onClick={() => selectMatchedDocument(doc)}
+                    className="flex w-full items-center gap-3 rounded-lg border border-border bg-background px-3 py-2 text-left text-sm transition hover:border-primary/40 hover:bg-accent"
+                  >
+                    <FileText className="size-4 shrink-0 text-primary" />
+                    <span className="min-w-0 flex-1 truncate">{doc.filename}</span>
+                    <span className="shrink-0 text-[11px] text-muted-foreground tabular">
+                      {doc.page_count} 页
+                    </span>
+                  </button>
+                ))}
+              </div>
+            ) : null}
           </div>
 
           {/* Upload card */}
@@ -474,7 +562,9 @@ function IntakePage() {
                     风险规则集
                     <select
                       value={confirmEdits.risk_rule_set_id ?? selectedRuleSetId}
-                      onChange={(event) => patchConfirmField("risk_rule_set_id", event.target.value)}
+                      onChange={(event) =>
+                        patchConfirmField("risk_rule_set_id", event.target.value)
+                      }
                       className="mt-1 h-9 w-full rounded-md border border-border bg-background px-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
                     >
                       {options?.risk_rule_sets.map((ruleSet) => (
@@ -522,10 +612,7 @@ function IntakePage() {
                         : ""
                     }
                     onChange={(event) =>
-                      patchConfirmField(
-                        "structured_data",
-                        parseStructuredData(event.target.value),
-                      )
+                      patchConfirmField("structured_data", parseStructuredData(event.target.value))
                     }
                     className="field-input mt-1 resize-none"
                   />
@@ -771,9 +858,7 @@ function IntakePage() {
       risk_rule_set_id: run.rule_snapshot?.rule_set_id ?? selectedRuleSetId,
       analysis_depth: run.analysis_config?.analysis_depth ?? analysisDepth,
       structured_data: run.input_summary?.structured_data_keys
-        ? Object.fromEntries(
-            run.input_summary.structured_data_keys.map((key) => [key, ""]),
-          )
+        ? Object.fromEntries(run.input_summary.structured_data_keys.map((key) => [key, ""]))
         : parseStructuredData(structuredDataText),
       material_url: undefined,
     });

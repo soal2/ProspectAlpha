@@ -121,6 +121,8 @@ export interface EvidenceFeedItem {
   time: string;
   page?: number | null;
   snippet?: string | null;
+  document_id?: string | null;
+  bbox?: number[];
 }
 
 export interface TraceData {
@@ -137,6 +139,8 @@ export interface EvidenceDetailItem {
   conf: number;
   snippet: string;
   risk: string;
+  documentId?: string;
+  bbox?: number[];
 }
 
 export interface KnowledgePreview {
@@ -166,6 +170,9 @@ export interface KnowledgeEvidence {
   conf: number;
   snippet: string;
   risk: string;
+  documentId?: string;
+  bbox?: number[];
+  createdAt?: string;
 }
 
 export interface KnowledgeData {

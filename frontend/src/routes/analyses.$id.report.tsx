@@ -78,7 +78,11 @@ function ReportPage() {
                 to="/analyses/$id/evidence"
                 id={analysis.id}
               />
-              <button className="inline-flex h-9 items-center gap-1.5 rounded-full border border-border bg-card px-3 text-xs text-muted-foreground">
+              <button
+                onClick={() => exportMarkdown(analysis.name, analysis.id, report?.markdown)}
+                disabled={!report?.markdown}
+                className="inline-flex h-9 items-center gap-1.5 rounded-full border border-border bg-card px-3 text-xs text-muted-foreground hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
+              >
                 <Download className="size-3.5" /> 导出
               </button>
             </div>
@@ -108,6 +112,19 @@ function ReportPage() {
       </section>
     </div>
   );
+}
+
+function exportMarkdown(companyName: string, runId: string, markdown?: string) {
+  if (!markdown) return;
+  const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `${companyName}-IPO风险分析报告-${runId}.md`;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
 }
 
 function splitMarkdown(markdown: string) {

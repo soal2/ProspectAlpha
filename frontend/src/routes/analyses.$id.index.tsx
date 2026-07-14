@@ -26,6 +26,7 @@ import {
   type AnalysisRunEvent,
 } from "@/lib/data-service";
 import { type Agent } from "@/lib/types";
+import { PdfViewer } from "@/components/pdf-viewer";
 import { motion, AnimatePresence } from "framer-motion";
 
 export const Route = createFileRoute("/analyses/$id/")({
@@ -55,7 +56,10 @@ type EvidenceFeedItem = {
   title: string;
   conf: number;
   time: string;
+  page?: number | null;
   snippet?: string | null;
+  document_id?: string | null;
+  bbox?: number[];
 };
 type Bubble = { who: string; kind: string; text: string; t: string };
 
@@ -100,6 +104,7 @@ function RealtimeStream() {
   const [streamError, setStreamError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
   const [filter, setFilter] = useState("");
+  const [viewerEvidence, setViewerEvidence] = useState<EvidenceFeedItem | null>(null);
   const startedRunRef = useRef<string | null>(null);
 
   const refreshTrace = useCallback(async () => {
@@ -460,7 +465,11 @@ function RealtimeStream() {
                     {item.snippet}
                   </p>
                 ) : null}
-                <button className="mt-2 inline-flex items-center gap-1 text-[11px] text-primary hover:underline">
+                <button
+                  onClick={() => setViewerEvidence(item)}
+                  disabled={!item.document_id}
+                  className="mt-2 inline-flex items-center gap-1 text-[11px] text-primary hover:underline disabled:cursor-not-allowed disabled:text-muted-foreground disabled:no-underline"
+                >
                   查看原文 <ExternalLink className="size-3" />
                 </button>
               </div>
@@ -474,6 +483,26 @@ function RealtimeStream() {
           </div>
         </aside>
       </div>
+      {viewerEvidence?.document_id ? (
+        <PdfViewer
+          open={Boolean(viewerEvidence)}
+          onOpenChange={(next) => {
+            if (!next) setViewerEvidence(null);
+          }}
+          documentId={viewerEvidence.document_id}
+          page={viewerEvidence.page ?? 1}
+          highlight={
+            viewerEvidence.bbox?.length === 4 && viewerEvidence.page
+              ? {
+                  page: viewerEvidence.page,
+                  bbox: viewerEvidence.bbox,
+                  label: viewerEvidence.title,
+                }
+              : null
+          }
+          title={`证据 ${viewerEvidence.id} · ${viewerEvidence.title}`}
+        />
+      ) : null}
       <FloatingTracePanel
         run={run}
         stages={stages}
@@ -560,6 +589,8 @@ function mergeEvidenceFeed(
         time: event.created_at ? formatClock(event.created_at) : "近实时",
         page: Number(payload.page_number ?? 0),
         snippet: event.summary,
+        document_id: payload.document_id ? String(payload.document_id) : null,
+        bbox: Array.isArray(payload.bbox) ? (payload.bbox as number[]) : undefined,
       };
     });
   const byId = new Map<string, EvidenceFeedItem>();

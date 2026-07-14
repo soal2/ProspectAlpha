@@ -220,6 +220,8 @@ class TraceEvidenceItem(BaseModel):
     time: str
     page: int | None = None
     snippet: str | None = None
+    document_id: str | None = None
+    bbox: list[float] = Field(default_factory=list)
 
 
 class AnalysisTrace(BaseModel):
@@ -845,6 +847,7 @@ class AnalysisRunRepository:
                         payload={
                             "evidence_id": item.evidence_id,
                             "finding_id": item.finding_id,
+                            "document_id": item.document_id,
                             "page_number": item.page_number,
                             "bbox": item.bbox,
                             "confidence": item.confidence,
@@ -2584,6 +2587,8 @@ def _build_trace_view(run: AnalysisRun) -> AnalysisTrace:
             time="近实时",
             page=item.page_number,
             snippet=item.text,
+            document_id=item.document_id or None,
+            bbox=item.bbox,
         )
         for item in run.evidence[:20]
     ]
