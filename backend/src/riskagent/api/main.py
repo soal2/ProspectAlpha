@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 from riskagent.a2a import build_dynamic_expert_a2a_routes
 from riskagent.agent_experts import AgentSpec, AgentSpecRepository
-from riskagent.api import agents, analysis, analysis_options, chat, documents, risk_rules
+from riskagent.api import agents, analysis, analysis_options, chat, documents, knowledge, risk_rules
 from riskagent.seed_data import AGENT_EXPERTS, AGENT_SPECS
 
 
@@ -70,6 +70,7 @@ def create_app() -> FastAPI:
     app.include_router(chat.router)
     app.include_router(chat.general_router)
     app.include_router(analysis.router)
+    app.include_router(knowledge.router)
     app.router.routes.extend(
         build_dynamic_expert_a2a_routes(
             _a2a_expert_directory,

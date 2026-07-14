@@ -44,7 +44,7 @@ from riskagent.skills.risk_skill_registry import (
 )
 from riskagent.seed_data import AGENT_SPECS
 from riskagent.seed_data import AGENT_EXPERTS
-from riskagent.models import AnalysisRunRow, EvidenceLibraryRow
+from riskagent.models import AnalysisRunRow, EvidenceLibraryRow, ReportLibraryRow
 from riskagent.providers.llm import get_default_llm_client
 from riskagent.retrieval.hybrid import HybridSearchIndex
 from riskagent.workers.analysis import dispatch_analysis_job
@@ -1158,6 +1158,19 @@ class AnalysisRunRepository:
                 )
             )
 
+            archived = self._archive_report(run)
+            if archived:
+                run.events.append(
+                    _event(
+                        "tool_completed",
+                        "report_library",
+                        "报告沉淀完成",
+                        f"报告已入知识库并索引 {archived} 个分节，供后续分析检索复用。",
+                        stage_key="quality_review",
+                        action_label="报告沉淀",
+                    )
+                )
+
             run.status = "completed"
             run.current_stage = "completed"
             run.completed_at = _now()
@@ -1479,6 +1492,94 @@ class AnalysisRunRepository:
             promoted += 1
         self._save_evidence_library(list(by_key.values()))
         return promoted
+
+    def _archive_report(self, run: AnalysisRun) -> int:
+        """Persist the final report into the knowledge library and retrieval index.
+
+        Idempotent per run: the DB row is keyed by source_run_id, and section
+        blocks reuse deterministic block_ids under the shared
+        ``knowledge_reports`` index (append semantics, replace=False) so later
+        runs can retrieve historical conclusions. Failures are tolerated — a
+        completed analysis must never be failed by archival."""
+
+        if run.report is None or not run.report.markdown.strip():
+            return 0
+        sections = _report_sections(run.report.markdown)
+        try:
+            payload = _payload_from_run(run)
+            document_id = payload.document_id or ""
+        except Exception:
+            document_id = ""
+        try:
+            with self.session_factory() as session:
+                existing = session.get(ReportLibraryRow, run.report.report_id) or session.scalar(
+                    select(ReportLibraryRow).where(ReportLibraryRow.source_run_id == run.run_id)
+                )
+                if existing is None:
+                    session.add(
+                        ReportLibraryRow(
+                            report_id=run.report.report_id,
+                            source_run_id=run.run_id,
+                            company_name=run.company_name,
+                            document_id=document_id,
+                            rule_set_id=str(run.rule_snapshot.get("rule_set_id") or ""),
+                            overall_risk_level=_overall_risk_level(run.findings),
+                            finding_count=len(run.findings),
+                            markdown=run.report.markdown,
+                            sections=sections,
+                            created_at=_now(),
+                        )
+                    )
+                else:
+                    existing.markdown = run.report.markdown
+                    existing.sections = sections
+                    existing.overall_risk_level = _overall_risk_level(run.findings)
+                    existing.finding_count = len(run.findings)
+                session.commit()
+        except Exception as exc:
+            run.events.append(
+                _event(
+                    "tool_failed",
+                    "report_library",
+                    "报告入库失败",
+                    f"{type(exc).__name__}: {exc}",
+                    stage_key="quality_review",
+                    action_label="报告沉淀",
+                )
+            )
+            return 0
+        blocks = [
+            DocumentBlock(
+                block_id=f"reportsec_{run.run_id}_{index:03d}",
+                document_id=f"report_{run.run_id}",
+                page_number=0,
+                section_path=f"{run.company_name}/{section['title']}",
+                block_type="report_section",
+                text=section["text"][:4000],
+                bbox=[],
+                source_hash=hashlib.sha256(section["text"].encode("utf-8")).hexdigest(),
+            )
+            for index, section in enumerate(sections)
+            if section["text"].strip()
+        ]
+        if not blocks:
+            return 0
+        try:
+            return self.search_index.index_blocks(
+                run_id="knowledge_reports", blocks=blocks, replace=False
+            )
+        except Exception as exc:
+            run.events.append(
+                _event(
+                    "tool_failed",
+                    "report_library",
+                    "报告索引失败",
+                    f"报告已入库，但检索索引失败：{type(exc).__name__}: {exc}",
+                    stage_key="quality_review",
+                    action_label="报告沉淀",
+                )
+            )
+            return 0
 
     def _run_debate_stage(self, run: AnalysisRun) -> AnalysisRun:
         """Run the 2-round expert debate phase between risk_identification and cross_validation."""
@@ -2562,6 +2663,25 @@ def _report_section_for_finding(finding: RiskFinding) -> str:
     if finding.skill_id == "market_valuation_skill" or finding.category in {"行业竞争", "估值", "发行定价", "破发风险"}:
         return "估值与破发风险分析"
     return "业务风险分析"
+
+
+def _report_sections(markdown: str) -> list[dict[str, str]]:
+    """Split a report markdown into `## `-level sections for archival and indexing."""
+
+    sections: list[dict[str, str]] = []
+    title = "报告概述"
+    buffer: list[str] = []
+    for line in markdown.splitlines():
+        if line.startswith("## "):
+            if buffer and "".join(buffer).strip():
+                sections.append({"title": title, "text": "\n".join(buffer).strip()})
+            title = line[3:].strip() or title
+            buffer = []
+            continue
+        buffer.append(line)
+    if buffer and "".join(buffer).strip():
+        sections.append({"title": title, "text": "\n".join(buffer).strip()})
+    return sections
 
 
 def _overall_risk_level(findings: list[RiskFinding]) -> str:

@@ -74,6 +74,21 @@ class EvidenceLibraryRow(Base):
     created_at: Mapped[str] = mapped_column(String(64))
 
 
+class ReportLibraryRow(Base):
+    __tablename__ = "report_library"
+
+    report_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    source_run_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    company_name: Mapped[str] = mapped_column(String(512), index=True)
+    document_id: Mapped[str] = mapped_column(String(64), index=True)
+    rule_set_id: Mapped[str] = mapped_column(String(64))
+    overall_risk_level: Mapped[str] = mapped_column(String(32))
+    finding_count: Mapped[int] = mapped_column(Integer)
+    markdown: Mapped[str] = mapped_column(Text)
+    sections: Mapped[list[dict]] = mapped_column(JSON)
+    created_at: Mapped[str] = mapped_column(String(64))
+
+
 class RetrievalIndexRow(Base):
     __tablename__ = "retrieval_index"
 

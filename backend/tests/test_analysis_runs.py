@@ -286,3 +286,108 @@ def test_run_debate_stage_emits_structured_failure_event_on_DebateLLMError(
     assert payload["total"] == 1
     assert "simulated arbiter timeout" in payload["detail"]
     assert "phase" in payload and "failed" in payload and "total" in payload
+
+
+def test_completed_run_archives_report_into_knowledge_library(tmp_path, analysis_repo_factory):
+    from sqlalchemy import select
+
+    from riskagent.models import ReportLibraryRow, RetrievalIndexRow
+
+    rule_repo = RiskRuleRepository(Path(__file__).parents[1] / "configs" / "risk_rules.yaml")
+    repo = analysis_repo_factory(
+        rule_repository=rule_repo,
+        path=tmp_path / "runs.yaml",
+    )
+
+    run = repo.create_and_run(
+        AnalysisRunCreate(
+            company_name="测试 IPO",
+            document_text="公司存在关联交易、赎回安排，经营活动现金流持续为负。",
+            structured_data={"经营活动现金流": "连续两期为负"},
+        )
+    )
+
+    assert run.status == "completed"
+    assert run.report is not None
+
+    with repo.session_factory() as session:
+        row = session.scalar(
+            select(ReportLibraryRow).where(ReportLibraryRow.source_run_id == run.run_id)
+        )
+        assert row is not None
+        assert row.report_id == run.report.report_id
+        assert row.company_name == "测试 IPO"
+        assert row.finding_count == len(run.findings)
+        assert row.markdown == run.report.markdown
+        assert row.sections and all("title" in item and "text" in item for item in row.sections)
+
+        indexed = session.scalars(
+            select(RetrievalIndexRow).where(RetrievalIndexRow.run_id == "knowledge_reports")
+        ).all()
+        assert indexed
+        assert all(item.document_id == f"report_{run.run_id}" for item in indexed)
+        assert all(item.payload["block_type"] == "report_section" for item in indexed)
+
+    archive_events = [
+        event for event in run.events if event.get("actor_name") == "report_library"
+    ]
+    assert archive_events and archive_events[0]["event_type"] == "tool_completed"
+
+    # Idempotent: re-archiving the same run must not duplicate rows.
+    first_count = len(indexed)
+    repo._archive_report(run)
+    with repo.session_factory() as session:
+        rows = session.scalars(select(ReportLibraryRow)).all()
+        assert len(rows) == 1
+        indexed_again = session.scalars(
+            select(RetrievalIndexRow).where(RetrievalIndexRow.run_id == "knowledge_reports")
+        ).all()
+        assert len(indexed_again) == first_count
+
+
+def test_knowledge_reports_api_lists_and_fetches_archived_reports(monkeypatch, tmp_path):
+    import riskagent.api.knowledge as knowledge_module
+    from sqlalchemy.orm import sessionmaker
+
+    from riskagent.database import Base, make_engine
+    from riskagent.models import ReportLibraryRow
+
+    engine = make_engine(f"sqlite:///{tmp_path / 'knowledge.db'}")
+    Base.metadata.create_all(bind=engine)
+    session_factory = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+    monkeypatch.setattr(knowledge_module, "SessionLocal", session_factory)
+    monkeypatch.setattr(knowledge_module, "init_db", lambda: None)
+
+    with session_factory() as session:
+        session.add(
+            ReportLibraryRow(
+                report_id="report_test123",
+                source_run_id="run_test123",
+                company_name="测试 IPO",
+                document_id="doc_abc",
+                rule_set_id="hk_ipo_risk_rules_v1",
+                overall_risk_level="中",
+                finding_count=6,
+                markdown="# 报告\n\n## 财务风险分析\n\n内容",
+                sections=[{"title": "财务风险分析", "text": "内容"}],
+                created_at="2026-07-14T00:00:00+00:00",
+            )
+        )
+        session.commit()
+
+    client = TestClient(create_app())
+    listed = client.get("/knowledge/reports")
+    assert listed.status_code == 200
+    summaries = listed.json()
+    assert len(summaries) == 1
+    assert summaries[0]["report_id"] == "report_test123"
+    assert summaries[0]["section_count"] == 1
+    assert "markdown" not in summaries[0]
+
+    detail = client.get("/knowledge/reports/report_test123")
+    assert detail.status_code == 200
+    body = detail.json()
+    assert body["markdown"].startswith("# 报告")
+    assert body["sections"] == [{"title": "财务风险分析", "text": "内容"}]
+
+    assert client.get("/knowledge/reports/missing").status_code == 404
