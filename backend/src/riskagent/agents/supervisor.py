@@ -18,6 +18,7 @@ from langgraph.types import Command, interrupt
 from pydantic import BaseModel, ConfigDict, Field
 
 from riskagent.a2a import MessageType, TeamRuntime
+from riskagent.a2a.runtime import STRATEGIC_AGENT
 from riskagent.a2a.storage import resolve_agent_runtime_root
 from riskagent.agent_experts import AgentSpec, AgentSpecRepository
 from riskagent.agents.orchestrator import (
@@ -31,6 +32,7 @@ from riskagent.agents.orchestrator import (
     validate_strategy_decision,
 )
 from riskagent.agents.expert_llm import analyze_findings_with_llm
+from riskagent.agents.prompts import render_expert_prompt
 from riskagent.risk_rules import RiskRule, RiskRuleRepository
 from riskagent.seed_data import AGENT_EXPERTS, AGENT_NAME_ALIASES, AGENT_SPECS
 from riskagent.skills.risk_extract import RuleEvaluation, evaluate_text_against_rules
@@ -45,6 +47,7 @@ MAX_REPLACEMENT_ROUNDS = 2
 TEAM_STARTUP_TIMEOUT_SECONDS = 10.0
 EXPERT_TASK_TIMEOUT_SECONDS = 300.0
 TEAM_SHUTDOWN_TIMEOUT_SECONDS = 10.0
+MISSION_BRIEF_TIMEOUT_SECONDS = 10.0
 
 
 StrategyProvider = Callable[..., Any]
@@ -65,6 +68,7 @@ class ExpertModuleResult(BaseModel):
     limitations: list[str] = Field(default_factory=list)
     peer_message_ids: list[str] = Field(default_factory=list)
     peer_reviews: list[dict[str, Any]] = Field(default_factory=list)
+    strategy_guidance: dict[str, Any] | None = None
 
 
 class ExpertTaskOutput(BaseModel):
@@ -189,15 +193,37 @@ class AgentTeamSupervisor:
         )
         return self._result_from_output(output, config)
 
-    def agent_options(self) -> list[dict[str, Any]]:
+    def agent_options(
+        self, *, runtime_states: dict[str, str] | None = None
+    ) -> list[dict[str, Any]]:
+        """Roster payload for the strategist, with live runtime state when a team is up.
+
+        ``runtime_status`` is IDLE/WORKING/SHUTDOWN while a TeamRuntime is
+        active for this run and NOT_STARTED otherwise; call_count/avg_tokens
+        expose each persona's historical load so the strategist can balance
+        assignments.
+        """
+
         public_base_url = os.getenv("A2A_PUBLIC_BASE_URL", "http://localhost:8000")
-        return [
-            {
-                **spec.capability_payload(public_base_url=public_base_url),
-                "available": True,
-            }
-            for spec in self._current_agent_specs()
-        ]
+        states = runtime_states or {}
+        load_by_persona = {
+            str(item["agent_id"]): (item.get("call_count", 0), item.get("avg_tokens", 0))
+            for item in AGENT_EXPERTS
+        }
+        options = []
+        for spec in self._current_agent_specs():
+            status = states.get(spec.name, "NOT_STARTED")
+            call_count, avg_tokens = load_by_persona.get(spec.persona_id, (0, 0))
+            options.append(
+                {
+                    **spec.capability_payload(public_base_url=public_base_url),
+                    "runtime_status": status,
+                    "call_count": call_count,
+                    "avg_tokens": avg_tokens,
+                    "available": status not in {"WORKING", "SHUTDOWN"},
+                }
+            )
+        return options
 
     def _current_agent_specs(self) -> list[AgentSpec]:
         """Load the current expert catalog for every plan or re-plan."""
@@ -362,6 +388,9 @@ class AgentTeamSupervisor:
             root_dir=self.runtime_root,
             event_callback=lambda event: self._record_runtime_event(state["run_id"], event),
         )
+        runtime.set_strategy_handler(
+            _build_strategy_handler(runtime=runtime, plan=plan, state=state)
+        )
         attempted = {
             _resolve_agent_name(name, specs)
             for name in [*plan.selected_agents, *state.get("excluded_agents", [])]
@@ -410,6 +439,33 @@ class AgentTeamSupervisor:
                     idle_assignments.append(assignment)
                 except Exception as exc:
                     failures.append((assignment, f"expert initialization failed: {exc}"))
+            if idle_assignments:
+                try:
+                    brief_requests = runtime.broadcast(
+                        {
+                            "kind": "mission_brief",
+                            "company_name": state["company_name"],
+                            "user_requirement": state["user_requirement"],
+                            "plan_summary": plan.summary,
+                            "focus_areas": plan.focus_areas,
+                            "modules": [
+                                {
+                                    "module_id": item.module_id,
+                                    "agent_name": item.agent_name,
+                                    "module": item.module,
+                                }
+                                for item in plan.assignments
+                            ],
+                        }
+                    )
+                    runtime.read_broadcast_responses(
+                        brief_requests, MISSION_BRIEF_TIMEOUT_SECONDS
+                    )
+                except Exception as exc:
+                    self._record_runtime_event(
+                        state["run_id"],
+                        {"type": "mission_brief_failed", "error": str(exc)},
+                    )
             for assignment in idle_assignments:
                 task_id = _runtime_task_id(state["run_id"], assignment.module_id)
                 try:
@@ -456,9 +512,10 @@ class AgentTeamSupervisor:
                     }
                     candidates = [
                         item
-                        for item in self.agent_options()
+                        for item in self.agent_options(runtime_states=runtime.states)
                         if item.get("agent_name") not in attempted
                         and item.get("agent_name") in live_specs
+                        and item.get("available", True)
                     ]
                     if not candidates:
                         break
@@ -747,6 +804,16 @@ class AgentTeamSupervisor:
                     raise ValueError(
                         "Expert task assignment does not match the strategist-bound module"
                     )
+            if (
+                peer_context.message_type == MessageType.PEER_REQUEST
+                and isinstance(payload, dict)
+                and payload.get("kind") == "mission_brief"
+            ):
+                return {
+                    "agent_name": spec.name,
+                    "module_id": assignment.module_id,
+                    "brief_acknowledged": True,
+                }
             skill = skill_for_agent(spec.name)
             selected_rules = (
                 rules_for_skill(skill, rules, set()) if skill else _rules_for_spec(spec, rules)
@@ -773,6 +840,7 @@ class AgentTeamSupervisor:
                 }
 
             llm_failure: str | None = None
+            strategy_guidance: dict[str, Any] | None = None
             if triggered:
                 try:
                     snippets = []
@@ -792,14 +860,40 @@ class AgentTeamSupervisor:
                             },
                         )
                     )
-                    asyncio.run(
+                    llm_items = asyncio.run(
                         analyze_findings_with_llm(
                             agent_name=spec.name,
                             agent_title=spec.title,
                             candidates=triggered,
                             evidence_snippets=snippets,
+                            system_prompt=render_expert_prompt(spec.capability_payload()),
                         )
                     )
+                    needs_more = [
+                        str(item.get("rule_id"))
+                        for item in llm_items
+                        if isinstance(item, dict) and item.get("needs_more_evidence")
+                    ]
+                    if needs_more:
+                        # Ask the orchestrator for guidance; failure is tolerated —
+                        # the module still returns its rule-based findings.
+                        try:
+                            strategy_guidance = _as_dict(
+                                peer_context.request(
+                                    STRATEGIC_AGENT,
+                                    {
+                                        "kind": "needs_more_evidence",
+                                        "agent_name": spec.name,
+                                        "module_id": assignment.module_id,
+                                        "rule_ids": needs_more[:20],
+                                    },
+                                    timeout=30.0,
+                                )
+                            )
+                        except Exception as exc:
+                            strategy_guidance = {
+                                "error": f"{type(exc).__name__}: {exc}"
+                            }
                     publish_llm_event(
                         _event(
                             "expert_llm_completed",
@@ -884,6 +978,7 @@ class AgentTeamSupervisor:
                     ),
                     "peer_message_ids": peer_message_ids,
                     "peer_reviews": peer_reviews,
+                    "strategy_guidance": strategy_guidance,
                 },
             }
 
@@ -1086,6 +1181,9 @@ def _select_peer_for_review(
     assignment: StrategyAssignment,
     evaluations: list[RuleEvaluation],
 ) -> str | None:
+    # Cross-module review targets fellow experts; the orchestrator's card is
+    # in available_peers for guidance requests but does not review findings.
+    peers = [item for item in peers if str(item.get("name") or "") != STRATEGIC_AGENT]
     if not peers:
         return None
     terms = {
@@ -1104,6 +1202,64 @@ def _select_peer_for_review(
 
     selected = max(peers, key=score)
     return str(selected.get("name") or "") or None
+
+
+def _as_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {"result": value}
+
+
+def _build_strategy_handler(
+    *,
+    runtime: TeamRuntime,
+    plan: StrategyDecision,
+    state: AgentState,
+):
+    """Deterministic orchestrator-side answerer for expert peer requests.
+
+    Runs inline while the supervisor thread drains the strategic mailbox, so
+    it must never call an LLM or block — it answers plan/module/peer-status
+    questions from data already in hand.
+    """
+
+    modules = {item.module_id: item.model_dump() for item in plan.assignments}
+    module_by_agent = {item.agent_name: item.model_dump() for item in plan.assignments}
+
+    def handler(payload: Any, sender: str) -> dict[str, Any]:
+        request = payload if isinstance(payload, dict) else {}
+        kind = str(request.get("kind") or "plan_status")
+        base = {
+            "kind": kind,
+            "responder": STRATEGIC_AGENT,
+            "company_name": state["company_name"],
+        }
+        if kind == "needs_more_evidence":
+            module = modules.get(str(request.get("module_id") or ""), {})
+            return {
+                **base,
+                "guidance": (
+                    "保留已命中的规则判断并如实标注 needs_more_evidence；"
+                    "在 reasoning_summary 中写明缺失的证据类型与建议核查的招股书章节，"
+                    "不要为了凑结论而降低证据标准。"
+                ),
+                "module_goal": module.get("goal", ""),
+                "expected_outputs": module.get("expected_outputs", []),
+            }
+        if kind == "peer_status":
+            return {**base, "team_states": runtime.states}
+        # Default: answer plan/module questions from the validated strategy plan.
+        return {
+            **base,
+            "plan_summary": plan.summary,
+            "focus_areas": plan.focus_areas,
+            "your_module": module_by_agent.get(sender, {}),
+            "modules": [
+                {"module_id": key, "agent_name": value["agent_name"], "module": value["module"]}
+                for key, value in modules.items()
+            ],
+            "team_states": runtime.states,
+        }
+
+    return handler
 
 
 def _seed_agent_specs() -> list[AgentSpec]:

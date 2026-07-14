@@ -25,11 +25,14 @@ async def analyze_findings_with_llm(
     agent_title: str,
     candidates: list[RuleEvaluation],
     evidence_snippets: list[str],
+    system_prompt: str | None = None,
 ) -> list[dict[str, Any]]:
     """LLM second-pass on rule-prefiltered candidates; mutates candidates in-place."""
     if not candidates:
         return []
-    system = EXPERT_SYSTEM_PROMPT.format(agent_title=agent_title, agent_name=agent_name)
+    system = system_prompt or EXPERT_SYSTEM_PROMPT.format(
+        agent_title=agent_title, agent_name=agent_name
+    )
     user_payload = json.dumps(
         {
             "candidates": [c.model_dump() for c in candidates],

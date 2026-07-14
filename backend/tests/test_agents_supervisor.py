@@ -350,3 +350,130 @@ def test_two_failed_replacements_pause_then_targeted_manual_recovery_preserves_s
         item["current_module"]: item["status"] for item in completed.team_state
     } == {"financial": "completed", "legal": "completed"}
     assert any(item.get("manual") is True for item in completed.replacement_history)
+
+
+def test_each_expert_receives_its_own_system_prompt(tmp_path, monkeypatch):
+    captured_prompts: dict[str, str] = {}
+
+    async def capture_llm(**kwargs):
+        captured_prompts[kwargs["agent_name"]] = kwargs["system_prompt"]
+        return []
+
+    monkeypatch.setattr(supervisor_module, "analyze_findings_with_llm", capture_llm)
+    repo = RiskRuleRepository(Path(__file__).parents[1] / "configs" / "risk_rules.yaml")
+    supervisor = AgentTeamSupervisor(
+        repository=repo,
+        agent_specs=_legacy_agent_specs(),
+        strategy_provider=_strategy,
+        runtime_root=tmp_path / "agent-runtime",
+    )
+
+    result = supervisor.run(
+        run_id="run_prompt_isolation",
+        company_name="测试 IPO",
+        user_requirement="分析招股书风险",
+        document_summary="关联交易与现金流风险",
+        text="公司存在关联交易、赎回安排，经营活动现金流持续为负。",
+        max_findings=10,
+    )
+
+    assert result.paused is False
+    assert set(captured_prompts) == {"financial_agent", "legal_agent"}
+    financial_prompt = captured_prompts["financial_agent"]
+    legal_prompt = captured_prompts["legal_agent"]
+    assert financial_prompt != legal_prompt
+    assert "Financial specialist" in financial_prompt
+    assert "Legal and compliance specialist" in legal_prompt
+    # The shared output contract survives persona differences.
+    assert "输出契约" in financial_prompt and "输出契约" in legal_prompt
+
+
+def test_mission_brief_broadcast_reaches_every_expert(tmp_path, monkeypatch):
+    async def no_llm(**_kwargs):
+        return []
+
+    monkeypatch.setattr(supervisor_module, "analyze_findings_with_llm", no_llm)
+    repo = RiskRuleRepository(Path(__file__).parents[1] / "configs" / "risk_rules.yaml")
+    supervisor = AgentTeamSupervisor(
+        repository=repo,
+        agent_specs=_legacy_agent_specs(),
+        strategy_provider=_strategy,
+        runtime_root=tmp_path / "agent-runtime",
+    )
+
+    result = supervisor.run(
+        run_id="run_mission_brief",
+        company_name="测试 IPO",
+        user_requirement="分析招股书风险",
+        document_summary="关联交易与现金流风险",
+        text="公司存在关联交易、赎回安排，经营活动现金流持续为负。",
+        max_findings=10,
+    )
+
+    assert result.paused is False
+    events_by_type: dict[str, list[dict]] = {}
+    for event in result.events:
+        events_by_type.setdefault(event["event_type"], []).append(event)
+    broadcast_sent = events_by_type.get("strategy_broadcast_sent")
+    assert broadcast_sent, "mission brief broadcast event missing"
+    assert set(broadcast_sent[0]["payload"]["recipients"]) == {
+        "financial_agent",
+        "legal_agent",
+    }
+    responded = {
+        event["payload"]["agent_name"]
+        for event in events_by_type.get("strategy_broadcast_response", [])
+    }
+    assert responded == {"financial_agent", "legal_agent"}
+
+
+def test_needs_more_evidence_requests_strategy_guidance(tmp_path, monkeypatch):
+    async def llm_flags_missing_evidence(**kwargs):
+        return [
+            {
+                "rule_id": candidate.rule_id,
+                "severity": "medium",
+                "confidence": 0.4,
+                "reasoning_summary": "证据不足，需补充。",
+                "needs_more_evidence": True,
+            }
+            for candidate in kwargs["candidates"]
+        ]
+
+    monkeypatch.setattr(
+        supervisor_module, "analyze_findings_with_llm", llm_flags_missing_evidence
+    )
+    repo = RiskRuleRepository(Path(__file__).parents[1] / "configs" / "risk_rules.yaml")
+    supervisor = AgentTeamSupervisor(
+        repository=repo,
+        agent_specs=_legacy_agent_specs(),
+        strategy_provider=_strategy,
+        runtime_root=tmp_path / "agent-runtime",
+    )
+
+    result = supervisor.run(
+        run_id="run_strategy_guidance",
+        company_name="测试 IPO",
+        user_requirement="分析招股书风险",
+        document_summary="关联交易与现金流风险",
+        text="公司存在关联交易、赎回安排，经营活动现金流持续为负。",
+        max_findings=10,
+    )
+
+    assert result.paused is False
+    guidance_by_agent = {
+        item["agent_name"]: item.get("strategy_guidance")
+        for item in result.module_results
+    }
+    for agent_name, guidance in guidance_by_agent.items():
+        assert isinstance(guidance, dict), f"{agent_name} missing strategy guidance"
+        assert guidance.get("kind") == "needs_more_evidence"
+        assert guidance.get("responder") == "strategic_agent"
+        assert "保留已命中的规则判断" in guidance.get("guidance", "")
+    guidance_requests = [
+        event
+        for event in result.events
+        if event["event_type"] == "peer_request_sent"
+        and event["payload"].get("recipient") == "strategic_agent"
+    ]
+    assert len(guidance_requests) >= 2

@@ -10,6 +10,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from riskagent.agents.llm_resilience import call_llm_with_resilience
+from riskagent.agents.prompts import render_orchestrator_prompt
 from riskagent.providers.llm import get_default_llm_client
 from riskagent.seed_data import AGENT_NAME_ALIASES
 
@@ -18,14 +19,16 @@ STRATEGY_SYSTEM_PROMPT = """\
 你是 ProspectAlpha 的战略层 Agent「沈北辰」。你必须依据用户目标、招股书摘要和本次实时专家名册，
 选择最小但完整的专家编队，并为每位专家分配一个互不重复的风险分析模块。不得使用名册之外的专家，
 不得创建固定顺序或虚构能力。专家启动后会通过 A2A 邮箱自主通信，因此这里只定义主模块，不定义专家间固定连线。
+名册中每位专家附有 runtime_status（实时状态）、call_count/avg_tokens（历史负载）：
+runtime_status 为 WORKING 或 SHUTDOWN、或 available=false 的专家不得选用；负载仅作参考，能力匹配优先。
 
 AVAILABLE_EXPERTS_JSON:
 {available_experts_json}
 
 只输出 JSON：
-{{"summary":str,"focus_areas":[str],"selected_agents":[str],"assignments":[
-{{"module_id":str,"agent_name":str,"module":str,"goal":str,"expected_outputs":[str]}}
-]}}
+{"summary":str,"focus_areas":[str],"selected_agents":[str],"assignments":[
+{"module_id":str,"agent_name":str,"module":str,"goal":str,"expected_outputs":[str]}
+]}
 """
 
 
@@ -488,10 +491,11 @@ def _strategy_messages(
     available_agents: list[dict[str, Any]],
 ) -> list[dict[str, str]]:
     roster = json.dumps(available_agents, ensure_ascii=False, sort_keys=True)
+    template = render_orchestrator_prompt("strategy_system", STRATEGY_SYSTEM_PROMPT)
     return [
         {
             "role": "system",
-            "content": STRATEGY_SYSTEM_PROMPT.format(available_experts_json=roster),
+            "content": template.replace("{available_experts_json}", roster),
         },
         {
             "role": "user",
@@ -502,6 +506,18 @@ def _strategy_messages(
             ),
         },
     ]
+
+
+REPORT_SYSTEM_PROMPT = (
+    "你是 ProspectAlpha 战略层 Agent「沈北辰」。整合所有专家模块结果，输出完整、连贯的 IPO 风险报告。"
+    "不得新增输入中不存在的 finding_id 或 evidence_id；每个专家模块都必须有对应 section，即使结论是未发现重大风险。"
+    "每个被引用的 finding 必须在同一 section 中附带至少一条归属于它的 evidence；没有可验证引用时不得创建跨模块风险。"
+    "只输出 JSON："
+    '{"title":str,"executive_summary":str,"overall_risk_level":str,'
+    '"sections":[{"module_id":str,"title":str,"analysis":str,"finding_ids":[str],"evidence_ids":[str]}],'
+    '"cross_module_risks":[{"title":str,"analysis":str,"finding_ids":[str],"evidence_ids":[str]}],'
+    '"recommendations":[str],"limitations":[str]}。'
+)
 
 
 def _report_messages(
@@ -526,16 +542,7 @@ def _report_messages(
     messages = [
         {
             "role": "system",
-            "content": (
-                "你是 ProspectAlpha 战略层 Agent「沈北辰」。整合所有专家模块结果，输出完整、连贯的 IPO 风险报告。"
-                "不得新增输入中不存在的 finding_id 或 evidence_id；每个专家模块都必须有对应 section，即使结论是未发现重大风险。"
-                "每个被引用的 finding 必须在同一 section 中附带至少一条归属于它的 evidence；没有可验证引用时不得创建跨模块风险。"
-                "只输出 JSON："
-                '{"title":str,"executive_summary":str,"overall_risk_level":str,'
-                '"sections":[{"module_id":str,"title":str,"analysis":str,"finding_ids":[str],"evidence_ids":[str]}],'
-                '"cross_module_risks":[{"title":str,"analysis":str,"finding_ids":[str],"evidence_ids":[str]}],'
-                '"recommendations":[str],"limitations":[str]}。'
-            ),
+            "content": render_orchestrator_prompt("report_system", REPORT_SYSTEM_PROMPT),
         },
         {"role": "user", "content": payload},
     ]
@@ -593,8 +600,8 @@ ARBITER_SYSTEM_PROMPT = """\
 - escalate_human：存在不可调和的分歧或严重事实冲突，需要人工接管。
 
 只输出 JSON：
-{{"decision":"proceed"|"request_supplement"|"escalate_human","reasoning":str,
-"required_supplements":[str],"flagged_finding_ids":[str],"approved_finding_ids":[str]}}
+{"decision":"proceed"|"request_supplement"|"escalate_human","reasoning":str,
+"required_supplements":[str],"flagged_finding_ids":[str],"approved_finding_ids":[str]}
 """
 
 
@@ -616,7 +623,10 @@ async def arbitrate_debate(
     )
     raw = await call_llm_with_resilience(
         messages=[
-            {"role": "system", "content": ARBITER_SYSTEM_PROMPT},
+            {
+                "role": "system",
+                "content": render_orchestrator_prompt("arbiter_system", ARBITER_SYSTEM_PROMPT),
+            },
             {"role": "user", "content": payload},
         ],
         temperature=0.1,
