@@ -67,11 +67,42 @@ def render_expert_prompt(spec_payload: dict[str, Any], *, skills_digest: str = "
     sections = [body]
     if skills_digest.strip():
         sections.append(f"【可用技能】\n{skills_digest.strip()}")
+    else:
+        skills_section = _skills_section(agent_name)
+        if skills_section:
+            sections.append(skills_section)
     sections.append(EXPERT_OUTPUT_CONTRACT.strip())
     return "\n\n".join(sections)
+
+
+def _skills_section(agent_name: str) -> str:
+    """Digest of all backend/skills docs + this role's mapped skill bodies.
+
+    Read fresh per render so skill edits reach every agent's next run; any
+    loader failure degrades to no skills section rather than breaking prompts.
+    """
+
+    try:
+        from riskagent.skill_docs import render_skills_section
+
+        return render_skills_section(agent_name)
+    except Exception:
+        return ""
+
+
+def orchestrator_skills_digest() -> str:
+    """One-line skill catalog appended to strategy/report/arbiter prompts."""
+
+    try:
+        from riskagent.skill_docs import skills_digest
+
+        digest = skills_digest()
+    except Exception:
+        return ""
+    return f"\n\n【技能目录】\n{digest}" if digest else ""
 
 
 def render_orchestrator_prompt(name: str, fallback: str) -> str:
     """Return a strategy/report/arbiter system prompt body, preferring the file."""
 
-    return load_agent_prompt(name) or fallback
+    return (load_agent_prompt(name) or fallback) + orchestrator_skills_digest()
