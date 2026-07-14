@@ -202,6 +202,18 @@ export type AnalysisRunPayload = {
   max_findings?: number;
 };
 
+export type AnalysisRunInputPatch = {
+  company_name?: string;
+  document_text?: string;
+  document_id?: string;
+  material_url?: string;
+  ipo_project_hint?: string;
+  risk_rule_set_id?: string;
+  analysis_depth?: "quick" | "standard" | "deep";
+  structured_data?: Record<string, string>;
+  max_findings?: number;
+};
+
 type BackendEvidence = {
   evidence_id: string;
   finding_id: string;
@@ -219,6 +231,24 @@ type BackendEvidence = {
 
 type BackendAgent = Agent;
 
+export type AnalysisAgentOption = {
+  agent_name: string;
+  title: string;
+  default?: boolean;
+  description?: string;
+  capabilities?: string[];
+  agent_card_url?: string;
+  persona_id?: string;
+  display_name?: string;
+  layer?: string;
+  function?: string;
+  avatar?: string;
+  accent?: string;
+  expertise?: string[];
+  role_zh?: string;
+  skill_id?: string;
+};
+
 export type AnalysisOptions = {
   risk_rule_sets: {
     rule_set_id: string;
@@ -227,14 +257,7 @@ export type AnalysisOptions = {
     rule_count: number;
     active: boolean;
   }[];
-  agents: {
-    agent_name: string;
-    title: string;
-    default?: boolean;
-    description?: string;
-    capabilities?: string[];
-    agent_card_url?: string;
-  }[];
+  agents: AnalysisAgentOption[];
   analysis_depths: {
     depth: "quick" | "standard" | "deep";
     label: string;
@@ -559,6 +582,13 @@ export async function createAnalysisDraft(payload: AnalysisRunPayload) {
   return apiRequest<AnalysisRun>("/analysis-runs", {
     method: "POST",
     body: JSON.stringify(payload),
+  });
+}
+
+export async function updateAnalysisInputs(runId: string, patch: AnalysisRunInputPatch) {
+  return apiRequest<AnalysisRun>(`/analysis-runs/${runId}/inputs`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
   });
 }
 

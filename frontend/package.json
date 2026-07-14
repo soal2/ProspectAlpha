@@ -9,7 +9,8 @@
     "build:dev": "vite build --mode development",
     "preview": "vite preview",
     "lint": "eslint .",
-    "format": "prettier --write ."
+    "format": "prettier --write .",
+    "postinstall": "rm -rf public/pdfjs && mkdir -p public/pdfjs && cp -r node_modules/pdfjs-dist/cmaps public/pdfjs/cmaps && cp -r node_modules/pdfjs-dist/standard_fonts public/pdfjs/standard_fonts && cp -r node_modules/pdfjs-dist/wasm public/pdfjs/wasm"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",
@@ -52,6 +53,7 @@
     "framer-motion": "^12.42.0",
     "input-otp": "^1.4.2",
     "lucide-react": "^0.575.0",
+    "pdfjs-dist": "^6.1.200",
     "react": "^19.2.0",
     "react-day-picker": "^9.14.0",
     "react-dom": "^19.2.0",

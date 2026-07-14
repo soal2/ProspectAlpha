@@ -109,6 +109,10 @@ class AgentSpecRow(Base):
     __tablename__ = "agent_specs"
 
     agent_name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    persona_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    display_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    layer: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    function: Mapped[str | None] = mapped_column(String(64), nullable=True)
     title: Mapped[str] = mapped_column(String(256))
     rule_types: Mapped[list[str]] = mapped_column(JSON, default=list)
     categories: Mapped[list[str]] = mapped_column(JSON, default=list)

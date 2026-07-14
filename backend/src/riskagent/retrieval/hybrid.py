@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Callable, Protocol
 
 from sqlalchemy import delete, select
 
@@ -12,14 +13,16 @@ from riskagent.database import SessionLocal
 from riskagent.models import RetrievalIndexRow
 from riskagent.providers.embedding import (
     EmbeddingClient,
-    HashingEmbeddingClient,
     cosine_similarity,
+    get_default_embedding_client,
     tokenize,
 )
 from riskagent.providers.vector_store import VectorPoint, VectorStore, get_default_vector_store
 
 
-DEFAULT_COLLECTION = "prospect_alpha_document_blocks"
+def _default_collection_name(client: EmbeddingClient) -> str:
+    slug = re.sub(r"[^a-z0-9_]+", "_", str(getattr(client, "provider_id", "default")).lower())
+    return f"prospect_alpha_blocks_{slug}"
 
 
 class IndexableBlock(Protocol):
@@ -60,23 +63,45 @@ class HybridSearchIndex:
         session_factory=SessionLocal,
         embedding_client: EmbeddingClient | None = None,
         vector_store: VectorStore | None = None,
-        collection_name: str = DEFAULT_COLLECTION,
+        collection_name: str | None = None,
     ) -> None:
         self.session_factory = session_factory
-        self.embedding_client = embedding_client or HashingEmbeddingClient()
-        probe_vector = self.embedding_client.embed("probe")
-        self.vector_store = vector_store or get_default_vector_store(len(probe_vector))
-        self.collection_name = collection_name
+        self.embedding_client = embedding_client or get_default_embedding_client()
+        self.vector_store = vector_store or get_default_vector_store(
+            self.embedding_client.dimensions
+        )
+        self.collection_name = collection_name or _default_collection_name(self.embedding_client)
 
-    def index_blocks(self, *, run_id: str, blocks: list[IndexableBlock]) -> int:
+    def index_blocks(
+        self,
+        *,
+        run_id: str,
+        blocks: list[IndexableBlock],
+        replace: bool = True,
+        on_progress: Callable[[int, int], None] | None = None,
+    ) -> int:
+        total = len(blocks)
+        embeddings: list[list[float]] = []
+        batch_size = max(1, int(getattr(self.embedding_client, "batch_size", 32)))
+        for start in range(0, total, batch_size):
+            chunk = blocks[start : start + batch_size]
+            embeddings.extend(self.embedding_client.embed_batch([b.text for b in chunk]))
+            if on_progress is not None:
+                on_progress(min(start + batch_size, total), total)
         vector_points: list[VectorPoint] = []
         with self.session_factory() as session:
-            session.execute(delete(RetrievalIndexRow).where(RetrievalIndexRow.run_id == run_id))
+            if replace:
+                session.execute(
+                    delete(RetrievalIndexRow).where(RetrievalIndexRow.run_id == run_id)
+                )
             rows = []
-            for block in blocks:
+            for block, embedding in zip(blocks, embeddings):
                 terms = tokenize(block.text)
-                embedding = self.embedding_client.embed(block.text)
                 point_id = _index_id(run_id, block.block_id)
+                if not replace:
+                    session.execute(
+                        delete(RetrievalIndexRow).where(RetrievalIndexRow.index_id == point_id)
+                    )
                 payload = {
                     "run_id": run_id,
                     "document_id": block.document_id,

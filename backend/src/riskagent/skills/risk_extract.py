@@ -22,6 +22,8 @@ class RuleEvaluation(BaseModel):
     evidence_snippets: list[str] = []
     source_type: str = "document_text"
     skill_id: str | None = None
+    severity: str = "medium"
+    confidence: float = 0.5
 
 
 def load_rules_for_agent(

@@ -29,10 +29,10 @@ function ReportPage() {
     <div className="grid h-[calc(100vh-3.5rem-14.5rem)] min-h-[640px] grid-cols-[280px_minmax(0,1fr)]">
       <aside className="overflow-y-auto border-r border-border bg-card/40 px-4 py-6">
         <div className="px-2">
-          <div className="font-serif text-base font-semibold">真实报告目录</div>
-          <p className="mt-1 text-[11px] text-muted-foreground">
+          <div className="font-serif text-base font-semibold">报告目录</div>
+          {/* <p className="mt-1 text-[11px] text-muted-foreground">
             来自后端 ReportDraft，不含硬编码演示结论
-          </p>
+          </p> */}
         </div>
         <nav className="mt-5 space-y-0.5">
           {sections.map((section, index) => (

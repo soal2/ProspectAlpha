@@ -31,14 +31,29 @@ def make_engine(database_url: str | None = None):
     return create_engine(url, connect_args=connect_args, future=True)
 
 
+def session_factory_from_url(database_url: str) -> sessionmaker:
+    """Create a sessionmaker bound to a fresh engine for the given URL.
+
+    Mirrors :func:`make_engine` settings (sqlite check_same_thread, future=True)
+    so callers can target an arbitrary database URL (e.g. in CLI tools and tests).
+    """
+    engine = make_engine(database_url)
+    return sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+
+
 engine = make_engine()
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 
 
-def init_db() -> None:
+def init_db(database_url: str | None = None) -> None:
+    """Create all tables for the default engine (``database_url`` is None) or an
+    explicit URL. Returns nothing."""
     from riskagent import models  # noqa: F401
 
-    Base.metadata.create_all(bind=engine)
+    if database_url is None:
+        Base.metadata.create_all(bind=engine)
+    else:
+        Base.metadata.create_all(bind=make_engine(database_url))
 
 
 def init_reference_data(session_factory: sessionmaker = SessionLocal) -> None:

@@ -11,19 +11,30 @@ from riskagent.agents.orchestrator import StrategyDecision
 from riskagent.agents.supervisor import AgentTeamSupervisor
 from riskagent.analysis_runs import AnalysisRunRepository
 from riskagent.risk_rules import RiskRuleRepository
-from riskagent.seed_data import AGENT_SPECS
 
 
 def _test_agent_specs() -> list[AgentSpec]:
     return [
         AgentSpec(
-            name=str(item["agent_name"]),
-            title=str(item["title"]),
-            rule_types=tuple(item.get("rule_types") or []),
-            categories=tuple(item.get("categories") or []),
-            default=bool(item.get("is_default")),
-        )
-        for item in AGENT_SPECS
+            name="financial_agent",
+            title="Financial specialist",
+            rule_types=("quantitative_financial",),
+        ),
+        AgentSpec(
+            name="legal_agent",
+            title="Legal and compliance specialist",
+            categories=("关联交易", "对赌/赎回条款", "政策监管", "诉讼与纠纷", "担保与质押", "税务风险"),
+        ),
+        AgentSpec(
+            name="market_agent",
+            title="Market and industry specialist",
+            categories=("行业竞争",),
+        ),
+        AgentSpec(
+            name="business_agent",
+            title="Business and disclosure specialist",
+            default=True,
+        ),
     ]
 
 

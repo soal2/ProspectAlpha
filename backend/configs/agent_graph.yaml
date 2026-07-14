@@ -27,6 +27,7 @@ langgraph:
     - await_expert_idle
     - dispatch_assignments
     - collect_module_results
+    - expert_debate
     - verify_evidence
     - synthesize_report
     - shutdown_team
@@ -39,6 +40,41 @@ langgraph:
       - postgres
     sqlite_path: ./data/agent_runtime/langgraph_checkpoints.sqlite
     postgres_url_env: DATABASE_URL
+
+expert_debate:
+  # Sits between risk_identification and cross_validation in PIPELINE_STAGES.
+  # Two fixed rounds of peer critique + finding revision, then L3 red-team
+  # arbiter (周慎言 / zhou_shenyan_redteam_agent) issues an ArbiterRuling that
+  # decides whether the run may proceed.
+  position: between_risk_identification_and_cross_validation
+  rounds:
+    - round: 1
+      kind: critique
+      shape: each_expert_critiques_each_peer_findings
+      output: PeerCritique
+    - round: 2
+      kind: revision
+      shape: each_expert_revises_own_findings_based_on_critiques_received
+      output: FindingRevision
+  arbiter:
+    agent_name: zhou_shenyan_redteam_agent
+    layer: L3
+    role_zh: 红队 / 质量总检
+    output: ArbiterRuling
+    decisions:
+      - proceed               # 进入 cross_validation
+      - request_supplement    # 要求补充证据（最多 1 次循环后强制 proceed）
+      - escalate_human        # 标记 debate_needs_manual，转入人工复核
+  per_round_peer_budget: fresh_task_per_round   # 避免 MAX_PEER_ROUNDS_PER_TASK=3 触顶
+  sse_events:
+    - debate_round_started
+    - peer_critique_sent
+    - debate_round_completed
+    - expert_revised
+    - evidence_supplement_requested
+    - debate_arbiter_ruling
+    - debate_completed
+  persistence: analysis_runs.debate_history (JSON)
 
 a2a:
   protocol_version: "1.0"

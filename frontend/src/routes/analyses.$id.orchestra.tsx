@@ -379,6 +379,7 @@ function ExpertSelectionPanel({
   onToggle: (agentName: string) => void;
   onResume: () => void;
 }) {
+  const layerGroups = useMemo(() => groupAgentsByLayer(options.agents), [options.agents]);
   return (
     <section className="border-b border-amber-500/30 bg-amber-500/8 px-6 py-4">
       <div className="flex flex-wrap items-start justify-between gap-4">
@@ -412,53 +413,90 @@ function ExpertSelectionPanel({
           恢复动态编排
         </button>
       </div>
-      <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-        {options.agents.map((agent) => {
-          const selected = selectedAgents.includes(agent.agent_name);
-          return (
-            <div
-              key={agent.agent_name}
-              className={`rounded-lg border bg-card px-3 py-2.5 transition ${
-                selected ? "border-primary ring-1 ring-primary/30" : "border-border"
-              }`}
-            >
-              <label className="flex cursor-pointer items-start gap-2">
-                <input
-                  type="checkbox"
-                  checked={selected}
-                  disabled={
-                    !selected &&
-                    requiredCount !== undefined &&
-                    selectedAgents.length >= requiredCount
-                  }
-                  onChange={() => onToggle(agent.agent_name)}
-                  className="mt-0.5"
-                />
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate text-xs font-medium">{agent.title}</span>
-                  <span className="mt-0.5 line-clamp-2 block text-[10px] leading-relaxed text-muted-foreground">
-                    {agent.description || agent.capabilities?.join("、") || "可参与招股书风险分析"}
-                  </span>
-                </span>
-              </label>
-              <div className="mt-2 flex items-center justify-between gap-2">
-                <span className="truncate text-[9.5px] text-muted-foreground">
-                  {agent.capabilities?.slice(0, 2).join(" · ") || "通用分析"}
-                </span>
-                {agent.agent_card_url ? (
-                  <a
-                    href={agent.agent_card_url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="inline-flex shrink-0 items-center gap-0.5 text-[9.5px] text-primary hover:underline"
-                  >
-                    Agent Card <ExternalLink className="size-2.5" />
-                  </a>
-                ) : null}
-              </div>
+      <div className="mt-3 max-h-[280px] space-y-3 overflow-y-auto pr-1">
+        {layerGroups.map((group) => (
+          <div key={group.layer} className="rounded-lg border border-border/60 bg-card/30 p-2.5">
+            <div className="mb-2 flex items-center gap-1.5 text-[10.5px] font-semibold uppercase tracking-wide text-muted-foreground">
+              <span
+                className="rounded px-1.5 py-0.5 text-[9.5px]"
+                style={{
+                  backgroundColor: `${layerAccent(group.layer)}1a`,
+                  color: layerAccent(group.layer),
+                }}
+              >
+                {group.layer}
+              </span>
+              <span>{layerLabel(group.layer)}</span>
+              <span className="text-muted-foreground/60 tabular">· {group.agents.length} 位</span>
             </div>
-          );
-        })}
+            <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+              {group.agents.map((agent) => {
+                const selected = selectedAgents.includes(agent.agent_name);
+                const accent = agent.accent || "#3b6fa0";
+                return (
+                  <div
+                    key={agent.agent_name}
+                    className={`rounded-lg border bg-card px-3 py-2.5 transition ${
+                      selected ? "border-primary ring-1 ring-primary/30" : "border-border"
+                    }`}
+                  >
+                    <label className="flex cursor-pointer items-start gap-2">
+                      <input
+                        type="checkbox"
+                        checked={selected}
+                        disabled={
+                          !selected &&
+                          requiredCount !== undefined &&
+                          selectedAgents.length >= requiredCount
+                        }
+                        onChange={() => onToggle(agent.agent_name)}
+                        className="mt-0.5"
+                      />
+                      <span
+                        className="flex size-6 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold text-white"
+                        style={{ backgroundColor: accent }}
+                      >
+                        {agent.avatar ?? agent.display_name?.slice(0, 1) ?? agent.title.slice(0, 1)}
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-xs font-medium">
+                          {agent.display_name ?? agent.title}
+                        </span>
+                        {agent.role_zh ? (
+                          <span className="mt-0.5 block truncate text-[10px] text-muted-foreground">
+                            {agent.role_zh}
+                          </span>
+                        ) : null}
+                        <span className="mt-0.5 line-clamp-2 block text-[10px] leading-relaxed text-muted-foreground">
+                          {agent.description ||
+                            agent.capabilities?.join("、") ||
+                            "可参与招股书风险分析"}
+                        </span>
+                      </span>
+                    </label>
+                    <div className="mt-2 flex items-center justify-between gap-2">
+                      <span className="truncate text-[9.5px] text-muted-foreground">
+                        {agent.expertise?.slice(0, 2).join(" · ") ||
+                          agent.capabilities?.slice(0, 2).join(" · ") ||
+                          "通用分析"}
+                      </span>
+                      {agent.agent_card_url ? (
+                        <a
+                          href={agent.agent_card_url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="inline-flex shrink-0 items-center gap-0.5 text-[9.5px] text-primary hover:underline"
+                        >
+                          Agent Card <ExternalLink className="size-2.5" />
+                        </a>
+                      ) : null}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ))}
       </div>
       {error ? (
         <div className="mt-2 inline-flex items-center gap-1 text-xs text-destructive">
@@ -467,6 +505,39 @@ function ExpertSelectionPanel({
       ) : null}
     </section>
   );
+}
+
+function groupAgentsByLayer(
+  agents: AnalysisOptions["agents"],
+): { layer: string; agents: AnalysisOptions["agents"] }[] {
+  const groups = new Map<string, AnalysisOptions["agents"]>();
+  for (const agent of agents) {
+    const layer = (agent.layer || "L1").toUpperCase();
+    const bucket = groups.get(layer) ?? [];
+    bucket.push(agent);
+    groups.set(layer, bucket);
+  }
+  const order = ["L3", "L2", "L1"];
+  return [...groups.entries()]
+    .sort((a, b) => order.indexOf(a[0]) - order.indexOf(b[0]))
+    .map(([layer, list]) => ({
+      layer,
+      agents: list.sort((a, b) =>
+        String(a.persona_id ?? a.agent_name).localeCompare(String(b.persona_id ?? b.agent_name)),
+      ),
+    }));
+}
+
+function layerLabel(layer: string): string {
+  if (layer === "L3") return "战略层 · 总监 / 首席 / 红队";
+  if (layer === "L2") return "高级专家 · 策略 / 定价 / 路演";
+  return "执行专家 · 财务 / 法务 / 市场 / 业务 / 技术 / 检索";
+}
+
+function layerAccent(layer: string): string {
+  if (layer === "L3") return "#0b243d";
+  if (layer === "L2") return "#1e3a5f";
+  return "#3b6fa0";
 }
 
 function strategyPlanForRun(run: AnalysisRun): StrategyPlan | null {
@@ -551,6 +622,10 @@ function kindLabel(eventType: string): string {
     return "生命周期";
   if (type.includes("replacement") || type.includes("replan")) return "替补";
   if (type.includes("interrupt") || type.includes("expert_selection")) return "接管";
+  if (type.includes("arbiter") || type.includes("arbitration")) return "仲裁";
+  if (type.includes("critique")) return "质证";
+  if (type.includes("revised") || type.includes("revision")) return "修订";
+  if (type.includes("debate")) return "辩论";
   if (type.includes("verification")) return "裁定";
   if (type.includes("report") || type.includes("synth")) return "整合";
   if (type.includes("strategy") || type.includes("orchestra")) return "战略";
@@ -564,7 +639,10 @@ function kindClass(eventType: string): string {
   const label = kindLabel(eventType);
   if (label === "失败") return "bg-destructive/10 text-destructive";
   if (label === "接管" || label === "替补") return "bg-amber-500/15 text-amber-700";
-  if (label === "裁定") return "bg-amber-500/15 text-amber-700";
+  if (label === "裁定" || label === "仲裁") return "bg-[color:var(--risk-high)]/15 text-[color:var(--risk-high)]";
+  if (label === "质证") return "bg-[color:var(--gold)]/20 text-[color:var(--navy)]";
+  if (label === "修订") return "bg-sky-500/15 text-sky-700";
+  if (label === "辩论") return "bg-[color:var(--gold)]/15 text-[color:var(--navy)]";
   if (label === "完成" || label === "整合") return "bg-emerald-500/15 text-emerald-700";
   if (label === "A2A") return "bg-sky-500/12 text-sky-700";
   if (label === "生命周期") return "bg-slate-500/12 text-slate-700";
@@ -579,6 +657,7 @@ function runStatusLabel(status: string) {
     expert_orchestration: "动态专家编排",
     evidence_extraction: "证据抽取",
     risk_identification: "风险识别",
+    expert_debate: "专家辩论",
     cross_validation: "证据校验",
     report_generation: "战略整合",
     quality_review: "质检审裁",

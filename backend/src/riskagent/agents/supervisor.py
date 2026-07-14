@@ -30,8 +30,9 @@ from riskagent.agents.orchestrator import (
     validate_replacement_decision,
     validate_strategy_decision,
 )
+from riskagent.agents.expert_llm import analyze_findings_with_llm
 from riskagent.risk_rules import RiskRule, RiskRuleRepository
-from riskagent.seed_data import AGENT_SPECS
+from riskagent.seed_data import AGENT_EXPERTS, AGENT_NAME_ALIASES, AGENT_SPECS
 from riskagent.skills.risk_extract import RuleEvaluation, evaluate_text_against_rules
 from riskagent.skills.risk_skill_registry import (
     rules_for_skill,
@@ -361,37 +362,44 @@ class AgentTeamSupervisor:
             root_dir=self.runtime_root,
             event_callback=lambda event: self._record_runtime_event(state["run_id"], event),
         )
-        attempted = set(plan.selected_agents) | set(state.get("excluded_agents", []))
+        attempted = {
+            _resolve_agent_name(name, specs)
+            for name in [*plan.selected_agents, *state.get("excluded_agents", [])]
+            if name
+        }
         assignment_by_task: dict[str, StrategyAssignment] = {}
         result_payloads: dict[str, dict[str, Any]] = {}
         failures: list[tuple[StrategyAssignment, str]] = []
         try:
             started_assignments: list[StrategyAssignment] = []
             for assignment in plan.assignments:
+                resolved_agent_name = _resolve_agent_name(assignment.agent_name, specs)
+                resolved_assignment = assignment.model_copy(update={"agent_name": resolved_agent_name})
                 try:
-                    spec = specs[assignment.agent_name]
+                    spec = specs[resolved_agent_name]
                     capability = spec.capability_payload()
                     handler = _validated_expert_handler(
                         self._expert_handler(
+                            run_id=state["run_id"],
                             spec=spec,
-                            assignment=assignment,
+                            assignment=resolved_assignment,
                             text=state["text"],
                             rules=all_rules,
                             rule_snapshot=state["rule_snapshot"],
                         ),
-                        assignment,
+                        resolved_assignment,
                     )
                     runtime.start_expert(
-                        assignment.agent_name,
+                        resolved_agent_name,
                         handler,
                         role=str(capability.get("role") or spec.title),
                         capabilities=capability.get("capabilities", []),
                         input_modes=capability.get("input_modes", []),
                         output_modes=capability.get("output_modes", []),
                     )
-                    started_assignments.append(assignment)
+                    started_assignments.append(resolved_assignment)
                 except Exception as exc:
-                    failures.append((assignment, f"expert startup failed: {exc}"))
+                    failures.append((resolved_assignment, f"expert startup failed: {exc}"))
             idle_assignments: list[StrategyAssignment] = []
             for assignment in started_assignments:
                 try:
@@ -483,6 +491,7 @@ class AgentTeamSupervisor:
                         )
                         replacement_handler = _validated_expert_handler(
                             self._expert_handler(
+                                run_id=state["run_id"],
                                 spec=replacement_spec,
                                 assignment=replacement_assignment,
                                 text=state["text"],
@@ -710,12 +719,23 @@ class AgentTeamSupervisor:
     def _expert_handler(
         self,
         *,
+        run_id: str | None = None,
         spec: AgentSpec,
         assignment: StrategyAssignment,
         text: str,
         rules: list[RiskRule],
         rule_snapshot: dict[str, Any],
     ):
+        def publish_llm_event(event: dict[str, Any]) -> None:
+            if not run_id:
+                return
+            try:
+                from riskagent.runtime_events import get_event_broker
+
+                get_event_broker().publish_sync(run_id, event)
+            except Exception:
+                pass
+
         def handle(payload: dict[str, Any], peer_context: Any) -> dict[str, Any]:
             if peer_context.message_type == MessageType.TASK:
                 if not isinstance(payload, dict) or "assignment" not in payload:
@@ -737,10 +757,10 @@ class AgentTeamSupervisor:
                 repository=self.repository,
                 rule_set_snapshot=rule_snapshot,
             )
+            triggered = [item for item in evaluations if item.evaluation_result == "triggered"]
             for item in evaluations:
                 item.source_type = spec.name
                 item.skill_id = skill.skill_id if skill else None
-            triggered = [item for item in evaluations if item.evaluation_result == "triggered"]
             if peer_context.message_type == MessageType.PEER_REQUEST:
                 return {
                     "reviewer_agent": spec.name,
@@ -751,6 +771,65 @@ class AgentTeamSupervisor:
                         f"在自身能力域发现 {len(triggered)} 条可能相关规则命中。"
                     ),
                 }
+
+            llm_failure: str | None = None
+            if triggered:
+                try:
+                    snippets = []
+                    for item in triggered:
+                        if item.evidence_snippets:
+                            snippets.append(item.evidence_snippets[0])
+                    publish_llm_event(
+                        _event(
+                            "expert_llm_started",
+                            spec.name,
+                            f"{spec.title} LLM 二判开始",
+                            f"准备对 {len(triggered)} 条候选 finding 进行 LLM 二判。",
+                            payload={
+                                "agent_name": spec.name,
+                                "module_id": assignment.module_id,
+                                "candidate_count": len(triggered),
+                            },
+                        )
+                    )
+                    asyncio.run(
+                        analyze_findings_with_llm(
+                            agent_name=spec.name,
+                            agent_title=spec.title,
+                            candidates=triggered,
+                            evidence_snippets=snippets,
+                        )
+                    )
+                    publish_llm_event(
+                        _event(
+                            "expert_llm_completed",
+                            spec.name,
+                            f"{spec.title} LLM 二判完成",
+                            f"完成 {len(triggered)} 条候选 finding 的 LLM 二判。",
+                            payload={
+                                "agent_name": spec.name,
+                                "module_id": assignment.module_id,
+                                "candidate_count": len(triggered),
+                            },
+                        )
+                    )
+                except Exception as exc:
+                    llm_failure = f"{type(exc).__name__}: {exc}"
+                    publish_llm_event(
+                        _event(
+                            "expert_llm_failed",
+                            spec.name,
+                            f"{spec.title} LLM 二判失败",
+                            llm_failure,
+                            stage_status="failed",
+                            payload={
+                                "agent_name": spec.name,
+                                "module_id": assignment.module_id,
+                                "candidate_count": len(triggered),
+                                "error": llm_failure,
+                            },
+                        )
+                    )
 
             peer_message_ids: list[str] = []
             peer_reviews: list[dict[str, Any]] = []
@@ -798,13 +877,10 @@ class AgentTeamSupervisor:
                     "rule_ids": [item.rule_id for item in triggered],
                     "skill_id": skill.skill_id if skill else None,
                     "rules_read": len(selected_rules),
-                    "limitations": (
-                        ([f"A2A 对等复核未完成：{peer_review_error}"] if peer_review_error else [])
-                        + (
-                            []
-                            if triggered
-                            else ["本轮未命中高置信规则，仍建议人工复核相关招股书章节。"]
-                        )
+                    "limitations": _build_module_limitations(
+                        peer_review_error,
+                        llm_failure,
+                        triggered,
                     ),
                     "peer_message_ids": peer_message_ids,
                     "peer_reviews": peer_reviews,
@@ -890,6 +966,15 @@ def _resolve(value: Any) -> Any:
     return asyncio.run(value) if inspect.isawaitable(value) else value
 
 
+def _resolve_agent_name(agent_name: str, specs: dict[str, AgentSpec]) -> str:
+    if agent_name in specs:
+        return agent_name
+    canonical = AGENT_NAME_ALIASES.get(agent_name)
+    if canonical and canonical in specs:
+        return canonical
+    return agent_name
+
+
 def _runtime_task_id(run_id: str, module_id: str, *, attempt: int = 0) -> str:
     """Return an opaque A2A Task.id that remains unique across analysis runs."""
 
@@ -939,6 +1024,21 @@ def _rules_for_spec(spec: AgentSpec, all_rules: list[RiskRule]) -> list[RiskRule
         if spec.categories and rule.category in spec.categories:
             selected.append(rule)
     return selected or (all_rules if spec.default else [])
+
+
+def _build_module_limitations(
+    peer_review_error: str | None,
+    llm_failure: str | None,
+    triggered: list,
+) -> list[str]:
+    out: list[str] = []
+    if peer_review_error:
+        out.append(f"A2A 对等复核未完成：{peer_review_error}")
+    if llm_failure:
+        out.append(f"LLM 二判失败，已降级保留规则匹配结果：{llm_failure}")
+    if not triggered:
+        out.append("本轮未命中高置信规则，仍建议人工复核相关招股书章节。")
+    return out
 
 
 def _validate_expert_output(
@@ -1014,6 +1114,28 @@ def _seed_agent_specs() -> list[AgentSpec]:
             rule_types=tuple(item.get("rule_types") or []),
             categories=tuple(item.get("categories") or []),
             default=bool(item.get("is_default")),
+            persona_id=str(item.get("persona_id") or ""),
+            display_name=str(item.get("display_name") or ""),
+            layer=str(item.get("layer") or ""),
+            function=str(item.get("function") or ""),
+            avatar=next(
+                (expert["avatar"] for expert in AGENT_EXPERTS if expert["agent_id"] == item.get("persona_id")),
+                "",
+            ),
+            accent=next(
+                (expert["accent"] for expert in AGENT_EXPERTS if expert["agent_id"] == item.get("persona_id")),
+                "",
+            ),
+            expertise=tuple(
+                next(
+                    (expert["expertise"] for expert in AGENT_EXPERTS if expert["agent_id"] == item.get("persona_id")),
+                    [],
+                )
+            ),
+            role_zh=next(
+                (expert["role"] for expert in AGENT_EXPERTS if expert["agent_id"] == item.get("persona_id")),
+                "",
+            ),
         )
         for item in AGENT_SPECS
     ]

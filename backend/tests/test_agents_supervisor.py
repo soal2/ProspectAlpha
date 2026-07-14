@@ -2,9 +2,16 @@ from pathlib import Path
 
 import riskagent.agents.supervisor as supervisor_module
 from riskagent.agent_experts import AgentSpec
-from riskagent.agents.orchestrator import ReplacementDecision, StrategyDecision
+from riskagent.agent_experts import AgentSpecRepository
+from riskagent.agents.orchestrator import (
+    ReplacementDecision,
+    StrategyDecision,
+    manual_strategy_decision,
+)
 from riskagent.agents.supervisor import AgentTeamSupervisor
+from riskagent.database import Base, make_engine
 from riskagent.risk_rules import RiskRuleRepository
+from sqlalchemy.orm import sessionmaker
 
 
 def _strategy(*, selected=("financial_agent", "legal_agent"), **_kwargs):
@@ -30,10 +37,27 @@ def _strategy(*, selected=("financial_agent", "legal_agent"), **_kwargs):
     )
 
 
+def _legacy_agent_specs() -> list[AgentSpec]:
+    """4 legacy generic specs so alias resolution does not rewrite agent names.
+
+    Tests that exercise the legacy ``financial_agent``/``legal_agent`` aliases
+    pass this roster explicitly to avoid coupling to whatever the dev DB
+    currently holds (which now contains 12 persona specs after Task 1).
+    """
+
+    return [
+        AgentSpec(name="financial_agent", title="Financial specialist"),
+        AgentSpec(name="legal_agent", title="Legal and compliance specialist"),
+        AgentSpec(name="market_agent", title="Market and industry specialist"),
+        AgentSpec(name="business_agent", title="Business and disclosure specialist"),
+    ]
+
+
 def test_agent_supervisor_runs_only_strategy_selected_threads(tmp_path):
     repo = RiskRuleRepository(Path(__file__).parents[1] / "configs" / "risk_rules.yaml")
     supervisor = AgentTeamSupervisor(
         repository=repo,
+        agent_specs=_legacy_agent_specs(),
         strategy_provider=_strategy,
         runtime_root=tmp_path / "agent-runtime",
     )
@@ -67,6 +91,34 @@ def test_agent_supervisor_runs_only_strategy_selected_threads(tmp_path):
     ]
     assert len(assigned_task_ids) == len(set(assigned_task_ids)) == 2
     assert all(task_id.startswith("run_dynamic_test::") for task_id in assigned_task_ids)
+
+
+def test_manual_strategy_decision_accepts_persona_agent_names(tmp_path):
+    repo = RiskRuleRepository(Path(__file__).parents[1] / "configs" / "risk_rules.yaml")
+    engine = make_engine(f"sqlite:///{tmp_path / 'agents.db'}")
+    Base.metadata.create_all(bind=engine)
+    session_factory = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+    supervisor = AgentTeamSupervisor(
+        repository=repo,
+        agent_spec_repository=AgentSpecRepository(session_factory=session_factory),
+        runtime_root=tmp_path / "agent-runtime",
+    )
+
+    result = manual_strategy_decision(
+        agent_names=["qin_bingwen_financial_agent", "wen_shouzheng_legal_agent"],
+        available_agents=supervisor.agent_options(),
+    )
+
+    assert result.selected_agents == [
+        "qin_bingwen_financial_agent",
+        "wen_shouzheng_legal_agent",
+    ]
+    assert [assignment.agent_name for assignment in result.assignments] == [
+        "qin_bingwen_financial_agent",
+        "wen_shouzheng_legal_agent",
+    ]
+    assert result.assignments[0].module_id == "module_qin_bingwen_financial"
+    assert result.assignments[1].module_id == "module_wen_shouzheng_legal"
 
 
 def test_supervisor_executes_new_catalog_expert_without_code_chain_changes(tmp_path):
@@ -116,6 +168,7 @@ def test_expert_startup_failure_uses_strategic_replacement(tmp_path, monkeypatch
 
     supervisor = AgentTeamSupervisor(
         repository=repo,
+        agent_specs=_legacy_agent_specs(),
         strategy_provider=_strategy,
         replacement_provider=choose_replacement,
         runtime_root=tmp_path / "agent-runtime",
@@ -166,6 +219,7 @@ def test_invalid_expert_artifact_fails_before_task_completion_and_is_replaced(tm
 
     supervisor = AgentTeamSupervisor(
         repository=repo,
+        agent_specs=_legacy_agent_specs(),
         strategy_provider=lambda **kwargs: _strategy(
             selected=("legal_agent",), **kwargs
         ),
@@ -205,6 +259,7 @@ def test_invalid_strategy_interrupts_then_manual_selection_resumes(tmp_path):
 
     supervisor = AgentTeamSupervisor(
         repository=repo,
+        agent_specs=_legacy_agent_specs(),
         strategy_provider=invalid_strategy,
         runtime_root=tmp_path / "agent-runtime",
     )
@@ -245,6 +300,7 @@ def test_two_failed_replacements_pause_then_targeted_manual_recovery_preserves_s
 
     supervisor = AgentTeamSupervisor(
         repository=repo,
+        agent_specs=_legacy_agent_specs(),
         strategy_provider=_strategy,
         replacement_provider=choose_replacement,
         runtime_root=tmp_path / "agent-runtime",

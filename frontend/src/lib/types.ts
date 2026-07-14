@@ -85,14 +85,30 @@ export interface TraceStage {
 
 export interface TraceSeedItem {
   who: string;
-  kind: "execute" | "discover" | "challenge" | "verdict" | "assign";
+  kind:
+    | "execute"
+    | "discover"
+    | "challenge"
+    | "verdict"
+    | "assign"
+    | "critique"
+    | "revision"
+    | "arbitration";
   text: string;
   t: string;
 }
 
 export interface TraceFlowItem {
   who: string;
-  kind: "execute" | "discover" | "challenge" | "verdict" | "assign";
+  kind:
+    | "execute"
+    | "discover"
+    | "challenge"
+    | "verdict"
+    | "assign"
+    | "critique"
+    | "revision"
+    | "arbitration";
   text: string;
   t: string;
 }

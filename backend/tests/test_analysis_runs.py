@@ -3,6 +3,8 @@ import time
 
 from fastapi.testclient import TestClient
 
+from riskagent.agents import debate as debate_module
+from riskagent.agents.exceptions import DebateLLMError
 from riskagent.analysis_runs import AnalysisRunCreate
 from riskagent.api.main import create_app
 from riskagent.risk_rules import RiskRuleRepository
@@ -87,9 +89,21 @@ def test_analysis_options_returns_minimal_real_choices(monkeypatch):
     assert set(payload) == {"risk_rule_sets", "agents", "analysis_depths"}
     assert payload["risk_rule_sets"][0]["rule_set_id"] == "hk_ipo_prospectus_risk_framework_v1"
     assert "rules" not in payload["risk_rule_sets"][0]
-    assert {agent["agent_name"] for agent in payload["agents"]}.issuperset(
-        {"financial_agent", "legal_agent", "business_agent", "market_agent"}
-    )
+    assert len(payload["agents"]) == 12
+    assert {agent["agent_name"] for agent in payload["agents"]} == {
+        "shen_beichen_orchestrator_agent",
+        "xiao_zeming_quality_agent",
+        "zhou_shenyan_redteam_agent",
+        "su_zhiji_business_agent",
+        "jiang_hengzhi_market_agent",
+        "gu_lingsheng_market_agent",
+        "qin_bingwen_financial_agent",
+        "lu_guanlan_market_agent",
+        "wen_shouzheng_legal_agent",
+        "ye_zhiyuan_business_agent",
+        "cheng_zheng_evidence_agent",
+        "bai_shice_market_agent",
+    }
     assert {item["depth"] for item in payload["analysis_depths"]} == {"quick", "standard", "deep"}
 
 
@@ -223,3 +237,52 @@ def test_invalid_strategy_pauses_and_api_selection_resumes(
         for item in resumed.json()["events"]
     ]
     assert len(signatures) == len(set(signatures))
+
+
+def test_run_debate_stage_emits_structured_failure_event_on_DebateLLMError(
+    tmp_path, monkeypatch, analysis_repo_factory
+):
+    """When debate phase fails entirely, the pipeline degrades gracefully AND emits
+    a structured debate_round_failed event carrying phase/failed/total/detail fields.
+    """
+
+    def raise_debate_llm_error(**_kwargs):
+        raise DebateLLMError(
+            phase="arbitration",
+            failed=1,
+            total=1,
+            detail="LLMTransientError: simulated arbiter timeout",
+        )
+
+    monkeypatch.setattr(debate_module, "run_debate_phase_sync", raise_debate_llm_error)
+
+    rule_repo = RiskRuleRepository(
+        Path(__file__).parents[1] / "configs" / "risk_rules.yaml"
+    )
+    repo = analysis_repo_factory(
+        rule_repository=rule_repo,
+        path=tmp_path / "runs.yaml",
+    )
+
+    run = repo.create_and_run(
+        AnalysisRunCreate(
+            company_name="Debate 失败 IPO",
+            document_text="公司存在关联交易、赎回安排，经营活动现金流持续为负。",
+        )
+    )
+
+    # Pipeline should still complete via degradation.
+    assert run.status == "completed"
+
+    debate_failures = [
+        event
+        for event in run.events
+        if event.get("event_type") == "debate_round_failed"
+    ]
+    assert len(debate_failures) == 1
+    payload = debate_failures[0].get("payload") or {}
+    assert payload["phase"] == "arbitration"
+    assert payload["failed"] == 1
+    assert payload["total"] == 1
+    assert "simulated arbiter timeout" in payload["detail"]
+    assert "phase" in payload and "failed" in payload and "total" in payload

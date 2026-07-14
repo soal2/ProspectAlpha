@@ -397,3 +397,78 @@ def test_peer_requests_are_limited_to_three_rounds_per_task(tmp_path):
     assert result["result"]["responses"] == [0.0, 1.0, 2.0]
     assert "at most 3 peer requests" in result["result"]["limit_error"]
     runtime.shutdown_all(timeout=3.0)
+
+
+def test_peer_context_sustains_multi_round_debate_via_fresh_tasks(tmp_path):
+    """Each debate round dispatches a fresh TASK so the per-task peer-round budget
+    never trips even though the overall debate exceeds MAX_PEER_ROUNDS_PER_TASK.
+
+    Simulates a 3-expert, 2-round debate: round 1 has each expert issue 2 peer
+    critiques (one per peer), round 2 has each expert issue 2 revision requests.
+    Each round is a separate ``assign_task`` call, so ``PeerContext`` budgets
+    reset and the run completes cleanly.
+    """
+
+    runtime = TeamRuntime("run-debate-fresh-tasks", root_dir=tmp_path)
+    experts = ["financial_agent", "legal_agent", "market_agent"]
+    critique_log: list[tuple[str, str]] = []
+    revision_log: list[tuple[str, str]] = []
+
+    def make_handler(self_name: str):
+        def handler(payload, peer):
+            # Distinguish TASK invocations from PEER-REQUEST responses.
+            # Tasks carry ``task_phase``; peer requests just echo back.
+            task_phase = payload.get("task_phase")
+            if task_phase is None:
+                # We are responding to a peer request — echo so the requester unblocks.
+                return {"responder": self_name, "echo": payload}
+
+            # We are running as a TASK — issue peer requests to every other expert.
+            responses = []
+            for other in experts:
+                if other == self_name:
+                    continue
+                response = peer.request(
+                    other,
+                    {"from": self_name, "to": other, "kind": task_phase},
+                    timeout=3.0,
+                )
+                responses.append(response)
+                if task_phase == "critique":
+                    critique_log.append((self_name, other))
+                else:
+                    revision_log.append((self_name, other))
+            return {"task_phase": task_phase, "responses": responses}
+
+        return handler
+
+    for name in experts:
+        runtime.start_expert(name, make_handler(name))
+    assert runtime.wait_until_idle(experts, timeout=2.0)
+
+    # Round 1: each expert issues a critique task → 3 tasks, each with N-1 = 2 peer requests.
+    for name in experts:
+        runtime.assign_task(name, f"{name}-critique", {"task_phase": "critique"})
+    critique_results = runtime.collect_results(
+        [f"{name}-critique" for name in experts], timeout=8.0
+    )
+    assert all(
+        critique_results[f"{name}-critique"]["status"] == "completed"
+        for name in experts
+    )
+
+    # Round 2: each expert issues a revision task → fresh per-task peer budget.
+    for name in experts:
+        runtime.assign_task(name, f"{name}-revision", {"task_phase": "revision"})
+    revision_results = runtime.collect_results(
+        [f"{name}-revision" for name in experts], timeout=8.0
+    )
+    assert all(
+        revision_results[f"{name}-revision"]["status"] == "completed"
+        for name in experts
+    )
+
+    # 3 experts × 2 peers = 6 critiques and 6 revision-direction messages each direction.
+    assert len(critique_log) == 6
+    assert len(revision_log) == 6
+    runtime.shutdown_all(timeout=3.0)

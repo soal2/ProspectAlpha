@@ -18,6 +18,7 @@ dependencies = [
   "redis>=5.0.0",
   "rq>=1.16.0",
   "SQLAlchemy>=2.0.0",
+  "tenacity>=8.2.0",
   "uvicorn[standard]>=0.30.0",
 ]
 
@@ -44,4 +45,4 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "."]

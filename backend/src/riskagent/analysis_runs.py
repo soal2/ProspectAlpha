@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import inspect
+import json
 import os
 import re
 import threading
 import uuid
+from collections.abc import AsyncIterator
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Literal
@@ -19,6 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
 from riskagent.agent_experts import AgentSpec
+from riskagent.agents.exceptions import DebateLLMError
 from riskagent.agents.orchestrator import (
     IntegratedRiskReport,
     StrategyDecision,
@@ -40,11 +43,14 @@ from riskagent.skills.risk_skill_registry import (
     skills_for_agents,
 )
 from riskagent.seed_data import AGENT_SPECS
+from riskagent.seed_data import AGENT_EXPERTS
 from riskagent.models import AnalysisRunRow, EvidenceLibraryRow
+from riskagent.providers.llm import get_default_llm_client
 from riskagent.retrieval.hybrid import HybridSearchIndex
 from riskagent.workers.analysis import dispatch_analysis_job
 
 
+REPORT_SYSTEM_PROMPT = """你是 ProspectAlpha 风险分析报告的章节撰写者。下面是"{company_name}"招股书在某个维度的 finding 与证据。请基于这些结构化数据，用专业、严谨、可追溯的中文写一段 200-500 字的风险分析。要求：1. 直接输出 markdown 段落正文，不要写章节标题；2. 每个判断必须引用证据；3. 不要重复罗列 finding 字段名；4. 如果证据不足，明确指出；5. 只输出正文段落。"""
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ANALYSIS_RUNS_PATH = BACKEND_ROOT / "data" / "processed" / "analysis_runs.yaml"
 DEFAULT_EVIDENCE_LIBRARY_PATH = BACKEND_ROOT / "data" / "processed" / "evidence_library.yaml"
@@ -58,6 +64,7 @@ PIPELINE_STAGES: list[tuple[str, str, str]] = [
     ("expert_orchestration", "专家编排", "沈北辰"),
     ("evidence_extraction", "证据抽取", "证据检索专家"),
     ("risk_identification", "风险识别", "专业 Agent 团队"),
+    ("expert_debate", "专家辩论", "周慎言 · 红队仲裁"),
     ("cross_validation", "交叉验证", "证据审计专家"),
     ("report_generation", "报告生成", "报告撰写专家"),
     ("quality_review", "质检审裁", "质检审裁专家"),
@@ -167,6 +174,7 @@ class RiskFinding(BaseModel):
     evidence_snippets: list[str] = Field(default_factory=list)
     matched_terms: list[str] = Field(default_factory=list)
     requires_human_review: bool = False
+    verification_status: str = "pending"
 
 
 class ReportDraft(BaseModel):
@@ -234,6 +242,7 @@ class AnalysisRun(BaseModel):
     interrupt_reason: str | None = None
     replacement_history: list[dict[str, Any]] = Field(default_factory=list)
     module_results: list[dict[str, Any]] = Field(default_factory=list)
+    debate_history: dict[str, Any] = Field(default_factory=dict)
     frozen_rule_snapshot: dict[str, Any] = Field(default_factory=dict, exclude=True)
     document_blocks: list[DocumentBlock] = Field(default_factory=list, exclude=True)
     findings: list[RiskFinding] = Field(default_factory=list)
@@ -292,6 +301,7 @@ class AnalysisRunRepository:
             agent_specs=None if self.use_database else _seed_agent_specs(),
         )
         self.report_provider = report_provider or synthesize_report
+        self._published_event_counts: dict[str, int] = {}
 
     def create_draft(self, payload: AnalysisRunCreate) -> AnalysisRun:
         now = _now()
@@ -608,7 +618,34 @@ class AnalysisRunRepository:
                 )
             )
             self.search_cache.clear()
-            indexed_count = self.search_index.index_blocks(run_id=run.run_id, blocks=run.document_blocks)
+            progress_state = {"last_emitted": 0}
+
+            def _on_index_progress(done: int, total: int) -> None:
+                # Emit at most one progress event per ~10% to keep the SSE stream lean.
+                if total <= 0:
+                    return
+                threshold = progress_state["last_emitted"] + max(1, total // 10)
+                if done < threshold and done < total:
+                    return
+                progress_state["last_emitted"] = done
+                run.events.append(
+                    _event(
+                        "tool_progress",
+                        "hybrid_search",
+                        "向量化进行中",
+                        f"已向量化 {done}/{total} 个原文块。",
+                        stage_key="pdf_parsing",
+                        action_label="向量化",
+                        metrics={"embedded_blocks": done, "total_blocks": total},
+                    )
+                )
+                self._save_run(run)
+
+            indexed_count = self.search_index.index_blocks(
+                run_id=run.run_id,
+                blocks=run.document_blocks,
+                on_progress=_on_index_progress,
+            )
             run.events.append(
                 _event(
                     "stage_completed",
@@ -871,6 +908,10 @@ class AnalysisRunRepository:
             )
             self._save_run(run)
 
+            run = self._run_debate_stage(run)
+            if run.status == "awaiting_human_review":
+                return run
+
             run = self._transition(
                 run,
                 "cross_validation",
@@ -935,16 +976,33 @@ class AnalysisRunRepository:
                 if item.finding_id in admitted_finding_ids
                 and item.verifier_status in allowed_statuses
             ]
+            admitted_evidence_ids = {item.evidence_id for item in admitted_evidence}
+            sanitized_module_results = [
+                {
+                    **module,
+                    "finding_ids": [
+                        fid
+                        for fid in module.get("finding_ids", [])
+                        if str(fid) in admitted_finding_ids
+                    ],
+                    "evidence_ids": [
+                        eid
+                        for eid in module.get("evidence_ids", [])
+                        if str(eid) in admitted_evidence_ids
+                    ],
+                }
+                for module in run.module_results
+            ]
             integrated: IntegratedRiskReport | None = None
             synthesis_error: Exception | None = None
-            for _attempt in range(2):
+            for attempt in range(2):
                 try:
                     integrated = IntegratedRiskReport.model_validate(
                         _resolve_provider_result(
                             self.report_provider(
                                 company_name=run.company_name,
                                 data_cutoff_date=run.data_cutoff_date,
-                                module_results=run.module_results,
+                                module_results=sanitized_module_results,
                                 verified_findings=[
                                     item.model_dump() for item in admitted_findings
                                 ],
@@ -958,6 +1016,9 @@ class AnalysisRunRepository:
                                     }
                                     for item in admitted_evidence
                                 ],
+                                validation_feedback=(
+                                    str(synthesis_error) if synthesis_error else None
+                                ),
                             )
                         )
                     )
@@ -965,7 +1026,7 @@ class AnalysisRunRepository:
                         integrated,
                         module_ids={
                             str(item["module_id"])
-                            for item in run.module_results
+                            for item in sanitized_module_results
                             if item.get("module_id")
                         },
                         finding_ids=admitted_finding_ids,
@@ -975,7 +1036,7 @@ class AnalysisRunRepository:
                                 for finding_id in module.get("finding_ids", [])
                                 if str(finding_id) in admitted_finding_ids
                             }
-                            for module in run.module_results
+                            for module in sanitized_module_results
                             if module.get("module_id")
                         },
                         evidence_by_finding={
@@ -1270,6 +1331,113 @@ class AnalysisRunRepository:
         self.search_cache.set(cache_key, candidates)
         return candidates
 
+    def _retrieve_supplemental_evidence(
+        self,
+        run: AnalysisRun,
+        *,
+        eid: str | None = None,
+        agent_name: str | None = None,
+        finding_id: str | None = None,
+        query: str | None = None,
+    ) -> list[RunEvidence]:
+        target_finding = next(
+            (finding for finding in run.findings if finding.finding_id == finding_id),
+            None,
+        )
+        if target_finding is None and agent_name:
+            target_finding = next(
+                (finding for finding in run.findings if finding.agent_name == agent_name),
+                None,
+            )
+        if target_finding is None:
+            target_finding = run.findings[0] if run.findings else None
+        if target_finding is None:
+            return []
+
+        search_query = " ".join(
+            part
+            for part in [
+                query,
+                target_finding.title,
+                target_finding.category,
+                target_finding.reasoning_summary,
+                " ".join(target_finding.matched_terms),
+            ]
+            if part
+        ).strip()
+        if not search_query:
+            search_query = eid or target_finding.title
+
+        candidates = self.search_index.search(run_id=run.run_id, query=search_query, limit=2)
+        evidence: list[RunEvidence] = []
+        for index, candidate in enumerate(candidates):
+            evidence_id = str(eid) if eid and index == 0 else f"ev_{uuid.uuid4().hex[:10]}"
+            evidence.append(
+                RunEvidence(
+                    evidence_id=evidence_id,
+                    finding_id=target_finding.finding_id,
+                    document_block_id=candidate.block_id,
+                    page_number=candidate.page_number,
+                    section_path=candidate.section_path,
+                    text=candidate.text[:300],
+                    bbox=candidate.bbox,
+                    char_start=candidate.char_start,
+                    char_end=candidate.char_end,
+                    source_hash=candidate.source_hash,
+                    confidence=candidate.score,
+                    verifier_status="pending",
+                )
+            )
+        return evidence
+
+    def _run_supplement_loop(self, run: AnalysisRun, required: list[Any]) -> AnalysisRun:
+        existing_evidence_ids = {item.evidence_id for item in run.evidence}
+        for item in required:
+            if isinstance(item, dict):
+                finding_id = str(item.get("finding_id") or "") or None
+                agent_name = str(item.get("agent_name") or "") or None
+                reason = str(item.get("reason") or item.get("query") or item.get("supplement") or "")
+            else:
+                finding_id = None
+                agent_name = None
+                reason = str(item)
+            supplemental = [
+                evidence
+                for evidence in self._retrieve_supplemental_evidence(
+                    run,
+                    finding_id=finding_id,
+                    agent_name=agent_name,
+                    query=reason,
+                )
+                if evidence.evidence_id not in existing_evidence_ids
+            ]
+            for evidence in supplemental:
+                existing_evidence_ids.add(evidence.evidence_id)
+                finding = next(
+                    (candidate for candidate in run.findings if candidate.finding_id == evidence.finding_id),
+                    None,
+                )
+                if finding and evidence.evidence_id not in finding.evidence_ids:
+                    finding.evidence_ids.append(evidence.evidence_id)
+            run.evidence.extend(supplemental)
+            run.events.append(
+                _event(
+                    "supplement_evidence_collected",
+                    agent_name or "evidence_extractor",
+                    "补充证据检索完成",
+                    f"根据红队要求补充 {len(supplemental)} 条证据。",
+                    stage_key="expert_debate",
+                    action_label="补证",
+                    payload={
+                        "finding_id": finding_id,
+                        "agent_name": agent_name,
+                        "reason": reason,
+                        "evidence_ids": [evidence.evidence_id for evidence in supplemental],
+                    },
+                )
+            )
+        return run
+
     def _promote_supported_evidence(self, run: AnalysisRun) -> int:
         existing = self._load_evidence_library()
         by_key = {item["dedupe_key"]: item for item in existing}
@@ -1295,6 +1463,370 @@ class AnalysisRunRepository:
         self._save_evidence_library(list(by_key.values()))
         return promoted
 
+    def _run_debate_stage(self, run: AnalysisRun) -> AnalysisRun:
+        """Run the 2-round expert debate phase between risk_identification and cross_validation."""
+
+        from riskagent.agents.debate import run_debate_phase_sync
+
+        run = self._transition(
+            run,
+            "expert_debate",
+            "stage_started",
+            "专家辩论阶段开始",
+            "每位专家对同侪 finding 进行质证，第二轮综合反馈修订，最后由 L3 红队仲裁。",
+            actor_name="orchestrator",
+            action_label="专家辩论",
+        )
+        self._save_run(run)
+
+        finding_payloads = [
+            {
+                "finding_id": item.finding_id,
+                "agent_name": item.agent_name,
+                "rule_id": item.rule_id,
+                "title": item.title,
+                "severity": item.severity,
+                "confidence": item.confidence,
+                "reasoning_summary": item.reasoning_summary,
+                "evidence_ids": list(item.evidence_ids),
+            }
+            for item in run.findings
+        ]
+        module_results = list(run.module_results)
+        run.events.append(
+            _event(
+                "debate_round_started",
+                "orchestrator",
+                "辩论第 1 轮：质证",
+                f"{len({item.agent_name for item in run.findings})} 位专家开始互相质证 {len(finding_payloads)} 条 finding。",
+                stage_key="expert_debate",
+                action_label="质证启动",
+                payload={"round": 1, "finding_count": len(finding_payloads)},
+            )
+        )
+        self._publish_event(
+            run,
+            _event(
+                "llm_call_started",
+                "orchestrator",
+                "专家辩论 LLM 调用开始",
+                f"准备对 {len(finding_payloads)} 条 finding 发起辩论阶段 LLM 调用。",
+                stage_key="expert_debate",
+                action_label="LLM 调用开始",
+                payload={"phase": "debate", "finding_count": len(finding_payloads)},
+            ),
+        )
+        try:
+            debate_result = run_debate_phase_sync(
+                company_name=run.company_name,
+                findings=finding_payloads,
+                module_results=module_results,
+            )
+        except DebateLLMError as exc:
+            self._publish_event(
+                run,
+                _event(
+                    "llm_call_failed",
+                    "orchestrator",
+                    "专家辩论 LLM 调用失败",
+                    f"辩论 {exc.phase} 阶段失败：{exc.failed}/{exc.total} — {exc.detail}",
+                    stage_key="expert_debate",
+                    stage_status="failed",
+                    action_label="LLM 调用失败",
+                    payload={
+                        "error": str(exc),
+                        "phase": exc.phase,
+                        "failed": exc.failed,
+                        "total": exc.total,
+                        "detail": exc.detail,
+                    },
+                ),
+            )
+            run.events.append(
+                _event(
+                    "debate_round_failed",
+                    "orchestrator",
+                    "专家辩论失败",
+                    f"辩论 {exc.phase} 阶段失败：{exc.failed}/{exc.total} — {exc.detail}",
+                    stage_key="expert_debate",
+                    stage_status="failed",
+                    action_label="辩论失败",
+                    payload={
+                        "error": str(exc),
+                        "phase": exc.phase,
+                        "failed": exc.failed,
+                        "total": exc.total,
+                        "detail": exc.detail,
+                    },
+                )
+            )
+            run.events.append(
+                _event(
+                    "stage_completed",
+                    "orchestrator",
+                    "专家辩论阶段结束（降级）",
+                    "辩论阶段未能完成，已直接进入交叉验证。",
+                    stage_key="expert_debate",
+                    stage_status="completed",
+                    action_label="辩论跳过",
+                )
+            )
+            self._save_run(run)
+            return run
+        except Exception as exc:  # pragma: no cover - defensive guard for unexpected failures
+            self._publish_event(
+                run,
+                _event(
+                    "llm_call_failed",
+                    "orchestrator",
+                    "专家辩论 LLM 调用失败",
+                    f"辩论阶段因异常中止：{exc}",
+                    stage_key="expert_debate",
+                    stage_status="failed",
+                    action_label="LLM 调用失败",
+                    payload={"phase": "debate", "error": str(exc)[:200]},
+                ),
+            )
+            run.events.append(
+                _event(
+                    "debate_round_failed",
+                    "orchestrator",
+                    "专家辩论失败",
+                    f"辩论阶段因异常中止：{exc}",
+                    stage_key="expert_debate",
+                    stage_status="failed",
+                    action_label="辩论失败",
+                    payload={"error": str(exc)},
+                )
+            )
+            run.events.append(
+                _event(
+                    "stage_completed",
+                    "orchestrator",
+                    "专家辩论阶段结束（降级）",
+                    "辩论阶段未能完成，已直接进入交叉验证。",
+                    stage_key="expert_debate",
+                    stage_status="completed",
+                    action_label="辩论跳过",
+                )
+            )
+            self._save_run(run)
+            return run
+
+        self._publish_event(
+            run,
+            _event(
+                "llm_call_completed",
+                "orchestrator",
+                "专家辩论 LLM 调用完成",
+                f"收到 {len(debate_result.critiques)} 条质证意见和 {len(debate_result.revisions)} 份修订记录。",
+                stage_key="expert_debate",
+                stage_status="completed",
+                action_label="LLM 调用完成",
+                payload={
+                    "phase": "debate",
+                    "critique_count": len(debate_result.critiques),
+                    "revision_count": len(debate_result.revisions),
+                    "decision": debate_result.ruling.decision,
+                },
+            ),
+        )
+        for critique in debate_result.critiques:
+            run.events.append(
+                _event(
+                    "peer_critique_sent",
+                    str(critique.get("critic_agent", "")),
+                    f"质证 {critique.get('target_agent', '')} 的 finding",
+                    str(critique.get("critique_summary", "")),
+                    stage_key="expert_debate",
+                    action_label="质证",
+                    payload={
+                        "round": 1,
+                        "critic_agent": critique.get("critic_agent"),
+                        "target_agent": critique.get("target_agent"),
+                        "finding_ids": critique.get("finding_ids", []),
+                        "severity": critique.get("severity", "info"),
+                        "suggested_revisions": critique.get("suggested_revisions", []),
+                    },
+                )
+            )
+        run.events.append(
+            _event(
+                "debate_round_completed",
+                "orchestrator",
+                "辩论第 1 轮：质证完成",
+                f"共发出 {len(debate_result.critiques)} 条质证意见。",
+                stage_key="expert_debate",
+                action_label="质证汇总",
+                payload={"round": 1, "critique_count": len(debate_result.critiques)},
+            )
+        )
+        run.events.append(
+            _event(
+                "debate_round_started",
+                "orchestrator",
+                "辩论第 2 轮：修订",
+                "每位专家综合质证意见修订自身 finding。",
+                stage_key="expert_debate",
+                action_label="修订启动",
+                payload={"round": 2},
+            )
+        )
+        for revision in debate_result.revisions:
+            run.events.append(
+                _event(
+                    "expert_revised",
+                    str(revision.get("agent_name", "")),
+                    f"{revision.get('agent_name', '')} 完成证据修订",
+                    str(revision.get("revision_reason", "")),
+                    stage_key="expert_debate",
+                    action_label="修订",
+                    payload={
+                        "round": 2,
+                        "agent_name": revision.get("agent_name"),
+                        "original_finding_ids": revision.get("original_finding_ids", []),
+                        "added_evidence_ids": revision.get("added_evidence_ids", []),
+                        "removed_finding_ids": revision.get("removed_finding_ids", []),
+                    },
+                )
+            )
+        run.events.append(
+            _event(
+                "debate_round_completed",
+                "orchestrator",
+                "辩论第 2 轮：修订完成",
+                f"共收到 {len(debate_result.revisions)} 份修订记录。",
+                stage_key="expert_debate",
+                action_label="修订汇总",
+                payload={"round": 2, "revision_count": len(debate_result.revisions)},
+            )
+        )
+
+        ruling = debate_result.ruling
+        ruling_event_type = "debate_arbiter_ruling"
+        if ruling.decision == "request_supplement":
+            ruling_event_type = "evidence_supplement_requested"
+        run.events.append(
+            _event(
+                ruling_event_type,
+                "zhou_shenyan_redteam_agent",
+                f"红队仲裁：{ruling.decision}",
+                ruling.reasoning,
+                stage_key="expert_debate",
+                skill_id="redteam_skill",
+                agent_role="质量总检 · 红队",
+                action_label="仲裁裁决",
+                payload={
+                    "decision": ruling.decision,
+                    "required_supplements": ruling.required_supplements,
+                    "flagged_finding_ids": ruling.flagged_finding_ids,
+                    "approved_finding_ids": ruling.approved_finding_ids,
+                },
+            )
+        )
+        run.debate_history = debate_result.history
+
+        removed_ids: set[str] = set()
+        added_evidence_by_agent: dict[str, list[str]] = {}
+        for revision in debate_result.revisions:
+            agent_name = revision.get("agent_name")
+            for finding_id in revision.get("removed_finding_ids", []) or []:
+                removed_ids.add(str(finding_id))
+            if agent_name and revision.get("added_evidence_ids"):
+                added_evidence_by_agent.setdefault(str(agent_name), []).extend(
+                    str(evidence_id) for evidence_id in revision["added_evidence_ids"]
+                )
+
+        if removed_ids:
+            run.findings = [
+                finding for finding in run.findings if finding.finding_id not in removed_ids
+            ]
+            removed_evidence_ids = {
+                item.evidence_id for item in run.evidence if item.finding_id in removed_ids
+            }
+            run.evidence = [item for item in run.evidence if item.finding_id not in removed_ids]
+            for module in run.module_results:
+                module["finding_ids"] = [
+                    fid
+                    for fid in module.get("finding_ids", [])
+                    if str(fid) not in removed_ids
+                ]
+                module["evidence_ids"] = [
+                    eid
+                    for eid in module.get("evidence_ids", [])
+                    if str(eid) not in removed_evidence_ids
+                ]
+
+        flagged_set = set(ruling.flagged_finding_ids or [])
+        for finding in run.findings:
+            if finding.finding_id in flagged_set:
+                finding.verification_status = "needs_human_review"
+
+        approved_set = set(ruling.approved_finding_ids or [])
+        for finding in run.findings:
+            if finding.finding_id in approved_set:
+                try:
+                    finding.confidence = min(1.0, float(getattr(finding, "confidence", 0.5)) + 0.2)
+                except (TypeError, ValueError):
+                    pass
+                if finding.verification_status != "approved":
+                    finding.verification_status = "approved"
+
+        existing_evidence_ids = {evidence.evidence_id for evidence in run.evidence}
+        for agent_name, evidence_ids in added_evidence_by_agent.items():
+            for finding in run.findings:
+                if finding.agent_name == agent_name:
+                    for evidence_id in evidence_ids:
+                        if evidence_id not in finding.evidence_ids:
+                            finding.evidence_ids.append(evidence_id)
+            for evidence_id in evidence_ids:
+                if evidence_id not in existing_evidence_ids:
+                    supplemental = self._retrieve_supplemental_evidence(
+                        run,
+                        eid=evidence_id,
+                        agent_name=agent_name,
+                    )
+                    run.evidence.extend(supplemental)
+                    existing_evidence_ids.update(evidence.evidence_id for evidence in supplemental)
+
+        if ruling.decision == "request_supplement":
+            run = self._run_supplement_loop(run, list(ruling.required_supplements or []))
+        elif ruling.decision == "escalate_human":
+            run.status = "awaiting_human_review"
+            run.current_stage = "expert_debate"
+            run.events.append(
+                _event(
+                    "run_paused_for_human",
+                    "orchestrator",
+                    "运行暂停 — 等待人工复核",
+                    f"红队仲裁：{ruling.reasoning}",
+                    stage_key="expert_debate",
+                    stage_status="waiting_user",
+                    action_label="人工接管",
+                    payload={"decision": ruling.decision, "reasoning": ruling.reasoning},
+                )
+            )
+            self._save_run(run)
+            return run
+
+        run.events.append(
+            _event(
+                "debate_completed",
+                "orchestrator",
+                "专家辩论阶段完成",
+                f"仲裁决议：{ruling.decision}；保留 {len(run.findings)} 条 finding 进入交叉验证。",
+                stage_key="expert_debate",
+                stage_status="completed",
+                action_label="辩论结束",
+                payload={
+                    "decision": ruling.decision,
+                    "finding_count": len(run.findings),
+                },
+            )
+        )
+        self._save_run(run)
+        return run
+
     def _save_run(self, run: AnalysisRun) -> None:
         dumped = run.model_dump()
         dumped["input_payload"] = _payload_from_run(run).model_dump()
@@ -1302,11 +1834,14 @@ class AnalysisRunRepository:
         dumped["evidence"] = [item.model_dump() for item in run.evidence]
         dumped["verification_results"] = [item.model_dump() for item in run.verification_results]
         dumped["report"] = run.report.model_dump() if run.report else None
+        previous_event_count = self._published_event_counts.get(run.run_id)
         if self.use_database:
             dumped["document_blocks"] = [item.model_dump() for item in run.document_blocks]
             with self.session_factory() as session:
                 row = session.get(AnalysisRunRow, run.run_id)
                 if row is None:
+                    if previous_event_count is None:
+                        previous_event_count = 0
                     row = AnalysisRunRow(
                         run_id=run.run_id,
                         company_name=run.company_name,
@@ -1320,6 +1855,8 @@ class AnalysisRunRepository:
                     )
                     session.add(row)
                 else:
+                    if previous_event_count is None:
+                        previous_event_count = len((row.payload or {}).get("events") or [])
                     row.company_name = run.company_name
                     row.status = run.status
                     row.current_stage = run.current_stage
@@ -1327,10 +1864,13 @@ class AnalysisRunRepository:
                     row.inputs_frozen = run.inputs_frozen
                     row.payload = dumped
                 session.commit()
+            self._publish_new_events(run, previous_event_count)
             return
         with _path_lock(self.path):
             data = _read_yaml_unlocked(self.path, {})
             existing = data.get(run.run_id, {})
+            if previous_event_count is None:
+                previous_event_count = len(existing.get("events") or [])
             existing_blocks = existing.get("document_blocks") or []
             if existing_blocks and len(existing_blocks) == len(run.document_blocks):
                 dumped["document_blocks"] = existing_blocks
@@ -1338,6 +1878,34 @@ class AnalysisRunRepository:
                 dumped["document_blocks"] = [item.model_dump() for item in run.document_blocks]
             data[run.run_id] = dumped
             _write_yaml_atomic_unlocked(self.path, data)
+        self._publish_new_events(run, previous_event_count)
+
+    def _publish_new_events(self, run: AnalysisRun, previous_event_count: int) -> None:
+        events = run.events[previous_event_count:]
+        self._published_event_counts[run.run_id] = len(run.events)
+        if not events:
+            return
+        try:
+            from riskagent.runtime_events import get_event_broker
+
+            broker = get_event_broker()
+            for event in events:
+                broker.publish_sync(run.run_id, event)
+        except Exception:
+            return
+
+    def _publish_event(self, run: AnalysisRun, event: dict) -> None:
+        """Push an intermediate progress event to the broker without persisting to run.events.
+
+        Used for fine-grained LLM-call lifecycle signals (started/completed/failed)
+        so subscribers see progress without polluting the durable event audit log.
+        """
+        from riskagent.runtime_events import get_event_broker
+
+        try:
+            get_event_broker().publish_sync(run.run_id, event)
+        except Exception:
+            pass
 
     def _load_all(self) -> dict[str, Any]:
         with _path_lock(self.path):
@@ -1670,24 +2238,14 @@ def _quality_review(run: AnalysisRun) -> dict[str, Any]:
     }
 
 
-def _build_report(run: AnalysisRun) -> ReportDraft:
-    allowed = {"supported", "weakly_supported"}
-    status_by_finding = {item.finding_id: item.status for item in run.verification_results}
-    report_findings = [
-        finding for finding in run.findings if status_by_finding.get(finding.finding_id) in allowed
-    ]
-    evidence_by_id = {item.evidence_id: item for item in run.evidence}
-    grouped: dict[str, list[RiskFinding]] = {}
-    for finding in report_findings:
-        grouped.setdefault(_report_section_for_finding(finding), []).append(finding)
-
+def _render_report_header(run: AnalysisRun) -> str:
     lines = [
         f"# {run.company_name} IPO 风险分析草案",
         "",
         f"- 数据截止日期：{run.data_cutoff_date}",
         f"- 规则版本：{run.rule_snapshot['rule_set_id']} / {run.rule_snapshot['version']}",
         "- 复核状态：待质检",
-        f"- 核心风险判断：{len(report_findings)} 条",
+        f"- 核心风险判断：{len(_report_findings(run))} 条",
         f"- PDF 原文证据：{len(run.evidence)} 条",
         "",
         "## 公司基本信息",
@@ -1702,6 +2260,14 @@ def _build_report(run: AnalysisRun) -> ReportDraft:
         f"- 覆盖章节：{', '.join(sorted({block.section_path for block in run.document_blocks})[:8]) or '待识别'}",
         "- 后续判断均要求回溯至 document_blocks、页码、bbox 与 source_hash。",
         "",
+    ]
+    return "\n".join(lines)
+
+
+def _render_core_findings_section(run: AnalysisRun, report_findings: list[RiskFinding]) -> str:
+    evidence_by_id = {item.evidence_id: item for item in run.evidence}
+    status_by_finding = {item.finding_id: item.status for item in run.verification_results}
+    lines = [
         "## 核心风险结论",
     ]
     for finding in report_findings:
@@ -1729,42 +2295,20 @@ def _build_report(run: AnalysisRun) -> ReportDraft:
         )
     if not report_findings:
         lines.append("未发现满足证据门禁的关键风险结论。")
-    section_titles = [
-        "财务风险分析",
-        "业务风险分析",
-        "行业与竞争风险分析",
-        "合规风险分析",
-        "估值与破发风险分析",
+    return "\n".join(lines)
+
+
+def _render_report_footer(run: AnalysisRun, report_findings: list[RiskFinding]) -> str:
+    lines = [
+        "",
+        "## 风险等级",
+        "",
+        f"- 综合风险等级：{_overall_risk_level(report_findings)}",
+        "- 等级口径：依据触发规则数量、严重程度、证据强度和是否需要人工复核综合判断。",
+        "",
+        "## 证据引用",
+        "",
     ]
-    for title in section_titles:
-        lines.extend(["", f"## {title}"])
-        items = grouped.get(title, [])
-        if not items:
-            lines.append("本轮未形成该维度的高置信结构化风险判断，建议人工复核招股书相关章节。")
-            continue
-        for finding in items:
-            refs = [
-                evidence_by_id[evidence_id]
-                for evidence_id in finding.evidence_ids
-                if evidence_id in evidence_by_id
-            ]
-            first_ref = refs[0] if refs else None
-            lines.append(
-                f"- {finding.title}：{finding.reasoning_summary}"
-                + (f"（证据：第 {first_ref.page_number} 页，{first_ref.section_path}）" if first_ref else "（证据：待补充）")
-            )
-    lines.extend(
-        [
-            "",
-            "## 风险等级",
-            "",
-            f"- 综合风险等级：{_overall_risk_level(report_findings)}",
-            "- 等级口径：依据触发规则数量、严重程度、证据强度和是否需要人工复核综合判断。",
-            "",
-            "## 证据引用",
-            "",
-        ]
-    )
     for item in run.evidence[:30]:
         lines.append(f"- {item.evidence_id}：第 {item.page_number} 页 / {item.section_path} / 可信度 {item.confidence:.2f} / {item.text[:120]}")
     lines.extend(
@@ -1775,7 +2319,139 @@ def _build_report(run: AnalysisRun) -> ReportDraft:
             "建议在正式投委会或上市风险评审前，对 weakly_supported 与 needs_human_review 判断进行人工复核，并重点核对现金流、客户供应商集中、关联交易、诉讼监管和发行估值相关章节。",
         ]
     )
-    markdown = "\n".join(lines)
+    return "\n".join(lines)
+
+
+def _report_findings(run: AnalysisRun) -> list[RiskFinding]:
+    allowed = {"supported", "weakly_supported"}
+    status_by_finding = {item.finding_id: item.status for item in run.verification_results}
+    return [
+        finding
+        for finding in run.findings
+        if status_by_finding.get(finding.finding_id) in allowed
+    ]
+
+
+async def _build_report_streaming(run: AnalysisRun) -> AsyncIterator[str]:
+    """Stream the report body: deterministic header/footer + LLM-generated section bodies."""
+    report_findings = _report_findings(run)
+    yield _render_report_header(run)
+    yield _render_core_findings_section(run, report_findings)
+    grouped: dict[str, list[RiskFinding]] = {}
+    for finding in report_findings:
+        grouped.setdefault(_report_section_for_finding(finding), []).append(finding)
+    evidence_by_id = {item.evidence_id: item for item in run.evidence}
+    section_titles = [
+        "财务风险分析",
+        "业务风险分析",
+        "行业与竞争风险分析",
+        "合规风险分析",
+        "估值与破发风险分析",
+    ]
+    system_prompt = REPORT_SYSTEM_PROMPT.format(company_name=run.company_name)
+    for section in section_titles:
+        yield f"\n\n## {section}\n\n"
+        section_findings = grouped.get(section, [])
+        if not section_findings:
+            yield "本轮未形成该维度的高置信结构化风险判断，建议人工复核招股书相关章节。\n"
+            continue
+        user_payload = json.dumps(
+            {
+                "section": section,
+                "company_name": run.company_name,
+                "findings": [finding.model_dump() for finding in section_findings],
+                "evidence": [
+                    evidence_by_id[evidence_id].model_dump()
+                    for finding in section_findings
+                    for evidence_id in finding.evidence_ids
+                    if evidence_id in evidence_by_id
+                ],
+            },
+            ensure_ascii=False,
+        )
+        from riskagent.runtime_events import get_event_broker
+
+        broker = get_event_broker()
+        await broker.publish(
+            run.run_id,
+            _event(
+                "report_section_started",
+                "report_writer",
+                f"{section}生成开始",
+                f"准备生成 {section} 正文。",
+                stage_key="report_generation",
+                action_label="章节生成开始",
+                payload={
+                    "section": section,
+                    "finding_count": len(section_findings),
+                },
+            ),
+        )
+        try:
+            async for delta in get_default_llm_client().chat_stream(
+                [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_payload},
+                ],
+                temperature=0.3,
+            ):
+                yield delta
+            await broker.publish(
+                run.run_id,
+                _event(
+                    "report_section_completed",
+                    "report_writer",
+                    f"{section}生成完成",
+                    f"已完成 {section} 正文生成。",
+                    stage_key="report_generation",
+                    stage_status="completed",
+                    action_label="章节生成完成",
+                    payload={
+                        "section": section,
+                        "finding_count": len(section_findings),
+                    },
+                ),
+            )
+        except Exception as exc:
+            await broker.publish(
+                run.run_id,
+                _event(
+                    "report_section_failed",
+                    "report_writer",
+                    f"{section}生成失败",
+                    f"LLM 流式生成失败：{type(exc).__name__}: {exc}",
+                    stage_key="report_generation",
+                    stage_status="failed",
+                    action_label="章节生成失败",
+                    payload={
+                        "section": section,
+                        "finding_count": len(section_findings),
+                        "error": f"{type(exc).__name__}: {exc}",
+                    },
+                ),
+            )
+            yield f"\n\n（LLM 流式生成失败：{type(exc).__name__}: {exc}，已降级为模板输出。）\n\n"
+            for finding in section_findings:
+                refs = [
+                    evidence_by_id[evidence_id]
+                    for evidence_id in finding.evidence_ids
+                    if evidence_id in evidence_by_id
+                ]
+                first_ref = refs[0] if refs else None
+                yield (
+                    f"- {finding.title}：{finding.reasoning_summary}"
+                    + (f"（证据：第 {first_ref.page_number} 页，{first_ref.section_path}）" if first_ref else "（证据：待补充）")
+                    + "\n"
+                )
+    yield _render_report_footer(run, report_findings)
+
+
+async def _collect_report_stream(run: AnalysisRun) -> str:
+    return "".join([chunk async for chunk in _build_report_streaming(run)])
+
+
+def _build_report(run: AnalysisRun) -> ReportDraft:
+    markdown = asyncio.run(_collect_report_stream(run))
     html = markdown.replace("\n", "<br>")
     return ReportDraft(
         report_id=f"report_{uuid.uuid4().hex[:10]}",
@@ -2069,6 +2745,7 @@ def _write_yaml_atomic_unlocked(path: Path, data: Any) -> None:
 
 
 def _seed_agent_specs() -> list[AgentSpec]:
+    expertise_by_persona = {str(item["agent_id"]): item for item in AGENT_EXPERTS}
     return [
         AgentSpec(
             name=str(item["agent_name"]),
@@ -2076,6 +2753,16 @@ def _seed_agent_specs() -> list[AgentSpec]:
             rule_types=tuple(item.get("rule_types") or []),
             categories=tuple(item.get("categories") or []),
             default=bool(item.get("is_default")),
+            persona_id=str(item.get("persona_id") or ""),
+            display_name=str(item.get("display_name") or ""),
+            layer=str(item.get("layer") or ""),
+            function=str(item.get("function") or ""),
+            avatar=str(expertise_by_persona.get(str(item.get("persona_id") or ""), {}).get("avatar") or ""),
+            accent=str(expertise_by_persona.get(str(item.get("persona_id") or ""), {}).get("accent") or ""),
+            expertise=tuple(
+                expertise_by_persona.get(str(item.get("persona_id") or ""), {}).get("expertise") or []
+            ),
+            role_zh=str(expertise_by_persona.get(str(item.get("persona_id") or ""), {}).get("role") or ""),
         )
         for item in AGENT_SPECS
     ]
