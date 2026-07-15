@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 
 import fitz
 import pytest
@@ -11,7 +12,7 @@ from pathlib import Path
 
 from riskagent.analysis_runs import RunEvidence
 from riskagent.api.main import create_app
-from riskagent.documents import DocumentRepository
+from riskagent.documents import DocumentAsset, DocumentRepository
 from riskagent.ingestion import ProspectusIngestionRepository, ProspectusRegisterRequest
 from riskagent.retrieval import ChunkSearchResult
 from riskagent.providers.object_store import LocalObjectStore
@@ -59,6 +60,52 @@ def test_document_file_roundtrip_serves_original_pdf(client) -> None:
 def test_document_file_404_for_unknown_id(client) -> None:
     response = client.get("/documents/doc_missing/file")
     assert response.status_code == 404
+
+
+def test_database_upload_returns_registered_asset_and_schedules_mineru(
+    monkeypatch,
+) -> None:
+    scheduled: list[str] = []
+    asset = DocumentAsset(
+        document_id="doc_async",
+        filename="async.pdf",
+        content_type="application/pdf",
+        file_sha256="a" * 64,
+        storage_uri="file:///tmp/async.pdf",
+        file_size_bytes=123,
+        page_count=1,
+        text_chars=0,
+        block_count=0,
+        processing_status="queued",
+        created_at="2026-07-15T00:00:00+00:00",
+    )
+
+    class FakeRepository:
+        use_database = True
+
+        def get(self, document_id):
+            assert document_id == "doc_async"
+            return asset
+
+    monkeypatch.setattr("riskagent.api.documents._repo", lambda: FakeRepository())
+    monkeypatch.setattr(
+        "riskagent.api.documents.register_uploaded_prospectus",
+        lambda **_kwargs: SimpleNamespace(document_id="doc_async"),
+    )
+    monkeypatch.setattr(
+        "riskagent.api.documents.process_registered_prospectus",
+        lambda document_id: scheduled.append(document_id),
+    )
+
+    response = TestClient(create_app()).post(
+        "/documents/upload",
+        files={"file": ("async.pdf", _sample_pdf_bytes("async"), "application/pdf")},
+    )
+
+    assert response.status_code == 201
+    assert response.json()["processing_status"] == "queued"
+    assert response.json()["block_count"] == 0
+    assert scheduled == ["doc_async"]
 
 
 def test_list_documents_returns_uploaded_assets(client) -> None:
@@ -172,6 +219,13 @@ def test_registered_postgres_document_is_visible_without_reparsing(tmp_path) -> 
         chunk_indexer=indexer,  # type: ignore[arg-type]
     )
 
+    duplicate_upload = repository.create_from_bytes(
+        filename="existing-again.pdf",
+        content=pdf_path.read_bytes(),
+        content_type="application/pdf",
+    )
+    assert duplicate_upload.document_id == registration.document_id
+
     listed = repository.list_assets()
     assert [(item.document_id, item.block_count) for item in listed] == [
         (registration.document_id, 1)
@@ -199,6 +253,7 @@ def test_run_evidence_backfills_document_id_from_block_id() -> None:
         verifier_status="pending",
     )
     assert legacy.document_id == "doc_ab12cd34ef56"
+    assert legacy.bbox_coordinate_space == "pdf_points"
 
     explicit = RunEvidence(
         evidence_id="ev_2",
@@ -212,6 +267,19 @@ def test_run_evidence_backfills_document_id_from_block_id() -> None:
         verifier_status="pending",
     )
     assert explicit.document_id == "doc_explicit"
+
+    mineru = RunEvidence(
+        evidence_id="ev_3",
+        finding_id="f_1",
+        document_block_id="doc_explicit_chunk_000001",
+        document_id="doc_explicit",
+        page_number=1,
+        section_path="",
+        text="示例",
+        confidence=0.5,
+        verifier_status="pending",
+    )
+    assert mineru.bbox_coordinate_space == "normalized_1000"
 
 
 def test_pipeline_evidence_carries_document_id(

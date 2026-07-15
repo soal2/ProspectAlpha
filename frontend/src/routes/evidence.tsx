@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { Search, FileText, ExternalLink } from "lucide-react";
+import { Search, FileText } from "lucide-react";
 import { useState, useEffect, useMemo } from "react";
 import { getKnowledgeData } from "@/lib/data-service";
 import { PdfViewer } from "@/components/pdf-viewer";
@@ -38,7 +38,6 @@ function EvidencePage() {
   const [risk, setRisk] = useState("全部");
   const [confidence, setConfidence] = useState("全部");
   const [selected, setSelected] = useState<KnowledgeEvidence | null>(null);
-  const [viewerOpen, setViewerOpen] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -116,13 +115,8 @@ function EvidencePage() {
     ];
   }, [data, company, section, risk, confidence]);
 
-  const openViewer = (item: KnowledgeEvidence) => {
-    setSelected(item);
-    if (item.documentId) setViewerOpen(true);
-  };
-
   return (
-    <div className="grid h-[calc(100vh-3.5rem)] grid-cols-[260px_1fr_360px]">
+    <div className="grid h-[calc(100vh-3.5rem)] grid-cols-[240px_minmax(360px,1fr)_minmax(460px,40vw)]">
       {/* facets */}
       <aside className="overflow-y-auto border-r border-border bg-card/40 p-5">
         <h2 className="font-serif text-lg font-semibold">证据知识库</h2>
@@ -234,16 +228,9 @@ function EvidencePage() {
                     [{e.id}]
                   </span>
                 </div>
-                <button
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    openViewer(e);
-                  }}
-                  disabled={!e.documentId}
-                  className="inline-flex items-center gap-1 text-xs text-primary hover:underline disabled:cursor-not-allowed disabled:text-muted-foreground disabled:no-underline"
-                >
-                  查看原文 <ExternalLink className="size-3" />
-                </button>
+                <span className="text-xs text-primary">
+                  {e.documentId ? "右侧原文已定位" : "未关联 PDF"}
+                </span>
               </div>
             </article>
           ))}
@@ -266,31 +253,30 @@ function EvidencePage() {
             <div className="mt-1 text-[11px] text-muted-foreground">
               {selected.id} · {selected.code} · {selected.section} · P.{selected.page}
             </div>
-            <button
-              onClick={() => openViewer(selected)}
-              disabled={!selected.documentId}
-              className="mt-4 block w-full text-left disabled:cursor-not-allowed"
-            >
-              <div className="aspect-[3/4] overflow-hidden rounded-lg border border-border bg-paper transition hover:border-primary/40">
-                <div className="grid h-full place-items-center bg-gradient-to-br from-[color:var(--sage-soft)]/30 to-[color:var(--amber-soft)]/30 text-center text-xs text-muted-foreground">
-                  <div>
-                    <FileText className="mx-auto size-8 text-primary/40" />
-                    <p className="mt-3 px-4 leading-relaxed">
-                      招股书 PDF 第 {selected.page} 页
-                      {selected.bbox?.length === 4 ? (
-                        <>
-                          <br />
-                          bbox [{selected.bbox.map((v) => v.toFixed(1)).join(", ")}]
-                        </>
-                      ) : null}
-                    </p>
-                    <p className="mt-2 text-[10px]">
-                      {selected.documentId ? "点击打开原文并高亮定位" : "该证据未关联 PDF 文档"}
-                    </p>
-                  </div>
-                </div>
+            {selected.documentId ? (
+              <PdfViewer
+                inline
+                open
+                onOpenChange={() => undefined}
+                documentId={selected.documentId}
+                page={selected.page}
+                highlight={
+                  selected.bbox?.length === 4
+                    ? {
+                        page: selected.page,
+                        bbox: selected.bbox,
+                        coordinateSpace: selected.bboxCoordinateSpace,
+                        label: selected.section,
+                      }
+                    : null
+                }
+                title={`${selected.name} · ${selected.section}`}
+              />
+            ) : (
+              <div className="mt-4 grid aspect-[3/4] place-items-center rounded-lg border border-border bg-paper text-center text-xs text-muted-foreground">
+                该证据未关联 PDF 文档
               </div>
-            </button>
+            )}
             <div className="mt-4 rounded-lg border border-border bg-background p-3 text-xs">
               <div className="font-medium">证据链接到的结论</div>
               <ul className="mt-2 space-y-1 text-muted-foreground">
@@ -309,21 +295,6 @@ function EvidencePage() {
           </div>
         )}
       </aside>
-
-      {selected?.documentId ? (
-        <PdfViewer
-          open={viewerOpen}
-          onOpenChange={setViewerOpen}
-          documentId={selected.documentId}
-          page={selected.page}
-          highlight={
-            selected.bbox?.length === 4
-              ? { page: selected.page, bbox: selected.bbox, label: selected.section }
-              : null
-          }
-          title={`${selected.name} · ${selected.section}`}
-        />
-      ) : null}
     </div>
   );
 }

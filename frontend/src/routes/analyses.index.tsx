@@ -129,6 +129,21 @@ function AnalysesIndex() {
           </article>
         ))}
       </div>
+      {!loading && analyses.length === 0 ? (
+        <div className="mt-6 rounded-2xl border border-dashed border-border bg-card px-6 py-10 text-center">
+          <h2 className="font-serif text-xl font-semibold">当前数据库中还没有分析任务</h2>
+          <p className="mx-auto mt-2 max-w-xl text-sm leading-relaxed text-muted-foreground">
+            招股书已经入库并不等于已生成分析报告。请回到工作台选择已有
+            PDF，再点击“启动分析”；创建成功后会出现在这里。
+          </p>
+          <Link
+            to="/"
+            className="mt-5 inline-flex items-center gap-2 rounded-full bg-primary px-4 py-2 text-sm font-medium text-primary-foreground"
+          >
+            <Plus className="size-4" /> 前往工作台选择已有 PDF
+          </Link>
+        </div>
+      ) : null}
     </div>
   );
 }

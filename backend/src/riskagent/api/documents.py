@@ -10,7 +10,7 @@ from urllib.parse import quote
 
 import fitz
 
-from fastapi import APIRouter, File, Form, HTTPException, Response, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Response, UploadFile, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -21,6 +21,8 @@ from riskagent.documents import (
     DocumentCreate,
     DocumentRepository,
     get_default_document_repository,
+    process_registered_prospectus,
+    register_uploaded_prospectus,
 )
 from riskagent.ingestion import ProspectusRegistration
 
@@ -52,15 +54,31 @@ def create_document(payload: DocumentCreate) -> DocumentAsset:
 
 @router.post("/upload", response_model=DocumentAsset, status_code=status.HTTP_201_CREATED)
 async def upload_document(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     source_url: str | None = Form(default=None),
 ) -> DocumentAsset:
     content = await file.read()
     try:
         repo = _repo()
+        filename = file.filename or "prospectus.pdf"
+        if repo.use_database:
+            registration = await asyncio.to_thread(
+                register_uploaded_prospectus,
+                filename=filename,
+                content=content,
+                source_url=source_url,
+            )
+            asset = await asyncio.to_thread(repo.get, registration.document_id)
+            if asset.block_count <= 0 and asset.processing_status != "processing":
+                background_tasks.add_task(
+                    process_registered_prospectus,
+                    registration.document_id,
+                )
+            return asset
         asset = await asyncio.to_thread(
             repo.create_from_bytes,
-            filename=file.filename or "prospectus.pdf",
+            filename=filename,
             content=content,
             content_type=file.content_type or "application/octet-stream",
             source_url=source_url,

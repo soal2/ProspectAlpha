@@ -141,6 +141,7 @@ export interface EvidenceDetailItem {
   risk: string;
   documentId?: string;
   bbox?: number[];
+  bboxCoordinateSpace?: "pdf_points" | "normalized_1000";
 }
 
 export interface KnowledgePreview {
@@ -172,6 +173,7 @@ export interface KnowledgeEvidence {
   risk: string;
   documentId?: string;
   bbox?: number[];
+  bboxCoordinateSpace?: "pdf_points" | "normalized_1000";
   createdAt?: string;
 }
 

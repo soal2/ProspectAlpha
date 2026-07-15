@@ -107,9 +107,10 @@ def test_analysis_api_exposes_minimal_pipeline_resources(
         "storage_uri",
         "file_size_bytes",
         "page_count",
-        "text_chars",
-        "block_count",
-        "source_url",
+            "text_chars",
+            "block_count",
+            "processing_status",
+            "source_url",
         "created_at",
     }
     duplicate = client.post(

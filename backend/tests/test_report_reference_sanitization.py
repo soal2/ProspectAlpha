@@ -170,6 +170,11 @@ def test_report_provider_receives_only_admitted_ids(
         "riskagent.analysis_runs._verify_findings",
         verify_first_finding_only,
     )
+    monkeypatch.setattr(
+        AnalysisRunRepository,
+        "_run_debate_stage",
+        lambda _self, run: run,
+    )
     repo = _repository(
         tmp_path,
         analysis_repo_factory,
@@ -235,7 +240,10 @@ def test_debate_removal_syncs_module_results_and_evidence(
     run = repo._run_debate_stage(_run_with_module_results(repo))
 
     assert {finding.finding_id for finding in run.findings} == {"f2"}
-    assert {item.evidence_id for item in run.evidence} == {"ev-f2"}
+    assert {item.evidence_id for item in run.evidence} == {"ev-f1", "ev-f2"}
+    assert next(
+        item for item in run.evidence if item.evidence_id == "ev-f1"
+    ).verifier_status == "rejected_by_debate"
     for module in run.module_results:
         assert "f1" not in set(map(str, module.get("finding_ids", [])))
         assert "ev-f1" not in set(map(str, module.get("evidence_ids", [])))

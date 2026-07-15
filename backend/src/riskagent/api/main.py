@@ -10,6 +10,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 logger = logging.getLogger(__name__)
 
+LOCAL_DEVELOPMENT_ORIGIN_REGEX = (
+    r"^https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0)(?::\d+)?$"
+)
+
 from riskagent.a2a import build_dynamic_expert_a2a_routes
 from riskagent.agent_experts import AgentSpec, AgentSpecRepository
 from riskagent.api import agents, analysis, analysis_options, chat, documents, knowledge, risk_rules, skills
@@ -33,6 +37,10 @@ def create_app() -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=_cors_origins(),
+        # Vite can move to another port when 5173 is occupied, and developers
+        # commonly alternate between localhost and 127.0.0.1. Keep loopback
+        # origins usable without weakening the configured production allowlist.
+        allow_origin_regex=LOCAL_DEVELOPMENT_ORIGIN_REGEX,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

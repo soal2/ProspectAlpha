@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
+import threading
 import uuid
 from urllib.parse import unquote, urlparse
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Literal
 
 import fitz
 import yaml
@@ -47,6 +49,9 @@ DEFAULT_DOCUMENTS_PATH = DATA_ROOT / "processed" / "documents.yaml"
 DEFAULT_DOCUMENT_STORAGE_DIR = DATA_ROOT / "raw" / "documents"
 MAX_DOCUMENT_BYTES = 50 * 1024 * 1024
 PARSER_VERSION = "pymupdf-v1"
+logger = logging.getLogger(__name__)
+_ACTIVE_PROSPECTUS_PIPELINES: set[str] = set()
+_ACTIVE_PROSPECTUS_PIPELINES_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -91,6 +96,7 @@ class DocumentBlock(BaseModel):
     block_type: str = "text"
     text: str
     bbox: list[float]
+    bbox_coordinate_space: Literal["pdf_points", "normalized_1000"] = "pdf_points"
     char_start: int
     char_end: int
     source_hash: str
@@ -107,6 +113,7 @@ class DocumentAsset(BaseModel):
     page_count: int
     text_chars: int
     block_count: int
+    processing_status: Literal["uploaded", "queued", "processing", "ready", "failed"] = "ready"
     source_url: str | None = None
     created_at: str
     blocks: list[DocumentBlock] = Field(default_factory=list, exclude=True)
@@ -309,15 +316,22 @@ class DocumentRepository:
                 registered_rows = session.scalars(
                     select(ProspectusDocumentRow).order_by(ProspectusDocumentRow.created_at.desc())
                 ).all()
-            assets = [_asset_from_row(row, include_blocks=False) for row in rows]
-            existing_ids = {asset.document_id for asset in assets}
+            assets: list[DocumentAsset] = []
+            seen_ids: set[str] = set()
+            seen_hashes: set[str] = set()
             for registered in registered_rows:
-                if registered.document_id in existing_ids:
-                    continue
                 block_count = self._indexed_chunk_count(registered.document_id)
-                if block_count <= 0:
+                asset = _asset_from_registered_row(registered, block_count=block_count)
+                assets.append(asset)
+                seen_ids.add(asset.document_id)
+                seen_hashes.add(asset.file_sha256)
+            for row in rows:
+                asset = _asset_from_row(row, include_blocks=False)
+                if asset.document_id in seen_ids or asset.file_sha256 in seen_hashes:
                     continue
-                assets.append(_asset_from_registered_row(registered, block_count=block_count))
+                assets.append(asset)
+                seen_ids.add(asset.document_id)
+                seen_hashes.add(asset.file_sha256)
             assets.sort(key=lambda asset: asset.created_at, reverse=True)
             return assets
         items = []
@@ -354,10 +368,19 @@ class DocumentRepository:
     def _get_by_sha256(self, file_sha256: str) -> DocumentAsset | None:
         if self.use_database:
             with self.session_factory() as session:
+                registered = session.scalar(
+                    select(ProspectusDocumentRow).where(
+                        ProspectusDocumentRow.file_sha256 == file_sha256
+                    )
+                )
                 row = session.scalar(
                     select(DocumentAssetRow).where(DocumentAssetRow.file_sha256 == file_sha256)
                 )
-                return _asset_from_row(row) if row else None
+            if registered is not None:
+                block_count = self._indexed_chunk_count(registered.document_id)
+                if block_count > 0:
+                    return _asset_from_registered_row(registered, block_count=block_count)
+            return _asset_from_row(row) if row else None
         for item in self._load_all().values():
             if item["file_sha256"] == file_sha256:
                 return DocumentAsset.model_validate(item)
@@ -595,6 +618,64 @@ def process_prospectus_document(
     )
 
 
+def register_uploaded_prospectus(
+    *,
+    filename: str,
+    content: bytes,
+    source_url: str | None = None,
+) -> ProspectusRegistration:
+    """Quickly persist an uploaded PDF before asynchronous MinerU processing."""
+    if len(content) > MAX_DOCUMENT_BYTES:
+        raise ValueError("Document exceeds 50MB upload limit.")
+    if not filename.lower().endswith(".pdf"):
+        raise ValueError("Only PDF prospectus assets are supported.")
+    file_sha256 = hashlib.sha256(content).hexdigest()
+    return ProspectusIngestionRepository().register(
+        ProspectusRegisterRequest(
+            content=content,
+            original_filename=filename,
+            doc_key=f"{Path(filename).stem}_{file_sha256[:8]}",
+            source_url=source_url,
+        )
+    )
+
+
+def process_registered_prospectus(document_id: str) -> None:
+    """Run one registered PDF through MinerU/chunking/PostgreSQL off-request."""
+    with _ACTIVE_PROSPECTUS_PIPELINES_LOCK:
+        if document_id in _ACTIVE_PROSPECTUS_PIPELINES:
+            return
+        _ACTIVE_PROSPECTUS_PIPELINES.add(document_id)
+    ingestion = ProspectusIngestionRepository()
+    try:
+        registration = ingestion.get(document_id)
+        _set_prospectus_status(document_id, "processing")
+        process_prospectus_document(
+            ProspectusPipelineRequest(
+                source_path=registration.raw_pdf_path,
+                original_filename=registration.original_filename,
+                doc_key=registration.doc_key,
+                source_url=registration.source_url,
+            ),
+            ingestion_repository=ingestion,
+        )
+        _set_prospectus_status(document_id, "indexed")
+    except Exception:
+        _set_prospectus_status(document_id, "failed")
+        logger.exception("Asynchronous MinerU pipeline failed for %s", document_id)
+    finally:
+        with _ACTIVE_PROSPECTUS_PIPELINES_LOCK:
+            _ACTIVE_PROSPECTUS_PIPELINES.discard(document_id)
+
+
+def _set_prospectus_status(document_id: str, status: str) -> None:
+    with SessionLocal() as session:
+        row = session.get(ProspectusDocumentRow, document_id)
+        if row is not None:
+            row.status = status
+            session.commit()
+
+
 def get_default_document_repository() -> DocumentRepository:
     return DocumentRepository()
 
@@ -703,6 +784,7 @@ def _asset_from_row(row: DocumentAssetRow, include_blocks: bool = True) -> Docum
         page_count=row.page_count,
         text_chars=row.text_chars,
         block_count=row.block_count,
+        processing_status="ready" if row.block_count > 0 else "uploaded",
         source_url=row.source_url,
         created_at=row.created_at.isoformat() if hasattr(row.created_at, "isoformat") else str(row.created_at),
         blocks=[] if not include_blocks else [_block_from_row(block) for block in row.blocks],
@@ -731,6 +813,15 @@ def _asset_from_registered_row(
         page_count=page_count,
         text_chars=0,
         block_count=block_count,
+        processing_status=(
+            "ready"
+            if block_count > 0 or row.status == "indexed"
+            else "failed"
+            if row.status == "failed"
+            else "processing"
+            if row.status == "processing"
+            else "queued"
+        ),
         source_url=row.source_url,
         created_at=row.created_at.isoformat()
         if hasattr(row.created_at, "isoformat")
@@ -741,6 +832,9 @@ def _asset_from_registered_row(
 
 def _block_from_indexed_chunk(chunk: Any) -> DocumentBlock:
     metadata = chunk.metadata if isinstance(chunk.metadata, dict) else {}
+    coordinate_space = str(metadata.get("bbox_coordinate_space") or "pdf_points")
+    if coordinate_space not in {"pdf_points", "normalized_1000"}:
+        coordinate_space = "pdf_points"
     bbox = next(
         (
             item.get("bbox", [])
@@ -758,6 +852,7 @@ def _block_from_indexed_chunk(chunk: Any) -> DocumentBlock:
         block_type=chunk.chunk_type,
         text=text,
         bbox=[float(value) for value in bbox],
+        bbox_coordinate_space=coordinate_space,
         char_start=int(metadata.get("char_start") or 0),
         char_end=int(metadata.get("char_end") or len(text)),
         source_hash=str(metadata.get("source_hash") or hashlib.sha256(text.encode()).hexdigest()),

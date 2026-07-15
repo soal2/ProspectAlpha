@@ -224,6 +224,7 @@ export type UploadedDocument = {
   page_count: number;
   text_chars: number;
   block_count: number;
+  processing_status: "uploaded" | "queued" | "processing" | "ready" | "failed";
   source_url: string | null;
   created_at: string;
 };
@@ -262,6 +263,7 @@ type BackendEvidence = {
   section_path: string;
   text: string;
   bbox: number[];
+  bbox_coordinate_space: "pdf_points" | "normalized_1000";
   char_start: number;
   char_end: number;
   source_hash: string;
@@ -307,7 +309,10 @@ export type AnalysisOptions = {
 
 async function fetchAnalyses(): Promise<AnalysisSummary[]> {
   const runs = await apiRequest<AnalysisRun[]>("/analysis-runs");
-  return runs.map(toAnalysisSummary);
+  const evidenceCounts = await Promise.all(
+    runs.map(async (run) => (await fetchRunEvidence(run.run_id)).length),
+  );
+  return runs.map((run, index) => toAnalysisSummary(run, evidenceCounts[index]));
 }
 
 async function fetchAnalysis(id: string): Promise<AnalysisSummary | null> {
@@ -329,9 +334,12 @@ async function fetchBacktests(): Promise<BacktestSummary[]> {
 
 async function fetchDashboardStats(): Promise<DashboardStats> {
   const runs = await apiRequest<AnalysisRun[]>("/analysis-runs");
+  const evidenceCounts = await Promise.all(
+    runs.map(async (run) => (await fetchRunEvidence(run.run_id)).length),
+  );
   const totalAnalyses = runs.length;
   const conclusions = runs.reduce((total, run) => total + run.findings.length, 0);
-  const evidenceCount = runs.reduce((total, run) => total + countRunEvidence(run), 0);
+  const evidenceCount = evidenceCounts.reduce((total, count) => total + count, 0);
   const crossValidated = runs.reduce(
     (total, run) =>
       total +
@@ -389,6 +397,17 @@ async function fetchTraceData(id: string): Promise<TraceData | null> {
   }
 }
 
+function evidenceStatusLabel(status: string): string {
+  const labels: Record<string, string> = {
+    supported: "已核验支持",
+    weakly_supported: "弱支持证据",
+    needs_human_review: "待人工复核",
+    rejected_by_debate: "红队否决候选证据",
+    pending: "待核验",
+  };
+  return labels[status] ?? status;
+}
+
 async function fetchEvidenceDetailItems(id: string): Promise<EvidenceDetailItem[]> {
   try {
     const [run, evidence] = await Promise.all([
@@ -404,10 +423,20 @@ async function fetchEvidenceDetailItems(id: string): Promise<EvidenceDetailItem[
       page: item.page_number,
       conf: item.confidence,
       snippet: item.text,
-      risk: riskByFinding[item.finding_id] ?? "风险证据",
+      risk: riskByFinding[item.finding_id] ?? evidenceStatusLabel(item.verifier_status),
       documentId: item.document_id,
       bbox: item.bbox,
+      bboxCoordinateSpace: item.bbox_coordinate_space,
     }));
+  } catch (err) {
+    if (isNotFound(err)) return [];
+    throw err;
+  }
+}
+
+async function fetchRunEvidence(id: string): Promise<BackendEvidence[]> {
+  try {
+    return await apiRequest<BackendEvidence[]>(`/analysis-runs/${id}/evidence`);
   } catch (err) {
     if (isNotFound(err)) return [];
     throw err;
@@ -444,9 +473,10 @@ async function fetchKnowledgeData(): Promise<KnowledgeData> {
       page: item.page_number,
       conf: item.confidence,
       snippet: item.text,
-      risk: riskByFinding[item.finding_id] ?? item.verifier_status,
+      risk: riskByFinding[item.finding_id] ?? evidenceStatusLabel(item.verifier_status),
       documentId: item.document_id,
       bbox: item.bbox,
+      bboxCoordinateSpace: item.bbox_coordinate_space,
       createdAt: run.created_at,
     }));
   });
@@ -674,6 +704,27 @@ export function getDocumentFileUrl(documentId: string) {
 
 export async function listDocuments() {
   return apiRequest<UploadedDocument[]>("/documents");
+}
+
+export async function getDocument(documentId: string) {
+  return apiRequest<UploadedDocument>(`/documents/${documentId}`);
+}
+
+export async function waitForDocumentReady(
+  documentId: string,
+  onProgress?: (document: UploadedDocument) => void,
+) {
+  const deadline = Date.now() + 30 * 60_000;
+  while (Date.now() < deadline) {
+    const document = await getDocument(documentId);
+    onProgress?.(document);
+    if (document.block_count > 0 || document.processing_status === "ready") return document;
+    if (document.processing_status === "failed") {
+      throw new Error("MinerU 解析失败，请检查后端日志后重新上传。");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+  }
+  throw new Error("MinerU 解析仍在后台运行，请稍后重新打开页面查看状态。");
 }
 
 // PDF Q&A — SSE stream from POST /documents/{id}/ask
@@ -919,13 +970,12 @@ export async function getEvidenceFeed(id?: string) {
   return fetchEvidenceFeed(id);
 }
 
-function toAnalysisSummary(run: AnalysisRun): AnalysisSummary {
+function toAnalysisSummary(run: AnalysisRun, evidenceCountOverride?: number): AnalysisSummary {
   const structured =
     (run as AnalysisRun & { structured_data?: Record<string, unknown> }).structured_data ?? {};
-  const evidenceCount = run.findings.reduce(
-    (total, finding) => total + finding.evidence_snippets.length,
-    0,
-  );
+  const evidenceCount =
+    evidenceCountOverride ??
+    run.findings.reduce((total, finding) => total + finding.evidence_snippets.length, 0);
   const highConfidence = run.findings.filter((finding) => finding.confidence >= 0.75).length;
   const riskScore = scoreRun(run);
   return {
@@ -969,14 +1019,6 @@ async function pollAnalysisRun(runId: string) {
     latest = await apiRequest<AnalysisRun>(`/analysis-runs/${runId}`);
   }
   return latest;
-}
-
-function countRunEvidence(run: AnalysisRun) {
-  return run.findings.reduce(
-    (total, finding) =>
-      total + Math.max(finding.evidence_ids?.length ?? 0, finding.evidence_snippets.length),
-    0,
-  );
 }
 
 function scoreRun(run: AnalysisRun) {

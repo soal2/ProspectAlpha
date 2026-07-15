@@ -24,6 +24,7 @@ interface PdfViewerProps {
   page?: number;
   highlight?: PdfHighlight | null;
   title?: string;
+  inline?: boolean;
 }
 
 type PdfjsModule = typeof import("pdfjs-dist");
@@ -34,6 +35,18 @@ let pdfjsPromise: Promise<PdfjsModule> | null = null;
 
 async function loadPdfjs(): Promise<PdfjsModule> {
   if (!pdfjsPromise) {
+    const urlConstructor = URL as typeof URL & {
+      parse?: (value: string, base?: string | URL) => URL | null;
+    };
+    if (!urlConstructor.parse) {
+      urlConstructor.parse = (value, base) => {
+        try {
+          return new URL(value, base);
+        } catch {
+          return null;
+        }
+      };
+    }
     pdfjsPromise = import("pdfjs-dist").then((pdfjs) => {
       pdfjs.GlobalWorkerOptions.workerSrc = new URL(
         "pdfjs-dist/build/pdf.worker.min.mjs",
@@ -52,24 +65,28 @@ export function PdfViewer({
   page,
   highlight,
   title,
+  inline = false,
 }: PdfViewerProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const canvasContainerRef = useRef<HTMLDivElement | null>(null);
   const overlayRef = useRef<HTMLDivElement | null>(null);
   const highlightRef = useRef<HTMLDivElement | null>(null);
   const docRef = useRef<PdfDocument | null>(null);
   const loadingTaskRef = useRef<PdfLoadingTask | null>(null);
   const renderTaskRef = useRef<{ cancel: () => void } | null>(null);
+  const manualZoomRef = useRef(false);
 
   const [pageCount, setPageCount] = useState(0);
   const [currentPage, setCurrentPage] = useState(page ?? 1);
-  const [scale, setScale] = useState(1.25);
+  const [scale, setScale] = useState(inline ? 0.75 : 1.25);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   // Load the document when the dialog opens.
   useEffect(() => {
-    if (!open || !documentId) return;
+    if ((!open && !inline) || !documentId) return;
     let cancelled = false;
+    manualZoomRef.current = false;
     setLoading(true);
     setError(null);
     (async () => {
@@ -106,13 +123,37 @@ export function PdfViewer({
       loadingTaskRef.current = null;
       if (task) void task.destroy();
     };
-  }, [open, documentId, page]);
+  }, [open, inline, documentId, page]);
+
+  // Keep the inline page readable by fitting it to the preview column until
+  // the user explicitly chooses a zoom level.
+  useEffect(() => {
+    if (!inline || !pageCount || !docRef.current || !canvasContainerRef.current) return;
+    let cancelled = false;
+    const container = canvasContainerRef.current;
+    const fitPage = async () => {
+      if (manualZoomRef.current || !docRef.current) return;
+      const pdfPage = await docRef.current.getPage(currentPage);
+      if (cancelled || manualZoomRef.current) return;
+      const baseViewport = pdfPage.getViewport({ scale: 1 });
+      const availableWidth = Math.max(container.clientWidth - 24, 1);
+      const fitted = Math.min(1.25, Math.max(0.65, availableWidth / baseViewport.width));
+      setScale(Number(fitted.toFixed(2)));
+    };
+    void fitPage();
+    const observer = new ResizeObserver(() => void fitPage());
+    observer.observe(container);
+    return () => {
+      cancelled = true;
+      observer.disconnect();
+    };
+  }, [inline, pageCount, currentPage]);
 
   // Render the current page + highlight overlay.
   useEffect(() => {
     const doc = docRef.current;
     const canvas = canvasRef.current;
-    if (!open || !doc || !canvas || currentPage < 1) return;
+    if ((!open && !inline) || !doc || !canvas || currentPage < 1) return;
     let cancelled = false;
     (async () => {
       try {
@@ -121,8 +162,9 @@ export function PdfViewer({
         const viewport = pdfPage.getViewport({ scale });
         const context = canvas.getContext("2d");
         if (!context) return;
-        canvas.width = Math.floor(viewport.width);
-        canvas.height = Math.floor(viewport.height);
+        const outputScale = Math.max(window.devicePixelRatio || 1, 1);
+        canvas.width = Math.floor(viewport.width * outputScale);
+        canvas.height = Math.floor(viewport.height * outputScale);
         canvas.style.width = `${Math.floor(viewport.width)}px`;
         canvas.style.height = `${Math.floor(viewport.height)}px`;
         if (overlayRef.current) {
@@ -130,7 +172,12 @@ export function PdfViewer({
           overlayRef.current.style.height = `${Math.floor(viewport.height)}px`;
         }
         renderTaskRef.current?.cancel();
-        const renderTask = pdfPage.render({ canvas, canvasContext: context, viewport });
+        const renderTask = pdfPage.render({
+          canvas,
+          canvasContext: context,
+          viewport,
+          transform: outputScale === 1 ? undefined : [outputScale, 0, 0, outputScale, 0, 0],
+        });
         renderTaskRef.current = renderTask;
         await renderTask.promise;
         if (cancelled) return;
@@ -182,7 +229,95 @@ export function PdfViewer({
     return () => {
       cancelled = true;
     };
-  }, [open, currentPage, scale, highlight, pageCount]);
+  }, [open, inline, currentPage, scale, highlight, pageCount]);
+
+  const toolbar = (
+    <div className="flex items-center gap-2 border-b border-border px-3 py-2 text-xs">
+      <button
+        onClick={() => setCurrentPage((value) => Math.max(1, value - 1))}
+        disabled={currentPage <= 1}
+        className="inline-flex size-7 items-center justify-center rounded-md border border-border hover:bg-accent disabled:opacity-40"
+        aria-label="上一页"
+      >
+        <ChevronLeft className="size-4" />
+      </button>
+      <span className="tabular">
+        {currentPage} / {pageCount || "—"}
+      </span>
+      <button
+        onClick={() => setCurrentPage((value) => Math.min(pageCount || value, value + 1))}
+        disabled={pageCount > 0 && currentPage >= pageCount}
+        className="inline-flex size-7 items-center justify-center rounded-md border border-border hover:bg-accent disabled:opacity-40"
+        aria-label="下一页"
+      >
+        <ChevronRight className="size-4" />
+      </button>
+      <div className="ml-4 flex items-center gap-1">
+        <button
+          onClick={() => {
+            manualZoomRef.current = true;
+            setScale((value) => Math.max(0.4, Number((value - 0.25).toFixed(2))));
+          }}
+          className="inline-flex size-7 items-center justify-center rounded-md border border-border hover:bg-accent"
+          aria-label="缩小"
+        >
+          <ZoomOut className="size-4" />
+        </button>
+        <span className="w-12 text-center tabular">{Math.round(scale * 100)}%</span>
+        <button
+          onClick={() => {
+            manualZoomRef.current = true;
+            setScale((value) => Math.min(3, Number((value + 0.25).toFixed(2))));
+          }}
+          className="inline-flex size-7 items-center justify-center rounded-md border border-border hover:bg-accent"
+          aria-label="放大"
+        >
+          <ZoomIn className="size-4" />
+        </button>
+      </div>
+      {highlight && highlight.page !== currentPage ? (
+        <button
+          onClick={() => setCurrentPage(highlight.page)}
+          className="ml-auto rounded-full bg-amber-400/20 px-3 py-1 text-amber-700 hover:bg-amber-400/30"
+        >
+          跳到高亮页 P.{highlight.page}
+        </button>
+      ) : null}
+    </div>
+  );
+  const canvasView = (
+    <div ref={canvasContainerRef} className="flex-1 overflow-auto bg-muted/40 p-3">
+      {error ? (
+        <div className="grid h-full place-items-center text-sm text-destructive">{error}</div>
+      ) : loading ? (
+        <div className="grid h-full place-items-center text-sm text-muted-foreground">
+          <span className="inline-flex items-center gap-2">
+            <Loader2 className="size-4 animate-spin" /> PDF 加载中…
+          </span>
+        </div>
+      ) : null}
+      <div
+        className={`relative mx-auto w-fit shadow-lg ${loading || error ? "hidden" : ""}`}
+        ref={overlayRef}
+      >
+        <canvas ref={canvasRef} className="block bg-white" />
+        <div
+          ref={highlightRef}
+          style={{ display: "none" }}
+          className="pointer-events-none absolute rounded-sm border-2 border-amber-500 bg-amber-300/10"
+        />
+      </div>
+    </div>
+  );
+
+  if (inline) {
+    return (
+      <div className="mt-4 flex min-h-[480px] w-full flex-col overflow-hidden rounded-lg border border-border bg-background">
+        {toolbar}
+        {canvasView}
+      </div>
+    );
+  }
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -195,74 +330,8 @@ export function PdfViewer({
               : `文档 ${documentId}`}
           </DialogDescription>
         </DialogHeader>
-        <div className="flex items-center gap-2 border-b border-border px-5 py-2 text-xs">
-          <button
-            onClick={() => setCurrentPage((value) => Math.max(1, value - 1))}
-            disabled={currentPage <= 1}
-            className="inline-flex size-7 items-center justify-center rounded-md border border-border hover:bg-accent disabled:opacity-40"
-            aria-label="上一页"
-          >
-            <ChevronLeft className="size-4" />
-          </button>
-          <span className="tabular">
-            {currentPage} / {pageCount || "—"}
-          </span>
-          <button
-            onClick={() => setCurrentPage((value) => Math.min(pageCount || value, value + 1))}
-            disabled={pageCount > 0 && currentPage >= pageCount}
-            className="inline-flex size-7 items-center justify-center rounded-md border border-border hover:bg-accent disabled:opacity-40"
-            aria-label="下一页"
-          >
-            <ChevronRight className="size-4" />
-          </button>
-          <div className="ml-4 flex items-center gap-1">
-            <button
-              onClick={() => setScale((value) => Math.max(0.5, Number((value - 0.25).toFixed(2))))}
-              className="inline-flex size-7 items-center justify-center rounded-md border border-border hover:bg-accent"
-              aria-label="缩小"
-            >
-              <ZoomOut className="size-4" />
-            </button>
-            <span className="w-12 text-center tabular">{Math.round(scale * 100)}%</span>
-            <button
-              onClick={() => setScale((value) => Math.min(3, Number((value + 0.25).toFixed(2))))}
-              className="inline-flex size-7 items-center justify-center rounded-md border border-border hover:bg-accent"
-              aria-label="放大"
-            >
-              <ZoomIn className="size-4" />
-            </button>
-          </div>
-          {highlight && highlight.page !== currentPage ? (
-            <button
-              onClick={() => setCurrentPage(highlight.page)}
-              className="ml-auto rounded-full bg-amber-400/20 px-3 py-1 text-amber-700 hover:bg-amber-400/30"
-            >
-              跳到高亮页 P.{highlight.page}
-            </button>
-          ) : null}
-        </div>
-        <div className="flex-1 overflow-auto bg-muted/40 p-4">
-          {error ? (
-            <div className="grid h-full place-items-center text-sm text-destructive">{error}</div>
-          ) : loading ? (
-            <div className="grid h-full place-items-center text-sm text-muted-foreground">
-              <span className="inline-flex items-center gap-2">
-                <Loader2 className="size-4 animate-spin" /> PDF 加载中…
-              </span>
-            </div>
-          ) : null}
-          <div
-            className={`relative mx-auto w-fit shadow-lg ${loading || error ? "hidden" : ""}`}
-            ref={overlayRef}
-          >
-            <canvas ref={canvasRef} className="block bg-white" />
-            <div
-              ref={highlightRef}
-              style={{ display: "none" }}
-              className="pointer-events-none absolute rounded-sm border-2 border-amber-500 bg-amber-400/20"
-            />
-          </div>
-        </div>
+        {toolbar}
+        {canvasView}
       </DialogContent>
     </Dialog>
   );

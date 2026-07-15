@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { Search, FileText, ExternalLink } from "lucide-react";
+import { Search, FileText } from "lucide-react";
 import { useMemo, useState } from "react";
 import { getEvidenceDetailItems } from "@/lib/data-service";
 import { PdfViewer } from "@/components/pdf-viewer";
@@ -19,7 +19,6 @@ function AnalysisEvidence() {
   const [keyword, setKeyword] = useState("");
   const [section, setSection] = useState("全部");
   const [selected, setSelected] = useState<EvidenceDetailItem | null>(items[0] ?? null);
-  const [viewerOpen, setViewerOpen] = useState(false);
 
   const sectionCounts = useMemo(() => {
     const counts = new Map<string, number>();
@@ -42,13 +41,8 @@ function AnalysisEvidence() {
     });
   }, [items, section, keyword]);
 
-  const openViewer = (item: EvidenceDetailItem) => {
-    setSelected(item);
-    if (item.documentId) setViewerOpen(true);
-  };
-
   return (
-    <div className="grid h-[calc(100vh-3.5rem-14.5rem)] min-h-[640px] grid-cols-[260px_1fr_380px]">
+    <div className="grid h-[calc(100vh-3.5rem-14.5rem)] min-h-[640px] grid-cols-[240px_minmax(360px,1fr)_minmax(460px,40vw)]">
       <aside className="overflow-y-auto border-r border-border bg-card/40 p-5">
         <h3 className="font-serif text-base font-semibold">本分析证据</h3>
         <p className="mt-1 text-xs text-muted-foreground">
@@ -109,16 +103,9 @@ function AnalysisEvidence() {
                 <span className="rounded-full bg-[color:var(--risk-mid)]/15 px-2 py-0.5 text-[10px] text-[oklch(0.45_0.12_75)]">
                   {e.risk}
                 </span>
-                <button
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    openViewer(e);
-                  }}
-                  disabled={!e.documentId}
-                  className="inline-flex items-center gap-1 text-xs text-primary hover:underline disabled:cursor-not-allowed disabled:text-muted-foreground disabled:no-underline"
-                >
-                  查看原文 <ExternalLink className="size-3" />
-                </button>
+                <span className="text-xs text-primary">
+                  {e.documentId ? "右侧原文已定位" : "未关联 PDF"}
+                </span>
               </div>
             </article>
           ))}
@@ -140,31 +127,30 @@ function AnalysisEvidence() {
             <div className="mt-1 text-[11px] text-muted-foreground">
               [{selected.id}] · {selected.section} · P.{selected.page}
             </div>
-            <button
-              onClick={() => openViewer(selected)}
-              disabled={!selected.documentId}
-              className="mt-4 block w-full text-left disabled:cursor-not-allowed"
-            >
-              <div className="aspect-[3/4] overflow-hidden rounded-lg border border-border bg-paper transition hover:border-primary/40">
-                <div className="grid h-full place-items-center bg-gradient-to-br from-[color:var(--sage-soft)]/30 to-[color:var(--amber-soft)]/30 text-center text-xs text-muted-foreground">
-                  <div>
-                    <FileText className="mx-auto size-8 text-primary/40" />
-                    <p className="mt-3 px-4 leading-relaxed">
-                      招股书 PDF 第 {selected.page} 页
-                      {selected.bbox?.length === 4 ? (
-                        <>
-                          <br />
-                          bbox [{selected.bbox.map((v) => v.toFixed(1)).join(", ")}]
-                        </>
-                      ) : null}
-                    </p>
-                    <p className="mt-2 text-[10px]">
-                      {selected.documentId ? "点击打开原文并高亮定位" : "该证据未关联 PDF 文档"}
-                    </p>
-                  </div>
-                </div>
+            {selected.documentId ? (
+              <PdfViewer
+                inline
+                open
+                onOpenChange={() => undefined}
+                documentId={selected.documentId}
+                page={selected.page}
+                highlight={
+                  selected.bbox?.length === 4
+                    ? {
+                        page: selected.page,
+                        bbox: selected.bbox,
+                        coordinateSpace: selected.bboxCoordinateSpace,
+                        label: selected.section,
+                      }
+                    : null
+                }
+                title={`证据 ${selected.id} · ${selected.section}`}
+              />
+            ) : (
+              <div className="mt-4 grid aspect-[3/4] place-items-center rounded-lg border border-border bg-paper text-center text-xs text-muted-foreground">
+                该证据未关联 PDF 文档
               </div>
-            </button>
+            )}
           </>
         ) : (
           <div className="mt-4 aspect-[3/4] overflow-hidden rounded-lg border border-border bg-paper">
@@ -177,21 +163,6 @@ function AnalysisEvidence() {
           </div>
         )}
       </aside>
-
-      {selected?.documentId ? (
-        <PdfViewer
-          open={viewerOpen}
-          onOpenChange={setViewerOpen}
-          documentId={selected.documentId}
-          page={selected.page}
-          highlight={
-            selected.bbox?.length === 4
-              ? { page: selected.page, bbox: selected.bbox, label: selected.section }
-              : null
-          }
-          title={`证据 ${selected.id} · ${selected.section}`}
-        />
-      ) : null}
     </div>
   );
 }

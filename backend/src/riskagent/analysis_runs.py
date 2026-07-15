@@ -46,7 +46,7 @@ from riskagent.seed_data import AGENT_SPECS
 from riskagent.seed_data import AGENT_EXPERTS
 from riskagent.models import AnalysisRunRow, EvidenceLibraryRow, ReportLibraryRow
 from riskagent.providers.llm import get_default_llm_client
-from riskagent.retrieval import ChunkSearchResult, prospectus_hybrid_search
+from riskagent.retrieval import ChunkSearchResult, PostgresChunkIndexer, prospectus_hybrid_search
 from riskagent.workers.analysis import dispatch_analysis_job
 
 
@@ -125,6 +125,7 @@ class DocumentBlock(BaseModel):
     block_type: str = "text"
     text: str
     bbox: list[float]
+    bbox_coordinate_space: Literal["pdf_points", "normalized_1000"] = "pdf_points"
     char_start: int = 0
     char_end: int = 0
     source_hash: str
@@ -140,6 +141,7 @@ class RunEvidence(BaseModel):
     section_path: str
     text: str
     bbox: list[float] = Field(default_factory=list)
+    bbox_coordinate_space: Literal["pdf_points", "normalized_1000"] | None = None
     char_start: int = 0
     char_end: int = 0
     source_hash: str = ""
@@ -154,6 +156,12 @@ class RunEvidence(BaseModel):
             match = re.match(r"^block_(.+)_\d{4}_\d{3}$", self.document_block_id)
             if match:
                 self.document_id = match.group(1)
+        if self.bbox_coordinate_space is None:
+            self.bbox_coordinate_space = (
+                "normalized_1000"
+                if "_chunk_" in self.document_block_id
+                else "pdf_points"
+            )
         return self
 
 
@@ -610,7 +618,105 @@ class AnalysisRunRepository:
         return self.get(run_id).events[after:]
 
     def evidence(self, run_id: str) -> list[RunEvidence]:
-        return self.get(run_id).evidence
+        run = self.get(run_id)
+        if run.evidence:
+            return run.evidence
+        return self._recover_rejected_evidence(run)
+
+    def _recover_rejected_evidence(self, run: AnalysisRun) -> list[RunEvidence]:
+        """Recover legacy debate-rejected evidence from audit events and PG chunks."""
+        if not self.use_database:
+            return []
+        event_payloads = [
+            event.get("payload") or {}
+            for event in run.events
+            if event.get("event_type") == "evidence_found"
+            and isinstance(event.get("payload"), dict)
+        ]
+        document_ids = {
+            str(payload.get("document_id") or "") for payload in event_payloads
+        } - {""}
+        if not document_ids:
+            return []
+        indexer = PostgresChunkIndexer()
+        try:
+            chunks_by_document = {
+                document_id: indexer.list_document_chunks(document_id)
+                for document_id in document_ids
+            }
+        finally:
+            indexer.close()
+
+        recovered: list[RunEvidence] = []
+        seen_evidence_ids: set[str] = set()
+        for payload in event_payloads:
+            document_id = str(payload.get("document_id") or "")
+            evidence_id = str(payload.get("evidence_id") or "")
+            if evidence_id in seen_evidence_ids:
+                continue
+            try:
+                page_number = int(payload.get("page_number") or 0)
+                bbox = [float(value) for value in payload.get("bbox") or []]
+                confidence = float(payload.get("confidence") or 0)
+            except (TypeError, ValueError):
+                continue
+            if page_number < 1 or len(bbox) != 4:
+                continue
+            block_id = str(payload.get("document_block_id") or "")
+            candidates = chunks_by_document.get(document_id, [])
+            chunk = next((item for item in candidates if item.chunk_id == block_id), None)
+            if chunk is None:
+                target_bbox = tuple(round(value, 4) for value in bbox)
+                chunk = next(
+                    (
+                        item
+                        for item in candidates
+                        if item.page_idx == page_number
+                        and any(
+                            isinstance(region, dict)
+                            and int(region.get("page_idx", -1)) == page_number
+                            and tuple(
+                                round(float(value), 4)
+                                for value in region.get("bbox", [])
+                            )
+                            == target_bbox
+                            for region in item.merged_bboxes
+                        )
+                    ),
+                    None,
+                )
+            if chunk is None:
+                continue
+            metadata = chunk.metadata if isinstance(chunk.metadata, dict) else {}
+            recovered_evidence_id = evidence_id or f"ev_{chunk.chunk_id}"
+            if recovered_evidence_id in seen_evidence_ids:
+                continue
+            coordinate_space = str(metadata.get("bbox_coordinate_space") or "pdf_points")
+            if coordinate_space not in {"pdf_points", "normalized_1000"}:
+                coordinate_space = "pdf_points"
+            recovered.append(
+                RunEvidence(
+                    evidence_id=recovered_evidence_id,
+                    finding_id=str(payload.get("finding_id") or "rejected_finding"),
+                    document_block_id=chunk.chunk_id,
+                    document_id=document_id,
+                    page_number=page_number,
+                    section_path=str(metadata.get("section_path") or chunk.chunk_type),
+                    text=chunk.text[:300],
+                    bbox=bbox,
+                    bbox_coordinate_space=coordinate_space,
+                    char_start=int(metadata.get("char_start") or 0),
+                    char_end=int(metadata.get("char_end") or 0),
+                    source_hash=str(
+                        metadata.get("source_hash")
+                        or hashlib.sha256(chunk.text.encode("utf-8")).hexdigest()
+                    ),
+                    confidence=confidence,
+                    verifier_status="rejected_by_debate",
+                )
+            )
+            seen_evidence_ids.add(recovered_evidence_id)
+        return recovered
 
     def report(self, run_id: str) -> ReportDraft:
         report = self.get(run_id).report
@@ -1004,9 +1110,11 @@ class AnalysisRunRepository:
                         payload={
                             "evidence_id": item.evidence_id,
                             "finding_id": item.finding_id,
+                            "document_block_id": item.document_block_id,
                             "document_id": item.document_id,
                             "page_number": item.page_number,
                             "bbox": item.bbox,
+                            "bbox_coordinate_space": item.bbox_coordinate_space,
                             "confidence": item.confidence,
                         },
                     )
@@ -1500,6 +1608,7 @@ class AnalysisRunRepository:
                         section_path=candidate["section_path"],
                         text=candidate["text"][:300],
                         bbox=candidate["bbox"],
+                        bbox_coordinate_space=candidate["bbox_coordinate_space"],
                         char_start=candidate["char_start"],
                         char_end=candidate["char_end"],
                         source_hash=candidate["source_hash"],
@@ -1605,6 +1714,7 @@ class AnalysisRunRepository:
                     section_path=candidate["section_path"],
                     text=candidate["text"][:300],
                     bbox=candidate["bbox"],
+                    bbox_coordinate_space=candidate["bbox_coordinate_space"],
                     char_start=candidate["char_start"],
                     char_end=candidate["char_end"],
                     source_hash=candidate["source_hash"],
@@ -2030,7 +2140,9 @@ class AnalysisRunRepository:
             removed_evidence_ids = {
                 item.evidence_id for item in run.evidence if item.finding_id in removed_ids
             }
-            run.evidence = [item for item in run.evidence if item.finding_id not in removed_ids]
+            for item in run.evidence:
+                if item.finding_id in removed_ids:
+                    item.verifier_status = "rejected_by_debate"
             for module in run.module_results:
                 module["finding_ids"] = [
                     fid
@@ -2473,6 +2585,9 @@ def _chunk_evidence_candidate(item: ChunkSearchResult) -> dict[str, Any]:
         "section_path": str(metadata.get("section_path") or item.chunk_type),
         "text": item.text,
         "bbox": [float(value) for value in region.get("bbox", [])],
+        "bbox_coordinate_space": str(
+            metadata.get("bbox_coordinate_space") or "pdf_points"
+        ),
         "char_start": int(metadata.get("char_start") or 0),
         "char_end": int(metadata.get("char_end") or 0),
         "source_hash": str(
@@ -2507,6 +2622,7 @@ def _block_candidates_for_finding(
                 "section_path": block.section_path,
                 "text": block.text,
                 "bbox": block.bbox,
+                "bbox_coordinate_space": block.bbox_coordinate_space,
                 "char_start": block.char_start,
                 "char_end": block.char_end,
                 "source_hash": block.source_hash,
@@ -2527,6 +2643,8 @@ def _apply_verification(
         status = status_by_finding.get(finding.finding_id, "needs_human_review")
         finding.requires_human_review = status in {"weakly_supported", "needs_human_review"}
     for item in evidence:
+        if item.verifier_status == "rejected_by_debate":
+            continue
         item.verifier_status = status_by_finding.get(item.finding_id, "needs_human_review")
 
 

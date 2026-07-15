@@ -1281,6 +1281,15 @@ without copying, parsing, or embedding them again. Their canonical
 are materialized as `DocumentBlock` values only when an analysis workflow asks
 for them.
 
+The workspace loads this merged document list on entry and allows a registered
+prospectus to be selected before creating an analysis run. Upload deduplication
+also checks registered documents by SHA-256, and the list prefers the canonical
+registered/indexed document when an upload asset has the same file hash. This
+prevents an already indexed prospectus from being presented as requiring a new
+upload or a second parse. Local Vite origins on `localhost`, `127.0.0.1`, and
+`0.0.0.0` are accepted on any port so failed CORS preflights cannot silently
+turn populated backend responses into empty workspace state.
+
 Legacy MinerU chunks are upgraded idempotently on first retrieval. Rows without
 `metadata.page_number_base=1` receive a one-time `page_idx + 1` update in the
 chunk row and both bbox JSON arrays, plus:
@@ -1307,3 +1316,45 @@ pixel canvas, the observed padded overlay was left `37.922`, top `94.227`, width
 This implementation changes document/evidence data handling and evidence
 traceability and adds grounded document QA. Generated-report contracts are
 unchanged.
+
+### Evidence Lifecycle and Inline PDF Review
+
+Analysis evidence and accepted risk findings have different lifecycles. If the
+red-team debate rejects a finding, that finding is removed from report and
+module references, but its source evidence remains in the run evidence ledger
+with `verifier_status=rejected_by_debate`. This preserves the audit trail without
+presenting rejected conclusions as report findings. For analysis runs created
+before this rule, `GET /analysis-runs/{run_id}/evidence` can reconstruct only
+traceable candidates recorded by `evidence_found` events and matched to real
+PostgreSQL chunks; unmatched events are omitted rather than synthesized.
+
+Both the global evidence library and the per-analysis evidence page render the
+selected PDF page directly in the right-hand panel. The viewer receives the
+evidence `document_id`, one-based `page_number`, bbox, and explicit coordinate
+space, then draws the overlay in either PDF points or normalized-1000 units.
+The PDF.js loader supplies a compatibility implementation when a browser lacks
+the newer static `URL.parse` API. PDF.js CMaps, standard fonts, and WASM files
+are generated under `frontend/public/pdfjs` by the frontend postinstall script.
+
+This behavior touches evidence data handling and traceability. Rejected evidence
+is visible for audit, while report generation continues to reference accepted
+findings and their approved evidence only.
+
+### Asynchronous Upload Processing
+
+`POST /documents/upload` no longer keeps the HTTP request open while MinerU
+parses a prospectus. In PostgreSQL mode it validates and registers the original
+PDF first, returns the canonical `document_id` with
+`processing_status=queued`, and schedules the canonical MinerU -> chunker ->
+PostgreSQL indexing pipeline as a background task. Duplicate file hashes reuse
+the existing registered document; already indexed documents are returned as
+`ready` and do not start MinerU again.
+
+`GET /documents/{document_id}` exposes `queued`, `processing`, `ready`, or
+`failed` state together with the current indexed block count. The frontend polls
+this endpoint every three seconds, keeps navigation responsive, and disables
+question submission and analysis creation until PostgreSQL contains searchable
+chunks. A failed background job is visible to the user and remains recorded on
+`prospectus_documents.status`; it is not silently replaced with the legacy
+PyMuPDF retrieval path. Local non-database tests retain the lightweight PyMuPDF
+path only as an isolated test-mode boundary.
