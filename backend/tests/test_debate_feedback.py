@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 from riskagent.agents import debate as debate_module
@@ -17,43 +16,15 @@ from riskagent.analysis_runs import (
 from riskagent.risk_rules import RiskRuleRepository
 
 
-class _SupplementSearchIndex:
-    def __init__(self) -> None:
-        self.calls: list[dict[str, Any]] = []
-
-    def search(self, *, run_id: str, query: str, limit: int = 5):
-        self.calls.append({"run_id": run_id, "query": query, "limit": limit})
-        return [
-            SimpleNamespace(
-                block_id="block-supplement",
-                document_id="doc-supplement",
-                page_number=9,
-                section_path="风险因素/补充证据",
-                text="补充证据显示客户集中度和回款风险仍需关注。",
-                bbox=[0, 0, 10, 10],
-                char_start=0,
-                char_end=24,
-                source_hash="hash-supplement",
-                score=0.88,
-            )
-        ]
-
-
 def _repository(
     tmp_path: Path,
     analysis_repo_factory,
-    *,
-    search_index: Any | None = None,
 ) -> AnalysisRunRepository:
-    kwargs: dict[str, Any] = {}
-    if search_index is not None:
-        kwargs["search_index"] = search_index
     return analysis_repo_factory(
         rule_repository=RiskRuleRepository(
             Path(__file__).parents[1] / "configs" / "risk_rules.yaml"
         ),
         path=tmp_path / "runs.yaml",
-        **kwargs,
     )
 
 
@@ -178,7 +149,6 @@ def test_approved_finding_ids_confidence_boosted(tmp_path, monkeypatch, analysis
 def test_request_supplement_triggers_supplement_loop(
     tmp_path, monkeypatch, analysis_repo_factory
 ):
-    search_index = _SupplementSearchIndex()
     monkeypatch.setattr(
         debate_module,
         "run_debate_phase_sync",
@@ -187,13 +157,12 @@ def test_request_supplement_triggers_supplement_loop(
             required_supplements=["补充回款风险原文证据"],
         ),
     )
-    repo = _repository(tmp_path, analysis_repo_factory, search_index=search_index)
+    repo = _repository(tmp_path, analysis_repo_factory)
     run = repo._run_debate_stage(_run_with_findings(repo))
 
     # A supplement without a document_id cannot query the document-scoped
     # PostgreSQL index, and must not fall back to the legacy run index.
     assert len(run.evidence) == 2
-    assert search_index.calls == []
 
 
 def test_escalate_human_pauses_pipeline(tmp_path, monkeypatch, analysis_repo_factory):

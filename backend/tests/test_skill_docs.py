@@ -12,7 +12,6 @@ from riskagent.skill_docs import (
 
 EXPECTED_SKILLS = {
     "pdf-parse-and-trace",
-    "rag-embedding-index",
     "risk-rule-screening",
     "expert-risk-analysis",
     "evidence-verification",
@@ -20,7 +19,7 @@ EXPECTED_SKILLS = {
 }
 
 
-def test_all_six_skill_docs_load_with_anthropic_frontmatter():
+def test_all_skill_docs_load_with_anthropic_frontmatter():
     docs = load_skill_docs()
     assert {doc.name for doc in docs} == EXPECTED_SKILLS
     for doc in docs:

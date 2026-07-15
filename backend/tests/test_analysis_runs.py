@@ -322,7 +322,7 @@ def test_run_debate_stage_emits_structured_failure_event_on_DebateLLMError(
 def test_completed_run_archives_report_into_knowledge_library(tmp_path, analysis_repo_factory):
     from sqlalchemy import select
 
-    from riskagent.models import ReportLibraryRow, RetrievalIndexRow
+    from riskagent.models import ReportLibraryRow
 
     rule_repo = RiskRuleRepository(Path(__file__).parents[1] / "configs" / "risk_rules.yaml")
     repo = analysis_repo_factory(
@@ -352,28 +352,16 @@ def test_completed_run_archives_report_into_knowledge_library(tmp_path, analysis
         assert row.markdown == run.report.markdown
         assert row.sections and all("title" in item and "text" in item for item in row.sections)
 
-        indexed = session.scalars(
-            select(RetrievalIndexRow).where(RetrievalIndexRow.run_id == "knowledge_reports")
-        ).all()
-        assert indexed == []
-        assert all(item.document_id == f"report_{run.run_id}" for item in indexed)
-        assert all(item.payload["block_type"] == "report_section" for item in indexed)
-
     archive_events = [
         event for event in run.events if event.get("actor_name") == "report_library"
     ]
     assert archive_events and archive_events[0]["event_type"] == "tool_completed"
 
     # Idempotent: re-archiving the same run must not duplicate rows.
-    first_count = len(indexed)
     repo._archive_report(run)
     with repo.session_factory() as session:
         rows = session.scalars(select(ReportLibraryRow)).all()
         assert len(rows) == 1
-        indexed_again = session.scalars(
-            select(RetrievalIndexRow).where(RetrievalIndexRow.run_id == "knowledge_reports")
-        ).all()
-        assert len(indexed_again) == first_count
 
 
 def test_knowledge_reports_api_lists_and_fetches_archived_reports(monkeypatch, tmp_path):

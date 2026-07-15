@@ -307,7 +307,7 @@ MVP 也应实现最小 Hybrid Search，不建议只做向量检索。
 retrieval.hybrid_search(query, filters) -> EvidenceCandidate[]
 ```
 
-Agent、特征抽取和 Verifier 只调用统一检索接口，不直接依赖 Qdrant、PostgreSQL FTS 或 OpenSearch。
+Agent、特征抽取和 Verifier 只调用统一检索接口，不直接拼接 PostgreSQL FTS 或 pgvector SQL。
 
 ## 9. 风险特征与 Agent 输出
 
@@ -602,7 +602,7 @@ common/providers/
 | 文件存储 | MinIO | S3 / OSS / COS / 企业私有 MinIO |
 | PDF 解析 | PyMuPDF + pdfplumber | PyMuPDF + pdfplumber + 版面服务优化 |
 | OCR | PaddleOCR 可选兜底 | OCR 服务化 |
-| 向量库 | Qdrant | Qdrant / Milvus |
+| 向量库 | PostgreSQL / pgvector | PostgreSQL / pgvector |
 | 全文检索 | PostgreSQL FTS 或轻量 BM25 | OpenSearch / Elasticsearch / PostgreSQL FTS |
 | Hybrid Search | weighted score + section filter | BM25 + vector + section/page filter + rerank |
 | Rerank | 预留接口，默认不开 | cross-encoder 或 LLM rerank |

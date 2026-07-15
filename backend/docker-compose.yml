@@ -12,8 +12,6 @@ services:
       CORS_ALLOW_ORIGINS: http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174
       DATABASE_URL: postgresql+psycopg://prospect_alpha:prospect_alpha@postgres:5432/prospect_alpha
       REDIS_URL: redis://redis:6379/0
-      QDRANT_URL: http://qdrant:6333
-      VECTOR_STORE_PROVIDER: qdrant
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: root
       MINIO_SECRET_KEY: root1234
@@ -37,8 +35,6 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      qdrant:
-        condition: service_started
       minio:
         condition: service_started
     healthcheck:
@@ -59,8 +55,6 @@ services:
       LANGGRAPH_CHECKPOINT_BACKEND: postgres
       DATABASE_URL: postgresql+psycopg://prospect_alpha:prospect_alpha@postgres:5432/prospect_alpha
       REDIS_URL: redis://redis:6379/0
-      QDRANT_URL: http://qdrant:6333
-      VECTOR_STORE_PROVIDER: qdrant
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: root
       MINIO_SECRET_KEY: root
@@ -82,8 +76,6 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      qdrant:
-        condition: service_started
       minio:
         condition: service_started
 
@@ -116,14 +108,6 @@ services:
       timeout: 5s
       retries: 12
 
-  qdrant:
-    image: qdrant/qdrant:v1.12.1
-    ports:
-      - "6333:6333"
-      - "6334:6334"
-    volumes:
-      - qdrant_data:/qdrant/storage
-
   minio:
     image: minio/minio:RELEASE.2024-10-13T13-34-11Z
     command: server /data --console-address ":9001"
@@ -139,5 +123,4 @@ services:
 volumes:
   agent_runtime_data:
   postgres_data:
-  qdrant_data:
   minio_data:

@@ -18,7 +18,6 @@ from riskagent.models import (
     DocumentAssetRow,
     DocumentBlockRow,
     EvidenceLibraryRow,
-    RetrievalIndexRow,
 )
 from riskagent.providers.object_store import LocalObjectStore
 from riskagent.risk_rules import RiskRuleRepository
@@ -254,6 +253,13 @@ def test_pdf_upload_drives_analysis_with_page_and_bbox_evidence(
 def test_database_persistence_covers_document_run_and_evidence(
     tmp_path, analysis_repo_factory
 ):
+    class FakePostgresIndexer:
+        def indexed_chunk_count(self, _document_id: str) -> int:
+            return 0
+
+        def index_chunks(self, *, chunks, **_kwargs) -> int:
+            return len(chunks)
+
     engine = make_engine(f"sqlite:///{tmp_path / 'runtime.db'}")
     Base.metadata.create_all(bind=engine)
     session_factory = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
@@ -261,6 +267,7 @@ def test_database_persistence_covers_document_run_and_evidence(
         session_factory=session_factory,
         use_database=True,
         object_store=LocalObjectStore(tmp_path / "object-store", bucket="db-test"),
+        chunk_indexer=FakePostgresIndexer(),  # type: ignore[arg-type]
     )
     analysis_repo = analysis_repo_factory(
         rule_repository=_rule_repo(),
@@ -289,9 +296,6 @@ def test_database_persistence_covers_document_run_and_evidence(
         assert session.query(DocumentAssetRow).count() == 1
         assert session.query(DocumentBlockRow).count() >= 1
         assert session.query(AnalysisRunRow).count() == 1
-        # Retrieval is document-scoped in rag.prospectus_chunks; the legacy
-        # run-scoped retrieval_index table must remain unused.
-        assert session.query(RetrievalIndexRow).count() == 0
         assert session.query(EvidenceLibraryRow).count() >= 1
 
 

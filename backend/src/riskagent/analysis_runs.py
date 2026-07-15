@@ -47,7 +47,6 @@ from riskagent.seed_data import AGENT_EXPERTS
 from riskagent.models import AnalysisRunRow, EvidenceLibraryRow, ReportLibraryRow
 from riskagent.providers.llm import get_default_llm_client
 from riskagent.retrieval import ChunkSearchResult, prospectus_hybrid_search
-from riskagent.retrieval.hybrid import HybridSearchIndex
 from riskagent.workers.analysis import dispatch_analysis_job
 
 
@@ -326,7 +325,6 @@ class AnalysisRunRepository:
         document_repository: DocumentRepository | None = None,
         session_factory=SessionLocal,
         use_database: bool | None = None,
-        search_index: HybridSearchIndex | None = None,
         chunk_retriever: Callable[..., list[ChunkSearchResult]] | None = None,
         agent_supervisor: AgentTeamSupervisor | None = None,
         report_provider: Callable[..., Any] | None = None,
@@ -360,7 +358,6 @@ class AnalysisRunRepository:
                 future=True,
             )
         self.search_cache: TTLCache[list[dict[str, Any]]] = TTLCache(ttl_seconds=30, max_items=256)
-        self.search_index = search_index or HybridSearchIndex(session_factory=self.session_factory)
         self.chunk_retriever = chunk_retriever or prospectus_hybrid_search
         self.agent_supervisor = agent_supervisor or AgentTeamSupervisor(
             repository=self.rule_repository,
@@ -787,11 +784,8 @@ class AnalysisRunRepository:
                 )
                 self._save_run(run)
 
-            indexed_count = self.search_index.index_blocks(
-                run_id=run.run_id,
-                blocks=run.document_blocks,
-                on_progress=_on_index_progress,
-            )
+            indexed_count = len(run.document_blocks)
+            _on_index_progress(indexed_count, indexed_count)
             run.progress = {
                 **run.progress,
                 "updated_at": _now(),
@@ -1328,7 +1322,7 @@ class AnalysisRunRepository:
                         "tool_completed",
                         "report_library",
                         "报告沉淀完成",
-                        f"报告已入知识库并索引 {archived} 个分节，供后续分析检索复用。",
+                        f"报告已入知识库，共沉淀 {archived} 个分节。",
                         stage_key="quality_review",
                         action_label="报告沉淀",
                     )
@@ -1397,10 +1391,11 @@ class AnalysisRunRepository:
     ) -> list[ParsedDocumentBlock]:
         if payload.document_id:
             try:
-                return self.document_repository.ensure_parsed(
+                self.document_repository.prepare_for_retrieval(
                     payload.document_id,
                     on_progress=on_progress,
                 )
+                return self.document_repository.get_blocks(payload.document_id)
             except KeyError:
                 if not payload.document_text.strip():
                     raise
@@ -1693,13 +1688,7 @@ class AnalysisRunRepository:
         return promoted
 
     def _archive_report(self, run: AnalysisRun) -> int:
-        """Persist the final report into the knowledge library and retrieval index.
-
-        Idempotent per run: the DB row is keyed by source_run_id, and section
-        blocks reuse deterministic block_ids under the shared
-        ``knowledge_reports`` index (append semantics, replace=False) so later
-        runs can retrieve historical conclusions. Failures are tolerated — a
-        completed analysis must never be failed by archival."""
+        """Persist the final report into the report library, idempotently per run."""
 
         if run.report is None or not run.report.markdown.strip():
             return 0
@@ -1747,38 +1736,7 @@ class AnalysisRunRepository:
                 )
             )
             return 0
-        blocks = [
-            DocumentBlock(
-                block_id=f"reportsec_{run.run_id}_{index:03d}",
-                document_id=f"report_{run.run_id}",
-                page_number=0,
-                section_path=f"{run.company_name}/{section['title']}",
-                block_type="report_section",
-                text=section["text"][:4000],
-                bbox=[],
-                source_hash=hashlib.sha256(section["text"].encode("utf-8")).hexdigest(),
-            )
-            for index, section in enumerate(sections)
-            if section["text"].strip()
-        ]
-        if not blocks:
-            return 0
-        try:
-            return self.search_index.index_blocks(
-                run_id="knowledge_reports", blocks=blocks, replace=False
-            )
-        except Exception as exc:
-            run.events.append(
-                _event(
-                    "tool_failed",
-                    "report_library",
-                    "报告索引失败",
-                    f"报告已入库，但检索索引失败：{type(exc).__name__}: {exc}",
-                    stage_key="quality_review",
-                    action_label="报告沉淀",
-                )
-            )
-            return 0
+        return len([section for section in sections if section["text"].strip()])
 
     def _run_debate_stage(self, run: AnalysisRun) -> AnalysisRun:
         """Run the 2-round expert debate phase between risk_identification and cross_validation."""

@@ -15,7 +15,6 @@ dependencies = [
   "pydantic>=2.8.0",
   "PyYAML>=6.0.0",
   "python-multipart>=0.0.9",
-  "qdrant-client>=1.12.0,<1.14.0",
   "redis>=5.0.0",
   "rq>=1.16.0",
   "SQLAlchemy>=2.0.0",

@@ -44,9 +44,13 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     def _probe_embedding_provider() -> None:
-        if not os.getenv("EMBEDDING_API_KEY", "").strip():
+        embedding_key = (
+            os.getenv("EMBEDDING_API_KEY", "").strip()
+            or os.getenv("DASHSCOPE_API_KEY", "").strip()
+        )
+        if not embedding_key:
             logger.warning(
-                "EMBEDDING_API_KEY not configured — retrieval falls back to hashing "
+                "EMBEDDING_API_KEY/DASHSCOPE_API_KEY not configured — retrieval falls back to hashing "
                 "vectors; analysis runs requiring real embeddings will fail fast."
             )
             return

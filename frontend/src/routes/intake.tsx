@@ -28,6 +28,7 @@ import {
   type AskCitation,
 } from "@/lib/data-service";
 import { toast } from "sonner";
+import { PdfViewer, type PdfHighlight } from "@/components/pdf-viewer";
 
 export const Route = createFileRoute("/intake")({
   head: () => ({
@@ -90,6 +91,10 @@ function IntakePage() {
   const [pdfCitations, setPdfCitations] = useState<AskCitation[]>([]);
   const [pdfAsking, setPdfAsking] = useState(false);
   const [pdfError, setPdfError] = useState<string | null>(null);
+  const [pdfEvidence, setPdfEvidence] = useState<{
+    open: boolean;
+    highlight: PdfHighlight | null;
+  }>({ open: false, highlight: null });
   const pdfAbortRef = useRef<AbortController | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [matching, setMatching] = useState(false);
@@ -100,6 +105,7 @@ function IntakePage() {
       page_count: number;
       file_size_bytes: number;
       created_at: string;
+      block_count: number;
     }[]
   >([]);
 
@@ -145,6 +151,7 @@ function IntakePage() {
       page_count: doc.page_count,
       file_size_bytes: doc.file_size_bytes,
       created_at: doc.created_at,
+      block_count: doc.block_count,
     });
     setMatchResults([]);
     toast.success(`已选用文档：${doc.filename}`);
@@ -315,6 +322,11 @@ function IntakePage() {
                         ? `${uploadedDocument.page_count} 页 · ${formatBytes(uploadedDocument.file_size_bytes)} · ${uploadedDocument.block_count ?? 0} 个检索块已入库`
                         : `${data?.uploadedFile.pages} 页 · ${data?.uploadedFile.size} · 上传于 ${data?.uploadedFile.uploadedAt}`}
                     </div>
+                    {uploadedDocument ? (
+                      <div className="mt-1 truncate font-mono text-[10px] text-muted-foreground/80">
+                        当前问答文档 ID：{uploadedDocument.document_id}
+                      </div>
+                    ) : null}
                   </div>
                   <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary">
                     已接入
@@ -397,16 +409,34 @@ function IntakePage() {
                       引用证据（{pdfCitations.length}）
                     </div>
                     <div className="mt-1.5 flex flex-wrap gap-1.5">
-                      {pdfCitations.map((c) => (
-                        <span
-                          key={c.block_id}
-                          title={c.snippet}
-                          className="inline-flex items-center gap-1 rounded-full border border-border bg-muted/40 px-2 py-0.5 text-[10.5px] text-muted-foreground"
-                        >
-                          <FileText className="size-3 text-primary" />
-                          P.{c.page_number} · {c.section_path}
-                        </span>
-                      ))}
+                      {pdfCitations.map((c) => {
+                        const region =
+                          c.bbox_regions.find((item) => item.page_number === c.page_number) ??
+                          c.bbox_regions[0];
+                        return (
+                          <button
+                            key={c.block_id}
+                            title={c.snippet}
+                            type="button"
+                            onClick={() =>
+                              setPdfEvidence({
+                                open: true,
+                                highlight: region
+                                  ? {
+                                      page: region.page_number,
+                                      bbox: region.bbox,
+                                      label: `${c.section_path} · 证据 ${c.block_id}`,
+                                    }
+                                  : { page: c.page_number, bbox: [], label: c.section_path },
+                              })
+                            }
+                            className="inline-flex items-center gap-1 rounded-full border border-border bg-muted/40 px-2 py-0.5 text-[10.5px] text-muted-foreground transition hover:border-primary/50 hover:bg-primary/8 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                          >
+                            <FileText className="size-3 text-primary" />
+                            P.{c.page_number} · {c.section_path}
+                          </button>
+                        );
+                      })}
                     </div>
                   </div>
                 ) : null}
@@ -822,6 +852,16 @@ function IntakePage() {
           )}
         </div>
       </div>
+      {uploadedDocument ? (
+        <PdfViewer
+          open={pdfEvidence.open}
+          onOpenChange={(open) => setPdfEvidence((value) => ({ ...value, open }))}
+          documentId={uploadedDocument.document_id}
+          page={pdfEvidence.highlight?.page}
+          highlight={pdfEvidence.highlight}
+          title={`${uploadedDocument.filename} · 引用证据`}
+        />
+      ) : null}
     </div>
   );
 

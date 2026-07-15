@@ -104,20 +104,6 @@ class ReportLibraryRow(Base):
     created_at: Mapped[str] = mapped_column(String(64))
 
 
-class RetrievalIndexRow(Base):
-    __tablename__ = "retrieval_index"
-
-    index_id: Mapped[str] = mapped_column(String(160), primary_key=True)
-    run_id: Mapped[str] = mapped_column(String(64), index=True)
-    document_id: Mapped[str] = mapped_column(String(64), index=True)
-    block_id: Mapped[str] = mapped_column(String(128), index=True)
-    text: Mapped[str] = mapped_column(Text)
-    terms: Mapped[list[str]] = mapped_column(JSON)
-    embedding: Mapped[list[float]] = mapped_column(JSON)
-    payload: Mapped[dict] = mapped_column(JSON)
-    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now())
-
-
 class AgentExpertRow(Base):
     __tablename__ = "agent_experts"
 

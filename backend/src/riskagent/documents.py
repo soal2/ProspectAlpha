@@ -119,6 +119,7 @@ class DocumentRepository:
         session_factory=SessionLocal,
         use_database: bool | None = None,
         object_store: ObjectStore | None = None,
+        chunk_indexer: PostgresChunkIndexer | None = None,
     ) -> None:
         self.path = Path(path or os.getenv("DOCUMENTS_PATH") or DEFAULT_DOCUMENTS_PATH)
         self.storage_dir = Path(
@@ -127,6 +128,7 @@ class DocumentRepository:
         self.session_factory = session_factory
         self.use_database = use_database if use_database is not None else os.getenv("USE_DATABASE", "1") != "0"
         self.object_store = object_store or get_default_object_store()
+        self.chunk_indexer = chunk_indexer
         if self.use_database:
             bind = getattr(session_factory, "kw", {}).get("bind")
             if bind is None:
@@ -236,9 +238,10 @@ class DocumentRepository:
         """Parse one asset and persist its searchable chunks in PostgreSQL."""
         blocks = self.ensure_parsed(document_id, on_progress=on_progress)
         asset = self.get(document_id)
-        if not self.use_database and chunk_indexer is None:
+        configured_indexer = chunk_indexer or self.chunk_indexer
+        if not self.use_database and configured_indexer is None:
             return asset
-        indexer = chunk_indexer or PostgresChunkIndexer()
+        indexer = configured_indexer or PostgresChunkIndexer()
         try:
             if indexer.indexed_chunk_count(document_id) != len(blocks):
                 indexed_count = indexer.index_chunks(
@@ -249,7 +252,7 @@ class DocumentRepository:
             else:
                 indexed_count = len(blocks)
         finally:
-            if chunk_indexer is None:
+            if configured_indexer is None:
                 indexer.close()
         if indexed_count != len(blocks):
             raise RuntimeError(

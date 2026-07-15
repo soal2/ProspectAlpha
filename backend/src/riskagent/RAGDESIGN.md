@@ -1155,9 +1155,8 @@ own behavior and storage contracts.
 
 ## Main Agent Retrieval Entry Migration
 
-The main analysis-agent workflow must consume the public chunk retrieval
-boundary owned by `retrieval`; it must not create or query the legacy
-run-scoped `HybridSearchIndex`.
+The main analysis-agent workflow consumes the public PostgreSQL chunk retrieval
+boundary owned by `retrieval`; no run-scoped retrieval implementation exists.
 
 Migration scope:
 
@@ -1221,10 +1220,9 @@ The ask endpoint accepts `question` and `top_k` (1 through 10), streams SSE
 `bbox_regions`.
 
 All application retrieval uses `prospectus_hybrid_search(...)` and
-`PostgresChunkIndexer.hybrid_search(...)` with a required `document_id`. The
-compatibility `HybridSearchIndex` only records a temporary run-to-document
-mapping; it does not write Qdrant points or legacy `retrieval_index` rows. The
-application does not fall back to Qdrant or cross-document search.
+`PostgresChunkIndexer.hybrid_search(...)` with a required `document_id`. There
+is no Qdrant provider, legacy `retrieval_index` ORM table, run-scoped index, or
+cross-document fallback in the application runtime.
 
 For the interactive upload path, bboxes are PyMuPDF PDF points with top-left
 origin and downward-positive y. PDF.js receives the same 1-based page number,
@@ -1244,14 +1242,33 @@ one region per page, and the viewer shows only the active page's region.
 ### Real-Scenario Acceptance (2026-07-15)
 
 The flow was exercised with Docker PostgreSQL and a generated two-page PDF
-through the real HTTP API. Upload produced five searchable chunks covering
-pages 1 and 2 in `rag.prospectus_chunks`. A real model question about cash flow
-and supplier concentration returned grounded Chinese text plus citations to the
-correct page-1 block ids and PDF-point bboxes. The frontend `/intake` page also
-loaded against the same backend.
+through the real HTTP API. Upload produced six searchable chunks covering pages
+1 and 2 in `rag.prospectus_chunks`. A real model question about supplier
+concentration returned 82% for the top five suppliers and 41% for the largest
+supplier, with citations to the matching page-2 block ids and PDF-point bboxes.
 
-The environment reported a PostgreSQL collation-version warning (database 2.36
-versus operating system 2.41). It did not affect this acceptance run, but the
+The frontend `/intake` page selected that exact `document_id`, displayed its six
+indexed blocks, submitted the question to
+`POST /documents/{document_id}/ask`, and rendered the streamed answer. Citation
+chips are interactive: selecting the 82% citation opened page 2 at 125% zoom and
+highlighted `[72.0, 148.175, 462.687, 163.289]`. The observed overlay
+`left=87`, `top=182.219`, `width=494.359`, and `height=24.893` exactly matches
+PDF-point scaling plus the viewer's three-pixel outline padding. Browser runtime
+logs contained no warnings or errors.
+
+The MinerU parser was separately started against a real PDF through page
+rendering and model initialization, then intentionally stopped before the model
+download/full parse completed. This confirms that the configured parsing path
+can start without claiming a complete MinerU acceptance run.
+
+Old Qdrant, run-scoped retrieval-index, and compatibility-facade code was
+removed. Runtime retrieval now has one production boundary: PostgreSQL
+`rag.prospectus_chunks`, always filtered by the required `document_id`. Parser
+and QA tests explicitly assert that bbox unions are grouped by page and never
+span pages.
+
+The environment reported a PostgreSQL collation-version warning (database 2.41
+versus container operating system 2.36). It did not affect this acceptance run, but the
 local database should be refreshed during infrastructure maintenance.
 
 This implementation changes document/evidence data handling and evidence

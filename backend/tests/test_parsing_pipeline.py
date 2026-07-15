@@ -106,6 +106,34 @@ def test_block_chunker_outputs_unified_text_table_image_chunks(tmp_path):
     assert json.loads(lines[0])["bbox_refs"][0]["source_item_index"] == 0
 
 
+def test_block_chunker_never_unions_bboxes_across_pages(tmp_path):
+    content_list = tmp_path / "processed" / "cross-page" / "ocr" / "content_list.json"
+    content_list.parent.mkdir(parents=True)
+    content_list.write_text(
+        json.dumps(
+            [
+                {"type": "text", "text": "第一页末尾", "bbox": [10, 20, 30, 40], "page_idx": 0},
+                {"type": "text", "text": "第二页开头", "bbox": [100, 200, 300, 400], "page_idx": 1},
+            ],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    result = ChunkerFactory().create().chunk(
+        ChunkRequest(doc_key="cross-page", content_list_path=content_list, max_chars=100)
+    )
+
+    assert len(result.chunks) == 1
+    assert [
+        {"page_idx": region.page_idx, "bbox": region.bbox}
+        for region in result.chunks[0].merged_bboxes
+    ] == [
+        {"page_idx": 1, "bbox": [10.0, 20.0, 30.0, 40.0]},
+        {"page_idx": 2, "bbox": [100.0, 200.0, 300.0, 400.0]},
+    ]
+
+
 def test_block_chunker_keeps_image_as_hard_text_boundary(tmp_path):
     content_list = tmp_path / "processed" / "ysyy" / "ocr" / "ysyy_content_list.json"
     content_list.parent.mkdir(parents=True)
