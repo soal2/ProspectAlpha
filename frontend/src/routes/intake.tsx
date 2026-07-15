@@ -18,12 +18,16 @@ import {
   createAnalysisDraft,
   getAnalysisOptions,
   getIntakeData,
+  listDocuments,
   startAnalysisRun,
+  updateAnalysisInputs,
   uploadDocument,
   type AnalysisRun,
+  type AnalysisRunInputPatch,
   type AnalysisOptions,
   type AskCitation,
 } from "@/lib/data-service";
+import { toast } from "sonner";
 
 export const Route = createFileRoute("/intake")({
   head: () => ({
@@ -65,6 +69,8 @@ function IntakePage() {
   const [structuredDataText, setStructuredDataText] = useState(sampleStructuredData);
   const [analysisRun, setAnalysisRun] = useState<AnalysisRun | null>(null);
   const [draftRun, setDraftRun] = useState<AnalysisRun | null>(null);
+  const [confirmEdits, setConfirmEdits] = useState<AnalysisRunInputPatch | null>(null);
+  const [confirmDirty, setConfirmDirty] = useState(false);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [selectedRuleSetId, setSelectedRuleSetId] = useState("");
@@ -83,6 +89,63 @@ function IntakePage() {
   const [pdfError, setPdfError] = useState<string | null>(null);
   const pdfAbortRef = useRef<AbortController | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [matching, setMatching] = useState(false);
+  const [matchResults, setMatchResults] = useState<
+    {
+      document_id: string;
+      filename: string;
+      page_count: number;
+      file_size_bytes: number;
+      created_at: string;
+    }[]
+  >([]);
+
+  const handleMatchTarget = async () => {
+    const query = companyName.trim();
+    if (!query) {
+      toast.warning("请先输入公司名称或关键词");
+      return;
+    }
+    setMatching(true);
+    try {
+      const documents = await listDocuments();
+      const tokens = query
+        .toLowerCase()
+        .split(/[\s·、,，/]+/)
+        .filter((token) => token.length >= 2);
+      const hits = documents.filter((doc) => {
+        const name = doc.filename.toLowerCase();
+        return tokens.length
+          ? tokens.some((token) => name.includes(token))
+          : name.includes(query.toLowerCase());
+      });
+      const results = (hits.length ? hits : documents).slice(0, 5);
+      setMatchResults(results);
+      if (!documents.length) {
+        toast.info("知识库暂无已上传的招股书，请先上传 PDF");
+      } else if (!hits.length) {
+        toast.info(`未找到与「${query}」匹配的文档，已列出最近上传的 ${results.length} 份`);
+      } else {
+        toast.success(`匹配到 ${hits.length} 份相关文档`);
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "匹配标的失败");
+    } finally {
+      setMatching(false);
+    }
+  };
+
+  const selectMatchedDocument = (doc: (typeof matchResults)[number]) => {
+    setUploadedDocument({
+      document_id: doc.document_id,
+      filename: doc.filename,
+      page_count: doc.page_count,
+      file_size_bytes: doc.file_size_bytes,
+      created_at: doc.created_at,
+    });
+    setMatchResults([]);
+    toast.success(`已选用文档：${doc.filename}`);
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -143,10 +206,39 @@ function IntakePage() {
                 className="h-10 flex-1 rounded-md border border-border bg-background px-3 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
                 aria-label="分析标的"
               />
-              <button className="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-border bg-background px-4 text-sm font-medium hover:bg-accent">
-                <Search className="size-4" /> 匹配标的
+              <button
+                onClick={() => void handleMatchTarget()}
+                disabled={matching}
+                className="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-border bg-background px-4 text-sm font-medium hover:bg-accent disabled:opacity-60"
+              >
+                {matching ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <Search className="size-4" />
+                )}{" "}
+                匹配标的
               </button>
             </div>
+            {matchResults.length ? (
+              <div className="mt-4 space-y-2">
+                <div className="text-xs text-muted-foreground">
+                  匹配到以下已入库招股书，点击选用（无需重新上传）：
+                </div>
+                {matchResults.map((doc) => (
+                  <button
+                    key={doc.document_id}
+                    onClick={() => selectMatchedDocument(doc)}
+                    className="flex w-full items-center gap-3 rounded-lg border border-border bg-background px-3 py-2 text-left text-sm transition hover:border-primary/40 hover:bg-accent"
+                  >
+                    <FileText className="size-4 shrink-0 text-primary" />
+                    <span className="min-w-0 flex-1 truncate">{doc.filename}</span>
+                    <span className="shrink-0 text-[11px] text-muted-foreground tabular">
+                      {doc.page_count} 页
+                    </span>
+                  </button>
+                ))}
+              </div>
+            ) : null}
           </div>
 
           {/* Upload card */}
@@ -440,27 +532,111 @@ function IntakePage() {
             {draftRun ? "重新生成确认信息" : "识别任务并确认"}
           </button>
         </div>
-        {draftRun ? (
+        {draftRun && confirmEdits ? (
           <div className="mt-5 rounded-xl border border-primary/20 bg-primary/5 p-4">
             <div className="flex flex-wrap items-start justify-between gap-3">
-              <div>
-                <div className="text-sm font-semibold">确认本次港股 IPO 招股书风险调研任务</div>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2 text-sm font-semibold">
+                  确认本次港股 IPO 招股书风险调研任务
+                  {confirmDirty ? (
+                    <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] text-amber-700">
+                      有未保存修改
+                    </span>
+                  ) : null}
+                </div>
                 <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                  我们识别到你上传或选择的是「
-                  {draftRun.understood?.company_name ?? draftRun.company_name}」
-                  的招股书材料。本次任务将重点分析财务风险、业务风险、合规风险、估值风险与上市后破发风险。
+                  下方配置可在按下「开始专家协作分析」前继续调整；调整后将通过 PATCH
+                  同步至后端，再启动运行。
                 </p>
+                <div className="mt-3 grid gap-3 md:grid-cols-2">
+                  <label className="block text-[11px] font-medium text-muted-foreground">
+                    公司名 / 标的
+                    <input
+                      type="text"
+                      value={confirmEdits.company_name ?? ""}
+                      onChange={(event) => patchConfirmField("company_name", event.target.value)}
+                      className="mt-1 h-9 w-full rounded-md border border-border bg-background px-3 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                    />
+                  </label>
+                  <label className="block text-[11px] font-medium text-muted-foreground">
+                    风险规则集
+                    <select
+                      value={confirmEdits.risk_rule_set_id ?? selectedRuleSetId}
+                      onChange={(event) =>
+                        patchConfirmField("risk_rule_set_id", event.target.value)
+                      }
+                      className="mt-1 h-9 w-full rounded-md border border-border bg-background px-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                    >
+                      {options?.risk_rule_sets.map((ruleSet) => (
+                        <option key={ruleSet.rule_set_id} value={ruleSet.rule_set_id}>
+                          {ruleSet.name} · {ruleSet.version} · {ruleSet.rule_count} 条
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+                <div className="mt-3">
+                  <div className="text-[11px] font-medium text-muted-foreground">分析深度</div>
+                  <div className="mt-1.5 grid grid-cols-3 gap-2">
+                    {options?.analysis_depths.map((depth) => (
+                      <button
+                        key={depth.depth}
+                        type="button"
+                        onClick={() => {
+                          patchConfirmField("analysis_depth", depth.depth);
+                          patchConfirmField("max_findings", depth.max_findings);
+                        }}
+                        className={`rounded-lg border px-3 py-2 text-left text-sm ${
+                          confirmEdits.analysis_depth === depth.depth
+                            ? "border-primary bg-primary/10 text-primary"
+                            : "border-border bg-background"
+                        }`}
+                      >
+                        <span className="block font-medium">{depth.label}</span>
+                        <span className="block text-[11px] text-muted-foreground">
+                          上限 {depth.max_findings} 条
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <label className="mt-3 block text-[11px] font-medium text-muted-foreground">
+                  结构化数据（每行 key=value）
+                  <textarea
+                    rows={3}
+                    value={
+                      confirmEdits.structured_data
+                        ? Object.entries(confirmEdits.structured_data)
+                            .map(([key, value]) => `${key}=${value}`)
+                            .join("\n")
+                        : ""
+                    }
+                    onChange={(event) =>
+                      patchConfirmField("structured_data", parseStructuredData(event.target.value))
+                    }
+                    className="field-input mt-1 resize-none"
+                  />
+                </label>
+                <label className="mt-3 block text-[11px] font-medium text-muted-foreground">
+                  招股书素材 URL（可选）
+                  <input
+                    type="url"
+                    placeholder="https://example.com/prospectus.pdf"
+                    value={(confirmEdits.material_url as string) ?? ""}
+                    onChange={(event) =>
+                      patchConfirmField("material_url", event.target.value || undefined)
+                    }
+                    className="mt-1 h-9 w-full rounded-md border border-border bg-background px-3 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                  />
+                </label>
                 <div className="mt-3 flex flex-wrap gap-2 text-[11px]">
                   <span className="rounded-full bg-background px-2 py-1">
                     类型：港股 IPO 招股书风险分析
                   </span>
                   <span className="rounded-full bg-background px-2 py-1">
-                    规则：{draftRun.rule_snapshot.version}
+                    规则快照：{draftRun.rule_snapshot.version}
                   </span>
                   <span className="rounded-full bg-background px-2 py-1">专家：战略层动态选择</span>
-                  <span className="rounded-full bg-background px-2 py-1">
-                    深度：{draftRun.analysis_config.analysis_depth}
-                  </span>
                 </div>
                 {draftRun.blocking_questions?.length ? (
                   <div className="mt-3 rounded-md border border-destructive/20 bg-destructive/5 px-3 py-2 text-xs text-destructive">
@@ -648,6 +824,7 @@ function IntakePage() {
       const run = await createAnalysisDraft(buildPayload());
       setDraftRun(run);
       setAnalysisRun(run);
+      initializeConfirmEdits(run);
     } catch (err) {
       setAnalysisError(err instanceof Error ? err.message : "任务识别失败");
     } finally {
@@ -660,6 +837,11 @@ function IntakePage() {
     setAnalyzing(true);
     setAnalysisError(null);
     try {
+      if (confirmDirty && confirmEdits) {
+        const patched = await updateAnalysisInputs(draftRun.run_id, confirmEdits);
+        setDraftRun(patched);
+        syncTopLevelStateFromEdits(confirmEdits);
+      }
       const run = await startAnalysisRun(draftRun.run_id);
       setAnalysisRun(run);
       await navigate({ to: "/analyses/$id", params: { id: draftRun.run_id } });
@@ -668,6 +850,40 @@ function IntakePage() {
     } finally {
       setAnalyzing(false);
     }
+  }
+
+  function initializeConfirmEdits(run: AnalysisRun) {
+    setConfirmEdits({
+      company_name: run.understood?.company_name ?? run.company_name ?? companyName,
+      risk_rule_set_id: run.rule_snapshot?.rule_set_id ?? selectedRuleSetId,
+      analysis_depth: run.analysis_config?.analysis_depth ?? analysisDepth,
+      structured_data: run.input_summary?.structured_data_keys
+        ? Object.fromEntries(run.input_summary.structured_data_keys.map((key) => [key, ""]))
+        : parseStructuredData(structuredDataText),
+      material_url: undefined,
+    });
+    setConfirmDirty(false);
+  }
+
+  function syncTopLevelStateFromEdits(edits: AnalysisRunInputPatch) {
+    if (typeof edits.company_name === "string") setCompanyName(edits.company_name);
+    if (typeof edits.risk_rule_set_id === "string") setSelectedRuleSetId(edits.risk_rule_set_id);
+    if (edits.analysis_depth) setAnalysisDepth(edits.analysis_depth);
+    if (edits.structured_data) {
+      setStructuredDataText(
+        Object.entries(edits.structured_data)
+          .map(([key, value]) => `${key}=${value}`)
+          .join("\n"),
+      );
+    }
+  }
+
+  function patchConfirmField<K extends keyof AnalysisRunInputPatch>(
+    key: K,
+    value: AnalysisRunInputPatch[K],
+  ) {
+    setConfirmEdits((current) => (current ? { ...current, [key]: value } : current));
+    setConfirmDirty(true);
   }
 
   function buildPayload() {

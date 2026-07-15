@@ -397,3 +397,250 @@ def test_peer_requests_are_limited_to_three_rounds_per_task(tmp_path):
     assert result["result"]["responses"] == [0.0, 1.0, 2.0]
     assert "at most 3 peer requests" in result["result"]["limit_error"]
     runtime.shutdown_all(timeout=3.0)
+
+
+def test_peer_context_sustains_multi_round_debate_via_fresh_tasks(tmp_path):
+    """Each debate round dispatches a fresh TASK so the per-task peer-round budget
+    never trips even though the overall debate exceeds MAX_PEER_ROUNDS_PER_TASK.
+
+    Simulates a 3-expert, 2-round debate: round 1 has each expert issue 2 peer
+    critiques (one per peer), round 2 has each expert issue 2 revision requests.
+    Each round is a separate ``assign_task`` call, so ``PeerContext`` budgets
+    reset and the run completes cleanly.
+    """
+
+    runtime = TeamRuntime("run-debate-fresh-tasks", root_dir=tmp_path)
+    experts = ["financial_agent", "legal_agent", "market_agent"]
+    critique_log: list[tuple[str, str]] = []
+    revision_log: list[tuple[str, str]] = []
+
+    def make_handler(self_name: str):
+        def handler(payload, peer):
+            # Distinguish TASK invocations from PEER-REQUEST responses.
+            # Tasks carry ``task_phase``; peer requests just echo back.
+            task_phase = payload.get("task_phase")
+            if task_phase is None:
+                # We are responding to a peer request — echo so the requester unblocks.
+                return {"responder": self_name, "echo": payload}
+
+            # We are running as a TASK — issue peer requests to every other expert.
+            responses = []
+            for other in experts:
+                if other == self_name:
+                    continue
+                response = peer.request(
+                    other,
+                    {"from": self_name, "to": other, "kind": task_phase},
+                    timeout=3.0,
+                )
+                responses.append(response)
+                if task_phase == "critique":
+                    critique_log.append((self_name, other))
+                else:
+                    revision_log.append((self_name, other))
+            return {"task_phase": task_phase, "responses": responses}
+
+        return handler
+
+    for name in experts:
+        runtime.start_expert(name, make_handler(name))
+    assert runtime.wait_until_idle(experts, timeout=2.0)
+
+    # Round 1: each expert issues a critique task → 3 tasks, each with N-1 = 2 peer requests.
+    for name in experts:
+        runtime.assign_task(name, f"{name}-critique", {"task_phase": "critique"})
+    critique_results = runtime.collect_results(
+        [f"{name}-critique" for name in experts], timeout=8.0
+    )
+    assert all(
+        critique_results[f"{name}-critique"]["status"] == "completed"
+        for name in experts
+    )
+
+    # Round 2: each expert issues a revision task → fresh per-task peer budget.
+    for name in experts:
+        runtime.assign_task(name, f"{name}-revision", {"task_phase": "revision"})
+    revision_results = runtime.collect_results(
+        [f"{name}-revision" for name in experts], timeout=8.0
+    )
+    assert all(
+        revision_results[f"{name}-revision"]["status"] == "completed"
+        for name in experts
+    )
+
+    # 3 experts × 2 peers = 6 critiques and 6 revision-direction messages each direction.
+    assert len(critique_log) == 6
+    assert len(revision_log) == 6
+    runtime.shutdown_all(timeout=3.0)
+
+
+def test_expert_peer_request_to_strategic_agent_is_answered_by_handler(tmp_path):
+    runtime = TeamRuntime("run-strategy-qa", root_dir=tmp_path)
+    runtime.set_strategy_handler(
+        lambda payload, sender: {
+            "kind": payload["kind"],
+            "sender_seen": sender,
+            "guidance": "keep evidence discipline",
+        }
+    )
+
+    def expert_handler(payload, peer):
+        peer_names = {profile["name"] for profile in peer.available_peers}
+        assert STRATEGIC_AGENT in peer_names
+        guidance = peer.request(
+            STRATEGIC_AGENT,
+            {"kind": "needs_more_evidence", "rule_ids": ["R1"]},
+            timeout=5.0,
+        )
+        return {"guidance": guidance}
+
+    runtime.start_expert("financial_agent", expert_handler)
+    assert runtime.wait_until_idle(["financial_agent"], timeout=2.0)
+    runtime.assign_task("financial_agent", "fin-task", {"module": "financial"})
+
+    result = runtime.collect_results(["fin-task"], timeout=8.0)["fin-task"]
+    assert result["status"] == "completed"
+    assert result["result"]["guidance"] == {
+        "kind": "needs_more_evidence",
+        "sender_seen": "financial_agent",
+        "guidance": "keep evidence discipline",
+    }
+    strategy_events = [
+        event
+        for event in runtime.events
+        if event["event_type"] == "strategy_peer_response_sent"
+    ]
+    assert strategy_events and strategy_events[0]["status"] == "completed"
+    assert strategy_events[0]["recipient"] == "financial_agent"
+    runtime.shutdown_all(timeout=3.0)
+
+
+def test_strategy_handler_exception_surfaces_as_peer_request_error(tmp_path):
+    runtime = TeamRuntime("run-strategy-fail", root_dir=tmp_path)
+
+    def broken_handler(payload, sender):
+        raise RuntimeError("planner unavailable")
+
+    runtime.set_strategy_handler(broken_handler)
+
+    def expert_handler(payload, peer):
+        try:
+            peer.request(STRATEGIC_AGENT, {"kind": "plan_status"}, timeout=5.0)
+        except PeerRequestError as exc:
+            return {"error": str(exc)}
+        raise AssertionError("handler failure should surface as PeerRequestError")
+
+    runtime.start_expert("legal_agent", expert_handler)
+    assert runtime.wait_until_idle(["legal_agent"], timeout=2.0)
+    runtime.assign_task("legal_agent", "legal-task", {})
+
+    result = runtime.collect_results(["legal-task"], timeout=8.0)["legal-task"]
+    assert result["status"] == "completed"
+    assert "RuntimeError: planner unavailable" in result["result"]["error"]
+    strategy_events = [
+        event
+        for event in runtime.events
+        if event["event_type"] == "strategy_peer_response_sent"
+    ]
+    assert strategy_events and strategy_events[0]["status"] == "failed"
+    runtime.shutdown_all(timeout=3.0)
+
+
+def test_missing_strategy_handler_returns_failed_peer_response(tmp_path):
+    runtime = TeamRuntime("run-strategy-nohandler", root_dir=tmp_path)
+
+    def expert_handler(payload, peer):
+        try:
+            peer.request(STRATEGIC_AGENT, {"kind": "plan_status"}, timeout=5.0)
+        except PeerRequestError as exc:
+            return {"error": str(exc)}
+        raise AssertionError("missing handler should surface as PeerRequestError")
+
+    runtime.start_expert("market_agent", expert_handler)
+    assert runtime.wait_until_idle(["market_agent"], timeout=2.0)
+    runtime.assign_task("market_agent", "market-task", {})
+
+    result = runtime.collect_results(["market-task"], timeout=8.0)["market-task"]
+    assert result["status"] == "completed"
+    assert "no registered handler" in result["result"]["error"]
+    runtime.shutdown_all(timeout=3.0)
+
+
+def test_broadcast_and_read_broadcast_responses_round_trip(tmp_path):
+    runtime = TeamRuntime("run-broadcast", root_dir=tmp_path)
+    experts = ["financial_agent", "legal_agent"]
+
+    def make_handler(self_name: str):
+        def handler(payload, peer):
+            if peer.message_type == MessageType.PEER_REQUEST:
+                return {"agent": self_name, "ack": payload["kind"]}
+            return {"agent": self_name}
+
+        return handler
+
+    for name in experts:
+        runtime.start_expert(name, make_handler(name))
+    assert runtime.wait_until_idle(experts, timeout=2.0)
+
+    request_ids = runtime.broadcast({"kind": "mission_brief"})
+    assert set(request_ids) == set(experts)
+    assert len(set(request_ids.values())) == len(experts)
+
+    responses = runtime.read_broadcast_responses(request_ids, timeout=5.0)
+    assert set(responses) == set(experts)
+    for name, payload in responses.items():
+        assert payload["status"] == "completed"
+        assert payload["result"] == {"agent": name, "ack": "mission_brief"}
+
+    event_types = [event["event_type"] for event in runtime.events]
+    assert "strategy_broadcast_sent" in event_types
+    assert event_types.count("strategy_broadcast_response") == 2
+    runtime.shutdown_all(timeout=3.0)
+
+
+def test_read_broadcast_responses_returns_partial_on_timeout(tmp_path):
+    runtime = TeamRuntime("run-broadcast-partial", root_dir=tmp_path)
+
+    def fast_handler(payload, peer):
+        return {"agent": "fast_agent"}
+
+    def slow_handler(payload, peer):
+        time.sleep(2.0)
+        return {"agent": "slow_agent"}
+
+    runtime.start_expert("fast_agent", fast_handler)
+    runtime.start_expert("slow_agent", slow_handler)
+    assert runtime.wait_until_idle(["fast_agent", "slow_agent"], timeout=2.0)
+
+    request_ids = runtime.broadcast({"kind": "mission_brief"})
+    responses = runtime.read_broadcast_responses(request_ids, timeout=0.8)
+    assert set(responses) == {"fast_agent"}
+    runtime.shutdown_all(timeout=6.0)
+
+
+def test_peer_profiles_expose_strategic_agent_card(tmp_path, monkeypatch):
+    monkeypatch.setenv("A2A_PUBLIC_BASE_URL", "https://agents.example.test")
+    runtime = TeamRuntime("run-profiles", root_dir=tmp_path)
+    runtime.start_expert("financial_agent", lambda payload, peer: {})
+    assert runtime.wait_until_idle(["financial_agent"], timeout=2.0)
+
+    names = [profile["name"] for profile in runtime.peer_profiles()]
+    assert "financial_agent" in names
+    assert STRATEGIC_AGENT in names
+
+    excluded = [
+        profile["name"]
+        for profile in runtime.peer_profiles(excluding=STRATEGIC_AGENT)
+    ]
+    assert STRATEGIC_AGENT not in excluded
+
+    strategy_card = next(
+        profile for profile in runtime.peer_profiles() if profile["name"] == STRATEGIC_AGENT
+    )
+    assert strategy_card["supportedInterfaces"][0]["url"] == (
+        f"https://agents.example.test/a2a/{STRATEGIC_AGENT}"
+    )
+
+    with pytest.raises(TypeError):
+        runtime.set_strategy_handler("not-callable")
+    runtime.shutdown_all(timeout=3.0)

@@ -58,3 +58,42 @@ def test_risk_rules_repository_seeds_empty_database(tmp_path):
 
     assert rule_set.rule_set_id == "hk_ipo_prospectus_risk_framework_v1"
     assert rule_set.totals == {"dimension_count": 3, "category_count": 26, "rule_count": 143}
+
+
+def test_risk_rules_api_missing_rule_returns_404(tmp_path, monkeypatch):
+    src = Path(__file__).parents[1] / "configs" / "hk_ipo_risk_rules_v1.json"
+    data = json.loads(src.read_text(encoding="utf-8"))
+    store = tmp_path / "risk_rules.yaml"
+    RiskRuleRepository(store)._write_data(data)
+    monkeypatch.setenv("RISK_RULES_PATH", str(store))
+
+    client = TestClient(create_app())
+
+    assert client.get("/risk-rules/HKIPO-999").status_code == 404
+    assert client.patch("/risk-rules/HKIPO-999", json={"risk_item": "x"}).status_code == 404
+    assert client.delete("/risk-rules/HKIPO-999").status_code == 404
+
+    response = client.get("/risk-rules/HKIPO-001")
+    assert response.status_code == 200
+    assert response.json()["rule_id"] == "HKIPO-001"
+
+
+def test_risk_rules_api_enabled_toggle_persists(tmp_path, monkeypatch):
+    src = Path(__file__).parents[1] / "configs" / "hk_ipo_risk_rules_v1.json"
+    data = json.loads(src.read_text(encoding="utf-8"))
+    store = tmp_path / "risk_rules.yaml"
+    RiskRuleRepository(store)._write_data(data)
+    monkeypatch.setenv("RISK_RULES_PATH", str(store))
+
+    client = TestClient(create_app())
+
+    response = client.patch("/risk-rules/HKIPO-001", json={"enabled": False})
+    assert response.status_code == 200
+    assert response.json()["enabled"] is False
+
+    fetched = client.get("/risk-rules/HKIPO-001").json()
+    assert fetched["enabled"] is False
+
+    ruleset = client.get("/risk-rules").json()
+    first = next(rule for rule in ruleset["rules"] if rule["rule_id"] == "HKIPO-001")
+    assert first["enabled"] is False

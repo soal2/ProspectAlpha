@@ -2,10 +2,16 @@ from pathlib import Path
 
 import riskagent.agents.supervisor as supervisor_module
 from riskagent.agent_experts import AgentSpec
-from riskagent.agents.orchestrator import ReplacementDecision, StrategyDecision
+from riskagent.agent_experts import AgentSpecRepository
+from riskagent.agents.orchestrator import (
+    ReplacementDecision,
+    StrategyDecision,
+    manual_strategy_decision,
+)
 from riskagent.agents.supervisor import AgentTeamSupervisor
-from riskagent.retrieval import ChunkSearchResult
+from riskagent.database import Base, make_engine
 from riskagent.risk_rules import RiskRuleRepository
+from sqlalchemy.orm import sessionmaker
 
 
 def _strategy(*, selected=("financial_agent", "legal_agent"), **_kwargs):
@@ -31,28 +37,19 @@ def _strategy(*, selected=("financial_agent", "legal_agent"), **_kwargs):
     )
 
 
-def _chunk_retriever(**_kwargs):
+def _legacy_agent_specs() -> list[AgentSpec]:
+    """4 legacy generic specs so alias resolution does not rewrite agent names.
+
+    Tests that exercise the legacy ``financial_agent``/``legal_agent`` aliases
+    pass this roster explicitly to avoid coupling to whatever the dev DB
+    currently holds (which now contains 12 persona specs after Task 1).
+    """
+
     return [
-        ChunkSearchResult(
-            chunk_id="chunk_test_001",
-            document_id="doc_test",
-            doc_key="test",
-            chunk_type="text",
-            text=(
-                "公司存在关联交易、赎回安排，经营活动现金流持续为负；"
-                "公司前五大供应商采购占比较高，存在供应商集中风险。"
-            ),
-            page_idx=0,
-            source_file="test.pdf",
-            source_item_indices=[0],
-            bbox_refs=[{"page_idx": 0, "bbox": [1, 2, 3, 4], "source_item_index": 0}],
-            merged_bboxes=[{"page_idx": 0, "bbox": [1, 2, 3, 4]}],
-            image_path=None,
-            mineru_img_path=None,
-            table_html=None,
-            metadata={"section_path": "风险因素"},
-            score=0.9,
-        )
+        AgentSpec(name="financial_agent", title="Financial specialist"),
+        AgentSpec(name="legal_agent", title="Legal and compliance specialist"),
+        AgentSpec(name="market_agent", title="Market and industry specialist"),
+        AgentSpec(name="business_agent", title="Business and disclosure specialist"),
     ]
 
 
@@ -60,8 +57,8 @@ def test_agent_supervisor_runs_only_strategy_selected_threads(tmp_path):
     repo = RiskRuleRepository(Path(__file__).parents[1] / "configs" / "risk_rules.yaml")
     supervisor = AgentTeamSupervisor(
         repository=repo,
+        agent_specs=_legacy_agent_specs(),
         strategy_provider=_strategy,
-        chunk_retriever=_chunk_retriever,
         runtime_root=tmp_path / "agent-runtime",
     )
 
@@ -70,7 +67,7 @@ def test_agent_supervisor_runs_only_strategy_selected_threads(tmp_path):
         company_name="测试 IPO",
         user_requirement="分析招股书风险",
         document_summary="关联交易与现金流风险",
-        document_id="doc_test",
+        text="公司存在关联交易、赎回安排，经营活动现金流持续为负。",
         max_findings=10,
     )
 
@@ -96,18 +93,40 @@ def test_agent_supervisor_runs_only_strategy_selected_threads(tmp_path):
     assert all(task_id.startswith("run_dynamic_test::") for task_id in assigned_task_ids)
 
 
+def test_manual_strategy_decision_accepts_persona_agent_names(tmp_path):
+    repo = RiskRuleRepository(Path(__file__).parents[1] / "configs" / "risk_rules.yaml")
+    engine = make_engine(f"sqlite:///{tmp_path / 'agents.db'}")
+    Base.metadata.create_all(bind=engine)
+    session_factory = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+    supervisor = AgentTeamSupervisor(
+        repository=repo,
+        agent_spec_repository=AgentSpecRepository(session_factory=session_factory),
+        runtime_root=tmp_path / "agent-runtime",
+    )
+
+    result = manual_strategy_decision(
+        agent_names=["qin_bingwen_financial_agent", "wen_shouzheng_legal_agent"],
+        available_agents=supervisor.agent_options(),
+    )
+
+    assert result.selected_agents == [
+        "qin_bingwen_financial_agent",
+        "wen_shouzheng_legal_agent",
+    ]
+    assert [assignment.agent_name for assignment in result.assignments] == [
+        "qin_bingwen_financial_agent",
+        "wen_shouzheng_legal_agent",
+    ]
+    assert result.assignments[0].module_id == "module_qin_bingwen_financial"
+    assert result.assignments[1].module_id == "module_wen_shouzheng_legal"
+
+
 def test_supervisor_executes_new_catalog_expert_without_code_chain_changes(tmp_path):
     repo = RiskRuleRepository(Path(__file__).parents[1] / "configs" / "risk_rules.yaml")
-    retrieval_calls = []
-
-    def recording_retriever(**kwargs):
-        retrieval_calls.append(kwargs)
-        return _chunk_retriever(**kwargs)
-
     custom = AgentSpec(
         name="supply_chain_expert",
         title="Supply chain specialist",
-        categories=("客户/供应商依赖",),
+        categories=("供应商集中",),
     )
     supervisor = AgentTeamSupervisor(
         repository=repo,
@@ -115,7 +134,6 @@ def test_supervisor_executes_new_catalog_expert_without_code_chain_changes(tmp_p
         strategy_provider=lambda **_kwargs: _strategy(
             selected=("supply_chain_expert",)
         ),
-        chunk_retriever=recording_retriever,
         runtime_root=tmp_path / "agent-runtime",
     )
 
@@ -124,7 +142,7 @@ def test_supervisor_executes_new_catalog_expert_without_code_chain_changes(tmp_p
         company_name="测试 IPO",
         user_requirement="分析供应链风险",
         document_summary="供应商集中",
-        document_id="doc_test",
+        text="公司前五大供应商采购占比较高，存在供应商集中风险。",
         max_findings=10,
     )
 
@@ -136,9 +154,6 @@ def test_supervisor_executes_new_catalog_expert_without_code_chain_changes(tmp_p
     assert {item.source_type for item in result.evaluations} == {
         "supply_chain_expert"
     }
-    assert retrieval_calls
-    assert all(call["document_id"] == "doc_test" for call in retrieval_calls)
-    assert all("Analyze supply_chain_expert risk" in call["query"] for call in retrieval_calls)
 
 
 def test_expert_startup_failure_uses_strategic_replacement(tmp_path, monkeypatch):
@@ -153,9 +168,9 @@ def test_expert_startup_failure_uses_strategic_replacement(tmp_path, monkeypatch
 
     supervisor = AgentTeamSupervisor(
         repository=repo,
+        agent_specs=_legacy_agent_specs(),
         strategy_provider=_strategy,
         replacement_provider=choose_replacement,
-        chunk_retriever=_chunk_retriever,
         runtime_root=tmp_path / "agent-runtime",
     )
     original_start = supervisor_module.TeamRuntime.start_expert
@@ -177,7 +192,7 @@ def test_expert_startup_failure_uses_strategic_replacement(tmp_path, monkeypatch
         company_name="测试 IPO",
         user_requirement="分析招股书风险",
         document_summary="关联交易与现金流风险",
-        document_id="doc_test",
+        text="公司存在关联交易、赎回安排，经营活动现金流持续为负。",
         max_findings=10,
     )
 
@@ -204,11 +219,11 @@ def test_invalid_expert_artifact_fails_before_task_completion_and_is_replaced(tm
 
     supervisor = AgentTeamSupervisor(
         repository=repo,
+        agent_specs=_legacy_agent_specs(),
         strategy_provider=lambda **kwargs: _strategy(
             selected=("legal_agent",), **kwargs
         ),
         replacement_provider=choose_replacement,
-        chunk_retriever=_chunk_retriever,
         runtime_root=tmp_path / "agent-runtime",
     )
     original_handler = supervisor._expert_handler
@@ -224,7 +239,7 @@ def test_invalid_expert_artifact_fails_before_task_completion_and_is_replaced(tm
         company_name="测试 IPO",
         user_requirement="分析招股书风险",
         document_summary="关联交易风险",
-        document_id="doc_test",
+        text="公司存在关联交易和赎回安排。",
         max_findings=10,
     )
 
@@ -244,8 +259,8 @@ def test_invalid_strategy_interrupts_then_manual_selection_resumes(tmp_path):
 
     supervisor = AgentTeamSupervisor(
         repository=repo,
+        agent_specs=_legacy_agent_specs(),
         strategy_provider=invalid_strategy,
-        chunk_retriever=_chunk_retriever,
         runtime_root=tmp_path / "agent-runtime",
     )
     paused = supervisor.run(
@@ -253,7 +268,7 @@ def test_invalid_strategy_interrupts_then_manual_selection_resumes(tmp_path):
         company_name="测试 IPO",
         user_requirement="分析招股书风险",
         document_summary="关联交易",
-        document_id="doc_test",
+        text="公司存在关联交易和赎回安排。",
         max_findings=10,
     )
 
@@ -285,9 +300,9 @@ def test_two_failed_replacements_pause_then_targeted_manual_recovery_preserves_s
 
     supervisor = AgentTeamSupervisor(
         repository=repo,
+        agent_specs=_legacy_agent_specs(),
         strategy_provider=_strategy,
         replacement_provider=choose_replacement,
-        chunk_retriever=_chunk_retriever,
         runtime_root=tmp_path / "agent-runtime",
     )
     original_handler = supervisor._expert_handler
@@ -307,7 +322,7 @@ def test_two_failed_replacements_pause_then_targeted_manual_recovery_preserves_s
         company_name="测试 IPO",
         user_requirement="分析招股书风险",
         document_summary="关联交易与现金流风险",
-        document_id="doc_test",
+        text="公司存在关联交易、赎回安排，经营活动现金流持续为负。",
         max_findings=10,
     )
 
@@ -335,3 +350,130 @@ def test_two_failed_replacements_pause_then_targeted_manual_recovery_preserves_s
         item["current_module"]: item["status"] for item in completed.team_state
     } == {"financial": "completed", "legal": "completed"}
     assert any(item.get("manual") is True for item in completed.replacement_history)
+
+
+def test_each_expert_receives_its_own_system_prompt(tmp_path, monkeypatch):
+    captured_prompts: dict[str, str] = {}
+
+    async def capture_llm(**kwargs):
+        captured_prompts[kwargs["agent_name"]] = kwargs["system_prompt"]
+        return []
+
+    monkeypatch.setattr(supervisor_module, "analyze_findings_with_llm", capture_llm)
+    repo = RiskRuleRepository(Path(__file__).parents[1] / "configs" / "risk_rules.yaml")
+    supervisor = AgentTeamSupervisor(
+        repository=repo,
+        agent_specs=_legacy_agent_specs(),
+        strategy_provider=_strategy,
+        runtime_root=tmp_path / "agent-runtime",
+    )
+
+    result = supervisor.run(
+        run_id="run_prompt_isolation",
+        company_name="测试 IPO",
+        user_requirement="分析招股书风险",
+        document_summary="关联交易与现金流风险",
+        text="公司存在关联交易、赎回安排，经营活动现金流持续为负。",
+        max_findings=10,
+    )
+
+    assert result.paused is False
+    assert set(captured_prompts) == {"financial_agent", "legal_agent"}
+    financial_prompt = captured_prompts["financial_agent"]
+    legal_prompt = captured_prompts["legal_agent"]
+    assert financial_prompt != legal_prompt
+    assert "Financial specialist" in financial_prompt
+    assert "Legal and compliance specialist" in legal_prompt
+    # The shared output contract survives persona differences.
+    assert "输出契约" in financial_prompt and "输出契约" in legal_prompt
+
+
+def test_mission_brief_broadcast_reaches_every_expert(tmp_path, monkeypatch):
+    async def no_llm(**_kwargs):
+        return []
+
+    monkeypatch.setattr(supervisor_module, "analyze_findings_with_llm", no_llm)
+    repo = RiskRuleRepository(Path(__file__).parents[1] / "configs" / "risk_rules.yaml")
+    supervisor = AgentTeamSupervisor(
+        repository=repo,
+        agent_specs=_legacy_agent_specs(),
+        strategy_provider=_strategy,
+        runtime_root=tmp_path / "agent-runtime",
+    )
+
+    result = supervisor.run(
+        run_id="run_mission_brief",
+        company_name="测试 IPO",
+        user_requirement="分析招股书风险",
+        document_summary="关联交易与现金流风险",
+        text="公司存在关联交易、赎回安排，经营活动现金流持续为负。",
+        max_findings=10,
+    )
+
+    assert result.paused is False
+    events_by_type: dict[str, list[dict]] = {}
+    for event in result.events:
+        events_by_type.setdefault(event["event_type"], []).append(event)
+    broadcast_sent = events_by_type.get("strategy_broadcast_sent")
+    assert broadcast_sent, "mission brief broadcast event missing"
+    assert set(broadcast_sent[0]["payload"]["recipients"]) == {
+        "financial_agent",
+        "legal_agent",
+    }
+    responded = {
+        event["payload"]["agent_name"]
+        for event in events_by_type.get("strategy_broadcast_response", [])
+    }
+    assert responded == {"financial_agent", "legal_agent"}
+
+
+def test_needs_more_evidence_requests_strategy_guidance(tmp_path, monkeypatch):
+    async def llm_flags_missing_evidence(**kwargs):
+        return [
+            {
+                "rule_id": candidate.rule_id,
+                "severity": "medium",
+                "confidence": 0.4,
+                "reasoning_summary": "证据不足，需补充。",
+                "needs_more_evidence": True,
+            }
+            for candidate in kwargs["candidates"]
+        ]
+
+    monkeypatch.setattr(
+        supervisor_module, "analyze_findings_with_llm", llm_flags_missing_evidence
+    )
+    repo = RiskRuleRepository(Path(__file__).parents[1] / "configs" / "risk_rules.yaml")
+    supervisor = AgentTeamSupervisor(
+        repository=repo,
+        agent_specs=_legacy_agent_specs(),
+        strategy_provider=_strategy,
+        runtime_root=tmp_path / "agent-runtime",
+    )
+
+    result = supervisor.run(
+        run_id="run_strategy_guidance",
+        company_name="测试 IPO",
+        user_requirement="分析招股书风险",
+        document_summary="关联交易与现金流风险",
+        text="公司存在关联交易、赎回安排，经营活动现金流持续为负。",
+        max_findings=10,
+    )
+
+    assert result.paused is False
+    guidance_by_agent = {
+        item["agent_name"]: item.get("strategy_guidance")
+        for item in result.module_results
+    }
+    for agent_name, guidance in guidance_by_agent.items():
+        assert isinstance(guidance, dict), f"{agent_name} missing strategy guidance"
+        assert guidance.get("kind") == "needs_more_evidence"
+        assert guidance.get("responder") == "strategic_agent"
+        assert "保留已命中的规则判断" in guidance.get("guidance", "")
+    guidance_requests = [
+        event
+        for event in result.events
+        if event["event_type"] == "peer_request_sent"
+        and event["payload"].get("recipient") == "strategic_agent"
+    ]
+    assert len(guidance_requests) >= 2

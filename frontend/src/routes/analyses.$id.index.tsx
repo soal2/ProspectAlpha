@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import {
   getAgents,
+  getAnalysisProgress,
   getAnalysisRun,
   getTraceData,
   getEvidenceFeed,
@@ -24,8 +25,10 @@ import {
   streamAnalysisRun,
   type AnalysisRun,
   type AnalysisRunEvent,
+  type AnalysisProgress,
 } from "@/lib/data-service";
 import { type Agent } from "@/lib/types";
+import { PdfViewer } from "@/components/pdf-viewer";
 import { motion, AnimatePresence } from "framer-motion";
 
 export const Route = createFileRoute("/analyses/$id/")({
@@ -55,7 +58,10 @@ type EvidenceFeedItem = {
   title: string;
   conf: number;
   time: string;
+  page?: number | null;
   snippet?: string | null;
+  document_id?: string | null;
+  bbox?: number[];
 };
 type Bubble = { who: string; kind: string; text: string; t: string };
 
@@ -97,10 +103,30 @@ function RealtimeStream() {
   const [trace, setTrace] = useState<TraceView>(initialTrace);
   const [evidenceFeed, setEvidenceFeed] = useState<EvidenceFeedItem[]>(initialEvidenceFeed);
   const [liveEvents, setLiveEvents] = useState<AnalysisRunEvent[]>(initialRun.events ?? []);
+  const [progressSnapshot, setProgressSnapshot] = useState<AnalysisProgress | null>(null);
   const [streamError, setStreamError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
   const [filter, setFilter] = useState("");
+  const [viewerEvidence, setViewerEvidence] = useState<EvidenceFeedItem | null>(null);
   const startedRunRef = useRef<string | null>(null);
+  const liveEventsRef = useRef<AnalysisRunEvent[]>(initialRun.events ?? []);
+  const durableCursorRef = useRef(initialRun.events?.length ?? 0);
+  const pendingEventsRef = useRef<AnalysisRunEvent[]>([]);
+  const animationFrameRef = useRef<number | null>(null);
+
+  const queueLiveEvent = useCallback((event: AnalysisRunEvent) => {
+    pendingEventsRef.current.push(event);
+    if (animationFrameRef.current !== null) return;
+    animationFrameRef.current = window.requestAnimationFrame(() => {
+      const pending = pendingEventsRef.current.splice(0);
+      animationFrameRef.current = null;
+      setLiveEvents((current) => {
+        const next = pending.reduce(mergeLiveEvent, current);
+        liveEventsRef.current = next;
+        return next;
+      });
+    });
+  }, []);
 
   const refreshTrace = useCallback(async () => {
     const [freshRun, freshTrace, freshEvidence] = await Promise.all([
@@ -112,7 +138,18 @@ function RealtimeStream() {
     setTrace(freshTrace);
     setEvidenceFeed(freshEvidence);
     setLiveEvents(freshRun.events ?? []);
+    liveEventsRef.current = freshRun.events ?? [];
+    durableCursorRef.current = freshRun.events?.length ?? 0;
   }, [id]);
+
+  useEffect(
+    () => () => {
+      if (animationFrameRef.current !== null) {
+        window.cancelAnimationFrame(animationFrameRef.current);
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -147,26 +184,38 @@ function RealtimeStream() {
       }
 
       const controller = new AbortController();
-      streamAnalysisRun(
-        id,
-        (event) => {
+      let retryTimer: number | undefined;
+      const connect = () => {
+        streamAnalysisRun(
+          id,
+          (event) => {
+            if (cancelled) return;
+            if (event.event_id && !liveEventsRef.current.some((item) => item.event_id === event.event_id)) {
+              durableCursorRef.current += 1;
+            }
+            queueLiveEvent(event);
+          },
+          (finalRun) => {
+            if (cancelled) return;
+            setRun(finalRun);
+            setLiveEvents(finalRun.events ?? []);
+            liveEventsRef.current = finalRun.events ?? [];
+            durableCursorRef.current = finalRun.events?.length ?? 0;
+            void refreshTrace();
+          },
+          { signal: controller.signal, after: durableCursorRef.current },
+        ).catch((err: unknown) => {
+          if (err instanceof DOMException && err.name === "AbortError") return;
           if (cancelled) return;
-          setLiveEvents((current) => [...current, event]);
-        },
-        (finalRun) => {
-          if (cancelled) return;
-          setRun(finalRun);
-          setLiveEvents(finalRun.events ?? []);
-          void refreshTrace();
-        },
-        { signal: controller.signal },
-      ).catch((err: unknown) => {
-        if (err instanceof DOMException && err.name === "AbortError") return;
-        if (cancelled) return;
-        setStreamError(err instanceof Error ? err.message : "实时流连接失败");
-        void refreshTrace();
-      });
-      return () => controller.abort();
+          setStreamError(err instanceof Error ? err.message : "实时流连接失败，正在重连");
+          retryTimer = window.setTimeout(connect, 1000);
+        });
+      };
+      connect();
+      return () => {
+        controller.abort();
+        if (retryTimer) window.clearTimeout(retryTimer);
+      };
     }
 
     let cleanup: (() => void) | undefined;
@@ -180,7 +229,38 @@ function RealtimeStream() {
     };
     // run.status is intentionally not a dependency; the page should boot once per run id.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, refreshTrace]);
+  }, [id, queueLiveEvent, refreshTrace]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const refreshProgress = async () => {
+      try {
+        const next = await getAnalysisProgress(id);
+        if (!cancelled) {
+          setProgressSnapshot(next);
+          setRun((current) => ({
+            ...current,
+            status: next.status,
+            current_stage: next.current_stage,
+            error_summary: next.error_summary ?? current.error_summary,
+          }));
+        }
+      } catch (err) {
+        if (!cancelled) setStreamError(err instanceof Error ? err.message : "进度同步失败");
+      }
+    };
+    void refreshProgress();
+    if (terminalStatuses.has(run.status) || pausedStatuses.has(run.status)) {
+      return () => {
+        cancelled = true;
+      };
+    }
+    const interval = window.setInterval(() => void refreshProgress(), 1000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [id, run.status]);
 
   const stages = trace?.stages?.length ? trace.stages : fallbackStages(run);
   const eventBubbles = useMemo(() => {
@@ -219,6 +299,15 @@ function RealtimeStream() {
         .map((event) => event.actor_name)
         .filter(Boolean),
     ]).size || visibleAgents.length;
+  const pdfProgress = progressSnapshot?.pdf;
+  const indexProgress = progressSnapshot?.index;
+  const collaborationAgents = progressSnapshot?.agents ?? [];
+  const pdfPercent = pdfProgress?.total_pages
+    ? Math.round((pdfProgress.parsed_pages / pdfProgress.total_pages) * 100)
+    : 0;
+  const indexPercent = indexProgress?.total_blocks
+    ? Math.round((indexProgress.indexed_blocks / indexProgress.total_blocks) * 100)
+    : 0;
 
   return (
     <div className="flex h-[calc(100vh-3.5rem)] min-h-[680px] flex-col bg-background">
@@ -334,30 +423,46 @@ function RealtimeStream() {
 
           <div className="mt-8 rounded-lg border border-border bg-background p-3">
             <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
-              <Users className="size-3.5" /> 专家团（{visibleAgents.length}）
+              <FileText className="size-3.5" /> PDF 材料处理
+            </div>
+            <ProgressLine
+              label="原文解析"
+              value={pdfPercent}
+              detail={
+                pdfProgress
+                  ? `第 ${pdfProgress.parsed_pages} / ${pdfProgress.total_pages} 页 · ${pdfProgress.parsed_blocks} 个原文块`
+                  : "等待解析任务启动"
+              }
+              failed={pdfProgress?.status === "failed"}
+            />
+            <ProgressLine
+              label="材料索引"
+              value={indexPercent}
+              detail={
+                indexProgress
+                  ? `${indexProgress.indexed_blocks} / ${indexProgress.total_blocks} 个原文块`
+                  : "等待原文解析完成"
+              }
+            />
+            {pdfProgress?.error ? (
+              <p className="mt-2 text-[11px] leading-relaxed text-destructive">
+                {pdfProgress.error}
+              </p>
+            ) : null}
+          </div>
+
+          <div className="mt-4 rounded-lg border border-border bg-background p-3">
+            <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+              <Users className="size-3.5" /> 专家协作（{collaborationAgents.length}）
             </div>
             <div className="mt-3 space-y-2 text-[11px]">
-              {(["L3", "L2", "L1"] as const).map((layer) => (
-                <div key={layer}>
-                  <div className="text-muted-foreground">
-                    {layer === "L3" ? "决策层" : layer === "L2" ? "策略层" : "执行层"} {layer}
-                  </div>
-                  <div className="mt-1 flex flex-wrap gap-1">
-                    {visibleAgents
-                      .filter((agent) => agent.layer === layer)
-                      .map((agent) => (
-                        <div
-                          key={agent.id}
-                          title={`${agent.name} · ${agent.role}`}
-                          style={{ background: agent.accent }}
-                          className="grid size-7 place-items-center rounded-full text-[10px] font-medium text-white ring-2 ring-background"
-                        >
-                          {agent.avatar}
-                        </div>
-                      ))}
-                  </div>
-                </div>
-              ))}
+              {collaborationAgents.length ? (
+                collaborationAgents.map((agent) => (
+                  <AgentProgressCard key={agent.agent_name} agent={agent} agents={agentsList} />
+                ))
+              ) : (
+                <p className="text-muted-foreground">战略层尚未完成专家编排。</p>
+              )}
             </div>
           </div>
         </aside>
@@ -414,7 +519,8 @@ function RealtimeStream() {
                   transition={{ duration: 1.4, repeat: Infinity }}
                   className="inline-flex items-center gap-2 text-xs text-muted-foreground"
                 >
-                  <span className="size-1.5 rounded-full bg-primary" /> Agent 仍在协作中…
+                  <span className="size-1.5 rounded-full bg-primary" />
+                  {collaborationStatusText(progressSnapshot, liveEvents)}
                 </motion.div>
               ) : null}
             </AnimatePresence>
@@ -460,7 +566,11 @@ function RealtimeStream() {
                     {item.snippet}
                   </p>
                 ) : null}
-                <button className="mt-2 inline-flex items-center gap-1 text-[11px] text-primary hover:underline">
+                <button
+                  onClick={() => setViewerEvidence(item)}
+                  disabled={!item.document_id}
+                  className="mt-2 inline-flex items-center gap-1 text-[11px] text-primary hover:underline disabled:cursor-not-allowed disabled:text-muted-foreground disabled:no-underline"
+                >
                   查看原文 <ExternalLink className="size-3" />
                 </button>
               </div>
@@ -474,6 +584,26 @@ function RealtimeStream() {
           </div>
         </aside>
       </div>
+      {viewerEvidence?.document_id ? (
+        <PdfViewer
+          open={Boolean(viewerEvidence)}
+          onOpenChange={(next) => {
+            if (!next) setViewerEvidence(null);
+          }}
+          documentId={viewerEvidence.document_id}
+          page={viewerEvidence.page ?? 1}
+          highlight={
+            viewerEvidence.bbox?.length === 4 && viewerEvidence.page
+              ? {
+                  page: viewerEvidence.page,
+                  bbox: viewerEvidence.bbox,
+                  label: viewerEvidence.title,
+                }
+              : null
+          }
+          title={`证据 ${viewerEvidence.id} · ${viewerEvidence.title}`}
+        />
+      ) : null}
       <FloatingTracePanel
         run={run}
         stages={stages}
@@ -482,6 +612,100 @@ function RealtimeStream() {
       />
     </div>
   );
+}
+
+function ProgressLine({
+  label,
+  value,
+  detail,
+  failed = false,
+}: {
+  label: string;
+  value: number;
+  detail: string;
+  failed?: boolean;
+}) {
+  return (
+    <div className="mt-3">
+      <div className="flex items-center justify-between gap-2 text-[11px]">
+        <span>{label}</span>
+        <span className={failed ? "text-destructive" : "tabular text-muted-foreground"}>
+          {value}%
+        </span>
+      </div>
+      <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-muted">
+        <div
+          className={failed ? "h-full bg-destructive" : "h-full bg-[color:var(--gold)]"}
+          style={{ width: `${value}%` }}
+        />
+      </div>
+      <p className="mt-1 text-[10px] leading-relaxed text-muted-foreground">{detail}</p>
+    </div>
+  );
+}
+
+function AgentProgressCard({
+  agent,
+  agents,
+}: {
+  agent: AnalysisProgress["agents"][number];
+  agents: Agent[];
+}) {
+  const profile = agents.find(
+    (item) => item.id === agent.agent_name || item.name === agent.agent_name,
+  );
+  return (
+    <div className="rounded-md border border-border/80 p-2">
+      <div className="flex items-center gap-2">
+        <span
+          style={{ background: profile?.accent ?? "#0b243d" }}
+          className="grid size-5 shrink-0 place-items-center rounded-full text-[9px] font-medium text-white"
+        >
+          {profile?.avatar ?? agent.agent_name[0]}
+        </span>
+        <span className="min-w-0 flex-1 truncate font-medium">
+          {profile?.name ?? agent.agent_name}
+        </span>
+        <span className={`rounded px-1 py-0.5 ${agentStatusClass(agent.status)}`}>
+          {agentStatusLabel(agent.status)}
+        </span>
+      </div>
+      <p className="mt-1 truncate text-muted-foreground">{agent.module || agent.latest_action}</p>
+      <p className="mt-0.5 line-clamp-2 text-[10px] leading-relaxed text-muted-foreground">
+        {agent.latest_summary}
+      </p>
+    </div>
+  );
+}
+
+function agentStatusLabel(status: string) {
+  return (
+    {
+      queued: "待编排",
+      initializing: "初始化",
+      retrieving_evidence: "检索证据",
+      analyzing: "分析中",
+      debating: "辩论/修订",
+      completed: "已完成",
+      failed: "失败",
+    }[status] ?? status
+  );
+}
+
+function agentStatusClass(status: string) {
+  if (status === "completed") return "bg-[color:var(--risk-low)]/15 text-[color:var(--risk-low)]";
+  if (status === "failed") return "bg-destructive/10 text-destructive";
+  if (status === "queued") return "bg-muted text-muted-foreground";
+  return "bg-primary/10 text-primary";
+}
+
+function collaborationStatusText(snapshot: AnalysisProgress | null, events: AnalysisRunEvent[]) {
+  const active = snapshot?.agents.find(
+    (agent) => !["completed", "failed", "queued"].includes(agent.status),
+  );
+  if (active) return `${active.agent_name} · ${active.latest_action}`;
+  const latest = events.at(-1);
+  return latest ? `${latest.actor_name} · ${latest.action_label ?? latest.title}` : "等待任务事件";
 }
 
 function fallbackStages(run: AnalysisRun) {
@@ -560,6 +784,8 @@ function mergeEvidenceFeed(
         time: event.created_at ? formatClock(event.created_at) : "近实时",
         page: Number(payload.page_number ?? 0),
         snippet: event.summary,
+        document_id: payload.document_id ? String(payload.document_id) : null,
+        bbox: Array.isArray(payload.bbox) ? (payload.bbox as number[]) : undefined,
       };
     });
   const byId = new Map<string, EvidenceFeedItem>();
@@ -679,12 +905,39 @@ function FloatingTracePanel({
 }
 
 function eventToBubble(event: AnalysisRunEvent, runCreatedAt: string, index: number): Bubble {
+  const modelMeta = event.model
+    ? `（${event.model}${event.duration_ms ? ` · ${event.duration_ms}ms` : ""}）`
+    : "";
   return {
     who: event.actor_name || "analysis_run",
     kind: eventKind(event.event_type),
-    text: event.summary ? `${event.title}：${event.summary}` : event.title,
+    text: event.summary ? `${event.title}${modelMeta}：${event.raw_response || event.summary}` : event.title,
     t: relativeTime(runCreatedAt, event.created_at, index),
   };
+}
+
+function mergeLiveEvent(current: AnalysisRunEvent[], event: AnalysisRunEvent): AnalysisRunEvent[] {
+  if (event.event_id && current.some((item) => item.event_id === event.event_id)) return current;
+  if (event.call_id) {
+    const index = current.findIndex((item) => item.call_id === event.call_id);
+    if (event.event_type === "llm_response_delta") {
+      if (index >= 0) {
+        const next = [...current];
+        next[index] = { ...next[index], summary: `${next[index].summary}${event.summary}` };
+        return next;
+      }
+      return [
+        ...current,
+        { ...event, event_type: "llm_response_streaming", title: "正在等待模型回复" },
+      ];
+    }
+    if (event.event_type === "llm_response_completed" && index >= 0) {
+      const next = [...current];
+      next[index] = { ...event, summary: event.raw_response || event.summary };
+      return next;
+    }
+  }
+  return [...current, event];
 }
 
 function eventKind(eventType: string) {

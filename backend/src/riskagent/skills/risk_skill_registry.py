@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from riskagent.risk_rules import RiskRule
+from riskagent.seed_data import AGENT_NAME_ALIASES
 
 
 @dataclass(frozen=True)
@@ -59,16 +60,70 @@ DOMAIN_SKILLS: tuple[DomainSkill, ...] = (
         evidence_requirement="检查报告判断是否均有原文证据、页码和一致风险等级。",
         output_schema="QualityReviewResult",
     ),
+    DomainSkill(
+        skill_id="orchestrator_skill",
+        agent_name="shen_beichen_orchestrator_agent",
+        role_zh="首席指挥官",
+        output_schema="StrategyDecision",
+        evidence_requirement="输出全局策略、专家编排与模块分配，不直接产出风险结论。",
+    ),
+    DomainSkill(
+        skill_id="quality_arbiter_skill",
+        agent_name="xiao_zeming_quality_agent",
+        role_zh="首席分析师",
+        output_schema="QualityReviewResult",
+        evidence_requirement="复核专家结论的逻辑一致性、覆盖度与证据闭环。",
+    ),
+    DomainSkill(
+        skill_id="redteam_skill",
+        agent_name="zhou_shenyan_redteam_agent",
+        role_zh="质量总检·红队",
+        output_schema="RedTeamDebateResult",
+        evidence_requirement="从反方视角挑战现有结论并提出可证伪疑点。",
+    ),
+    DomainSkill(
+        skill_id="evidence_retrieval_skill",
+        agent_name="cheng_zheng_evidence_agent",
+        role_zh="证据检索·文档",
+        output_schema="EvidenceRetrievalResult",
+        evidence_requirement="只返回原文证据片段、页码与定位信息，不生成风险判断。",
+    ),
 )
 
 
+PERSONA_SKILL_MAP: dict[str, str] = {
+    "shen_beichen_orchestrator_agent": "shen_beichen_orchestrator_agent",
+    "xiao_zeming_quality_agent": "xiao_zeming_quality_agent",
+    "zhou_shenyan_redteam_agent": "zhou_shenyan_redteam_agent",
+    "su_zhiji_business_agent": "business_agent",
+    "jiang_hengzhi_market_agent": "market_agent",
+    "gu_lingsheng_market_agent": "market_agent",
+    "qin_bingwen_financial_agent": "financial_agent",
+    "lu_guanlan_market_agent": "market_agent",
+    "wen_shouzheng_legal_agent": "legal_agent",
+    "ye_zhiyuan_business_agent": "business_agent",
+    "cheng_zheng_evidence_agent": "cheng_zheng_evidence_agent",
+    "bai_shice_market_agent": "market_agent",
+}
+
+
 def skills_for_agents(agent_names: list[str] | None = None) -> list[DomainSkill]:
-    selected = {name for name in (agent_names or []) if name}
+    selected: set[str] = set()
+    for name in agent_names or []:
+        if not name:
+            continue
+        selected.add(_resolve_skill_agent_name(name))
     return [skill for skill in DOMAIN_SKILLS if skill.agent_name in selected]
 
 
 def skill_for_agent(agent_name: str) -> DomainSkill | None:
-    return next((skill for skill in DOMAIN_SKILLS if skill.agent_name == agent_name), None)
+    direct = next((skill for skill in DOMAIN_SKILLS if skill.agent_name == agent_name), None)
+    if direct:
+        return direct
+    aliased = PERSONA_SKILL_MAP.get(agent_name)
+    if aliased:
+        return next((skill for skill in DOMAIN_SKILLS if skill.agent_name == aliased), None)
+    return None
 
 
 def skill_for_rule(rule: RiskRule) -> DomainSkill:
@@ -142,3 +197,10 @@ def _matches_skill(skill: DomainSkill, rule: RiskRule) -> bool:
     if skill.categories and rule.category in skill.categories:
         return True
     return False
+
+
+def _resolve_skill_agent_name(agent_name: str) -> str:
+    direct = skill_for_agent(agent_name)
+    if direct:
+        return direct.agent_name
+    return PERSONA_SKILL_MAP.get(agent_name, AGENT_NAME_ALIASES.get(agent_name, agent_name))

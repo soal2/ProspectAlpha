@@ -85,14 +85,30 @@ export interface TraceStage {
 
 export interface TraceSeedItem {
   who: string;
-  kind: "execute" | "discover" | "challenge" | "verdict" | "assign";
+  kind:
+    | "execute"
+    | "discover"
+    | "challenge"
+    | "verdict"
+    | "assign"
+    | "critique"
+    | "revision"
+    | "arbitration";
   text: string;
   t: string;
 }
 
 export interface TraceFlowItem {
   who: string;
-  kind: "execute" | "discover" | "challenge" | "verdict" | "assign";
+  kind:
+    | "execute"
+    | "discover"
+    | "challenge"
+    | "verdict"
+    | "assign"
+    | "critique"
+    | "revision"
+    | "arbitration";
   text: string;
   t: string;
 }
@@ -105,6 +121,8 @@ export interface EvidenceFeedItem {
   time: string;
   page?: number | null;
   snippet?: string | null;
+  document_id?: string | null;
+  bbox?: number[];
 }
 
 export interface TraceData {
@@ -121,22 +139,8 @@ export interface EvidenceDetailItem {
   conf: number;
   snippet: string;
   risk: string;
-  documentId: string | null;
-  pdfUrl: string | null;
-  bbox: number[];
-  bboxRegions: EvidenceBBoxRegion[];
-  bboxCoordinateSpace: BBoxCoordinateSpace;
-}
-
-export interface EvidenceBBoxRegion {
-  page: number;
-  bbox: number[];
-}
-
-export interface BBoxCoordinateSpace {
-  width: number;
-  height: number;
-  origin: "top-left";
+  documentId?: string;
+  bbox?: number[];
 }
 
 export interface KnowledgePreview {
@@ -166,11 +170,9 @@ export interface KnowledgeEvidence {
   conf: number;
   snippet: string;
   risk: string;
-  documentId: string | null;
-  pdfUrl: string | null;
-  bbox: number[];
-  bboxRegions: EvidenceBBoxRegion[];
-  bboxCoordinateSpace: BBoxCoordinateSpace;
+  documentId?: string;
+  bbox?: number[];
+  createdAt?: string;
 }
 
 export interface KnowledgeData {

@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, inspect, select, text
 from sqlalchemy.orm import sessionmaker
 
 from riskagent.models import AgentExpertRow, AgentSpecRow, RiskRuleDimensionRow, RiskRuleRow, RiskRuleSetRow
@@ -14,6 +15,8 @@ from riskagent.models import AgentExpertRow, AgentSpecRow, RiskRuleDimensionRow,
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 RISK_RULE_SEED_PATH = BACKEND_ROOT / "configs" / "hk_ipo_risk_rules_v1.json"
+
+logger = logging.getLogger(__name__)
 
 
 AGENT_EXPERTS: list[dict[str, Any]] = [
@@ -166,34 +169,146 @@ AGENT_EXPERTS: list[dict[str, Any]] = [
 
 AGENT_SPECS: list[dict[str, Any]] = [
     {
-        "agent_name": "financial_agent",
-        "title": "Financial specialist",
-        "rule_types": ["quantitative_financial"],
+        "agent_name": "shen_beichen_orchestrator_agent",
+        "persona_id": "L3-001",
+        "display_name": "沈北辰",
+        "layer": "L3",
+        "function": "orchestrator",
+        "title": "Strategic orchestrator - Shen Beichen",
+        "rule_types": [],
         "categories": [],
         "is_default": False,
     },
     {
-        "agent_name": "legal_agent",
-        "title": "Legal and compliance specialist",
+        "agent_name": "xiao_zeming_quality_agent",
+        "persona_id": "L3-002",
+        "display_name": "萧则明",
+        "layer": "L3",
+        "function": "quality",
+        "title": "Quality arbiter - Xiao Zeming",
         "rule_types": [],
-        "categories": ["关联交易", "对赌/赎回条款", "政策监管", "诉讼与纠纷", "担保与质押", "税务风险"],
+        "categories": [],
         "is_default": False,
     },
     {
-        "agent_name": "market_agent",
-        "title": "Market and industry specialist",
+        "agent_name": "zhou_shenyan_redteam_agent",
+        "persona_id": "L3-003",
+        "display_name": "周慎言",
+        "layer": "L3",
+        "function": "redteam",
+        "title": "Red-team arbiter - Zhou Shenyan",
+        "rule_types": [],
+        "categories": [],
+        "is_default": False,
+    },
+    {
+        "agent_name": "su_zhiji_business_agent",
+        "persona_id": "L2-001",
+        "display_name": "苏知几",
+        "layer": "L2",
+        "function": "business_agent",
+        "title": "Business specialist - Su Zhiji",
+        "rule_types": [],
+        "categories": [],
+        "is_default": False,
+    },
+    {
+        "agent_name": "jiang_hengzhi_market_agent",
+        "persona_id": "L2-002",
+        "display_name": "江衡之",
+        "layer": "L2",
+        "function": "market_agent",
+        "title": "Market specialist - Jiang Hengzhi",
         "rule_types": [],
         "categories": ["行业竞争"],
         "is_default": False,
     },
     {
-        "agent_name": "business_agent",
-        "title": "Business and disclosure specialist",
+        "agent_name": "gu_lingsheng_market_agent",
+        "persona_id": "L2-003",
+        "display_name": "顾聆声",
+        "layer": "L2",
+        "function": "market_agent",
+        "title": "Market specialist - Gu Lingsheng",
+        "rule_types": [],
+        "categories": ["行业竞争"],
+        "is_default": False,
+    },
+    {
+        "agent_name": "qin_bingwen_financial_agent",
+        "persona_id": "L1-001",
+        "display_name": "秦秉文",
+        "layer": "L1",
+        "function": "financial_agent",
+        "title": "Financial specialist - Qin Bingwen",
+        "rule_types": ["quantitative_financial"],
+        "categories": [],
+        "is_default": False,
+    },
+    {
+        "agent_name": "lu_guanlan_market_agent",
+        "persona_id": "L1-002",
+        "display_name": "陆观澜",
+        "layer": "L1",
+        "function": "market_agent",
+        "title": "Market specialist - Lu Guanlan",
+        "rule_types": [],
+        "categories": ["行业竞争"],
+        "is_default": False,
+    },
+    {
+        "agent_name": "wen_shouzheng_legal_agent",
+        "persona_id": "L1-003",
+        "display_name": "温守正",
+        "layer": "L1",
+        "function": "legal_agent",
+        "title": "Legal specialist - Wen Shouzheng",
+        "rule_types": [],
+        "categories": ["关联交易", "对赌/赎回条款", "政策监管", "诉讼与纠纷", "担保与质押", "税务风险"],
+        "is_default": False,
+    },
+    {
+        "agent_name": "ye_zhiyuan_business_agent",
+        "persona_id": "L1-004",
+        "display_name": "叶致远",
+        "layer": "L1",
+        "function": "business_agent",
+        "title": "Business specialist - Ye Zhiyuan",
         "rule_types": [],
         "categories": [],
-        "is_default": True,
+        "is_default": False,
+    },
+    {
+        "agent_name": "cheng_zheng_evidence_agent",
+        "persona_id": "L1-005",
+        "display_name": "程徵",
+        "layer": "L1",
+        "function": "evidence",
+        "title": "Evidence retrieval specialist - Cheng Zheng",
+        "rule_types": [],
+        "categories": [],
+        "is_default": False,
+    },
+    {
+        "agent_name": "bai_shice_market_agent",
+        "persona_id": "L1-006",
+        "display_name": "白时策",
+        "layer": "L1",
+        "function": "market_agent",
+        "title": "Market specialist - Bai Shice",
+        "rule_types": [],
+        "categories": ["行业竞争"],
+        "is_default": False,
     },
 ]
+
+
+AGENT_NAME_ALIASES: dict[str, str] = {
+    "financial_agent": "qin_bingwen_financial_agent",
+    "legal_agent": "wen_shouzheng_legal_agent",
+    "market_agent": "lu_guanlan_market_agent",
+    "business_agent": "su_zhiji_business_agent",
+}
 
 
 def seed_reference_data(session_factory: sessionmaker) -> None:
@@ -202,14 +317,91 @@ def seed_reference_data(session_factory: sessionmaker) -> None:
             for display_order, item in enumerate(AGENT_EXPERTS, start=1):
                 session.add(AgentExpertRow(**item, display_order=display_order))
 
-        if not session.scalar(select(func.count()).select_from(AgentSpecRow)):
-            for display_order, item in enumerate(AGENT_SPECS, start=1):
-                session.add(AgentSpecRow(**item, display_order=display_order))
+        _refresh_agent_specs_if_stale(session)
 
         if not session.scalar(select(func.count()).select_from(RiskRuleSetRow)):
             seed_risk_rules(session)
+        else:
+            verify_risk_rule_seed(session)
 
         session.commit()
+
+
+def verify_risk_rule_seed(session) -> None:
+    """Repair stale or partially seeded risk-rule data, idempotently.
+
+    Re-seeds the bundled rule set only when the stored copy is unusable
+    (missing rules/dimensions) or predates the current seed version.
+    User CRUD on a fully seeded set — added, edited, disabled, or deleted
+    rules — is left untouched; a count drift is only logged.
+    """
+
+    data = json.loads(RISK_RULE_SEED_PATH.read_text(encoding="utf-8"))
+    rule_set_id = data["rule_set_id"]
+    seed_version = data.get("version", "v1.0")
+    seed_rule_count = len(data.get("rules", []))
+
+    row = session.get(RiskRuleSetRow, rule_set_id)
+    rule_count = session.scalar(
+        select(func.count()).select_from(RiskRuleRow).where(RiskRuleRow.rule_set_id == rule_set_id)
+    ) or 0
+    dimension_count = session.scalar(
+        select(func.count())
+        .select_from(RiskRuleDimensionRow)
+        .where(RiskRuleDimensionRow.rule_set_id == rule_set_id)
+    ) or 0
+
+    stale_version = row is not None and row.version != seed_version
+    broken = row is None or rule_count == 0 or dimension_count == 0
+    if not (stale_version or broken):
+        if rule_count != seed_rule_count:
+            logger.info(
+                "risk rule set %s holds %d rules (seed has %d) — user-curated, keeping as is",
+                rule_set_id,
+                rule_count,
+                seed_rule_count,
+            )
+        return
+
+    logger.warning(
+        "risk rule set %s is stale or incomplete (version=%s rules=%d dims=%d) — re-seeding %d rules",
+        rule_set_id,
+        row.version if row else None,
+        rule_count,
+        dimension_count,
+        seed_rule_count,
+    )
+    session.execute(delete(RiskRuleRow).where(RiskRuleRow.rule_set_id == rule_set_id))
+    session.execute(delete(RiskRuleDimensionRow).where(RiskRuleDimensionRow.rule_set_id == rule_set_id))
+    session.execute(delete(RiskRuleSetRow).where(RiskRuleSetRow.rule_set_id == rule_set_id))
+    session.flush()
+    seed_risk_rules(session)
+
+
+def _refresh_agent_specs_if_stale(session) -> None:
+    """Ensure ``agent_specs`` matches the current ``AGENT_SPECS`` seed list.
+
+    Pre-12-persona dev DBs either lack the ``persona_id`` column or still hold
+    the legacy 4 generic rows. Detect either condition and rebuild the table
+    contents from the seed so the runtime sees the full 12-persona catalog
+    without requiring a manual migration.
+    """
+
+    bind = session.get_bind()
+    inspector = inspect(bind)
+    columns = {col["name"] for col in inspector.get_columns(AgentSpecRow.__tablename__)}
+    if "persona_id" not in columns:
+        session.execute(text(f"DROP TABLE IF EXISTS {AgentSpecRow.__tablename__}"))
+        AgentSpecRow.__table__.create(bind=bind, checkfirst=True)
+        session.commit()
+    else:
+        existing = session.scalar(select(func.count()).select_from(AgentSpecRow)) or 0
+        if existing != len(AGENT_SPECS):
+            session.execute(text(f"DELETE FROM {AgentSpecRow.__tablename__}"))
+
+    if not session.scalar(select(func.count()).select_from(AgentSpecRow)):
+        for display_order, item in enumerate(AGENT_SPECS, start=1):
+            session.add(AgentSpecRow(**item, display_order=display_order))
 
 
 def seed_risk_rules(session) -> None:

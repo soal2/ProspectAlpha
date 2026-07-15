@@ -1,9 +1,12 @@
 import pytest
+from pathlib import Path
 from sqlalchemy.orm import sessionmaker
 
-from riskagent.agent_experts import AgentExpertRepository, AgentSpec
+from riskagent.agent_experts import AgentExpertRepository, AgentSpec, AgentSpecRepository
+from riskagent.agents.supervisor import AgentTeamSupervisor
 from riskagent.database import Base, make_engine
 from riskagent.models import AgentExpertRow
+from riskagent.risk_rules import RiskRuleRepository
 from riskagent.skills.risk_skill_registry import skills_for_agents
 
 
@@ -93,3 +96,53 @@ def test_agent_experts_returns_database_rows_in_display_order(tmp_path):
             "accent": "#0b243d",
         }
     ]
+
+
+def test_persona_expert_directory_returns_12_personas_with_full_metadata(tmp_path):
+    engine = make_engine(f"sqlite:///{tmp_path / 'agents.db'}")
+    session_factory = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+    supervisor = AgentTeamSupervisor(
+        repository=RiskRuleRepository(Path(__file__).parents[1] / "configs" / "risk_rules.yaml"),
+        agent_spec_repository=AgentSpecRepository(session_factory=session_factory),
+        runtime_root=tmp_path / "runtime",
+    )
+
+    options = supervisor.agent_options()
+
+    assert len(options) == 12
+    required_keys = {
+        "agent_name",
+        "persona_id",
+        "display_name",
+        "layer",
+        "function",
+        "avatar",
+        "accent",
+        "expertise",
+        "role_zh",
+        "rule_types",
+        "categories",
+        "skill_id",
+        "agent_card_url",
+    }
+    assert required_keys <= set(options[0])
+    assert {option["persona_id"] for option in options} == {
+        "L3-001",
+        "L3-002",
+        "L3-003",
+        "L2-001",
+        "L2-002",
+        "L2-003",
+        "L1-001",
+        "L1-002",
+        "L1-003",
+        "L1-004",
+        "L1-005",
+        "L1-006",
+    }
+    first = next(option for option in options if option["persona_id"] == "L1-001")
+    assert first["agent_name"] == "qin_bingwen_financial_agent"
+    assert first["display_name"] == "秦秉文"
+    assert first["function"] == "financial_agent"
+    assert first["role_zh"]
+    assert first["skill_id"] == "financial_risk_skill"

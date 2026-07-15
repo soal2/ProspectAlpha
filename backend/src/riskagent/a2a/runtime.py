@@ -58,6 +58,7 @@ ExpertHandler: TypeAlias = Callable[
     [JsonValue, "PeerContext"],
     JsonValue | Awaitable[JsonValue],
 ]
+StrategyHandler: TypeAlias = Callable[[JsonValue, str], JsonValue]
 EventCallback: TypeAlias = Callable[[dict[str, Any]], None]
 
 
@@ -187,6 +188,18 @@ class TeamRuntime:
         self._pending_peer_requests: dict[str, _PendingPeerRequest] = {}
         self._shutdown_requests: dict[str, tuple[str, str]] = {}
         self._shutdown_approved: set[str] = set()
+        self._strategy_handler: StrategyHandler | None = None
+        self._broadcast_requests: dict[str, str] = {}
+        self._broadcast_responses: dict[str, JsonValue] = {}
+        public_base_url = (
+            os.getenv("A2A_PUBLIC_BASE_URL", "").strip() or "http://localhost:8000"
+        ).rstrip("/")
+        self._strategy_card = build_agent_card(
+            STRATEGIC_AGENT,
+            role="战略编排 Agent「沈北辰」：统筹任务分配、答复专家的计划/模块/同伴状态咨询。",
+            capabilities=["mission planning", "team coordination", "task guidance"],
+            interface_url=f"{public_base_url}/a2a/{STRATEGIC_AGENT}",
+        )
         self._task_context = ServerCallContext()
         self._write_team_file()
         runtime_directory.register(self)
@@ -495,11 +508,87 @@ class TeamRuntime:
 
     def peer_profiles(self, *, excluding: str | None = None) -> list[dict[str, Any]]:
         with self._condition:
-            return [
+            profiles = [
                 agent_card_to_dict(card)
                 for name, card in sorted(self._cards.items())
                 if name != excluding and self._states.get(name) != ExpertState.SHUTDOWN
             ]
+        if excluding != STRATEGIC_AGENT:
+            profiles.append(agent_card_to_dict(self._strategy_card))
+        return profiles
+
+    def set_strategy_handler(self, handler: StrategyHandler) -> None:
+        """Register the callable answering expert peer requests sent to the orchestrator.
+
+        The handler receives (payload, sender_agent_name) and must return a
+        JSON-serializable value. It runs inline on the thread draining the
+        strategic mailbox (collect_results / read_broadcast_responses), so it
+        must be deterministic and fast — no nested LLM calls.
+        """
+
+        if not callable(handler):
+            raise TypeError("handler must be callable")
+        self._strategy_handler = handler
+
+    def broadcast(self, payload: JsonValue) -> dict[str, str]:
+        """Send one peer request from the orchestrator to every running expert.
+
+        Returns agent_name → request_id for use with read_broadcast_responses.
+        """
+
+        with self._condition:
+            recipients = [
+                name
+                for name, worker in self._experts.items()
+                if worker.is_alive() and self._states[name] != ExpertState.SHUTDOWN
+            ]
+        request_ids: dict[str, str] = {}
+        for name in sorted(recipients):
+            request_id = str(uuid4())
+            self._send_peer_request(
+                sender=STRATEGIC_AGENT,
+                recipient=name,
+                task_id=None,
+                request_id=request_id,
+                payload=payload,
+            )
+            with self._condition:
+                self._broadcast_requests[request_id] = name
+                self._broadcast_responses.pop(name, None)
+            request_ids[name] = request_id
+        self._emit(
+            "strategy_broadcast_sent",
+            agent_name=STRATEGIC_AGENT,
+            recipients=sorted(request_ids),
+        )
+        return request_ids
+
+    def read_broadcast_responses(
+        self,
+        request_ids: Mapping[str, str],
+        timeout: float,
+    ) -> dict[str, JsonValue]:
+        """Collect broadcast replies until all arrive or timeout; returns partial results."""
+
+        expected = set(request_ids)
+        deadline = time.monotonic() + timeout
+        while True:
+            with self._condition:
+                done = {
+                    name: self._broadcast_responses[name]
+                    for name in expected
+                    if name in self._broadcast_responses
+                }
+            if len(done) == len(expected):
+                return done
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return done
+            delivery = self.mailbox.receive(STRATEGIC_AGENT)
+            if delivery is None:
+                time.sleep(min(_RESPONSE_POLL_INTERVAL_SECONDS, remaining))
+                continue
+            self._consume_strategy_delivery(delivery)
 
     def thread_for(self, agent_name: str) -> threading.Thread:
         with self._condition:
@@ -544,7 +633,9 @@ class TeamRuntime:
         request_id: str,
         payload: JsonValue,
     ) -> None:
-        self._require_running_expert(recipient)
+        # The orchestrator is not an expert worker; its mailbox is always live.
+        if recipient != STRATEGIC_AGENT:
+            self._require_running_expert(recipient)
         message = ProtocolMessage.create(
             context_id=self.run_id,
             sender=sender,
@@ -610,6 +701,32 @@ class TeamRuntime:
                 message_id=message.message_id,
             )
             return
+        if message.message_type == MessageType.PEER_REQUEST:
+            self._answer_strategy_peer_request(delivery)
+            return
+        if message.message_type == MessageType.PEER_RESPONSE:
+            if not message.request_id:
+                self.mailbox.reject(delivery, "Peer response is missing request_id")
+                return
+            with self._condition:
+                expected_sender = self._broadcast_requests.get(message.request_id)
+            if expected_sender is None or expected_sender != message.sender:
+                self.mailbox.reject(
+                    delivery,
+                    "Peer response does not match a pending broadcast request",
+                )
+                return
+            if not self._claim_peer_response(STRATEGIC_AGENT, delivery):
+                return
+            with self._condition:
+                self._broadcast_requests.pop(message.request_id, None)
+                self._broadcast_responses[message.sender] = message.payload
+            self._emit(
+                "strategy_broadcast_response",
+                agent_name=message.sender,
+                request_id=message.request_id,
+            )
+            return
         if message.message_type in {
             MessageType.IDLE_NOTIFICATION,
             MessageType.SHUTDOWN_APPROVED,
@@ -642,6 +759,50 @@ class TeamRuntime:
             )
             return
         self.mailbox.reject(delivery, f"Unexpected strategic mailbox message: {message.message_type.value}")
+
+    def _answer_strategy_peer_request(self, delivery: MailboxDelivery) -> None:
+        """Answer an expert's PEER_REQUEST addressed to the orchestrator."""
+
+        message = delivery.message
+        if not message.request_id:
+            self.mailbox.reject(delivery, "Peer request is missing request_id")
+            return
+        handler = self._strategy_handler
+        if handler is None:
+            result: dict[str, JsonValue] = {
+                "status": "failed",
+                "error": "The strategic agent has no registered handler",
+            }
+        else:
+            try:
+                value = handler(message.payload, message.sender)
+                json.dumps(value, ensure_ascii=False)
+                result = {"status": "completed", "result": value}
+            except Exception as exc:
+                result = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
+        self.mailbox.send(
+            ProtocolMessage.create(
+                context_id=self.run_id,
+                sender=STRATEGIC_AGENT,
+                recipient=message.sender,
+                message_type=MessageType.PEER_RESPONSE,
+                task_id=message.task_id,
+                request_id=message.request_id,
+                in_reply_to=message.message_id,
+                payload=result,
+                message_id=f"{message.message_id}:response",
+                role=Role.ROLE_AGENT,
+            )
+        )
+        self.mailbox.acknowledge(delivery)
+        self._emit(
+            "strategy_peer_response_sent",
+            agent_name=STRATEGIC_AGENT,
+            recipient=message.sender,
+            task_id=message.task_id,
+            request_id=message.request_id,
+            status=result["status"],
+        )
 
     def _claim_peer_response(self, requester: str, delivery: MailboxDelivery) -> bool:
         message = delivery.message

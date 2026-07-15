@@ -3,7 +3,6 @@ import type {
   Agent,
   AnalysisSummary,
   BacktestDetailData,
-  BacktestNewData,
   BacktestSummary,
   DashboardStats,
   EvidenceDetailItem,
@@ -102,6 +101,7 @@ export interface AskResult {
 export type OrchestraStageStatus = "queued" | "running" | "done" | "failed" | "paused";
 
 export interface AnalysisRunEvent {
+  event_id?: string;
   event_type: string;
   actor_name: string;
   title: string;
@@ -114,6 +114,42 @@ export interface AnalysisRunEvent {
   action_label?: string;
   payload?: Record<string, unknown>;
   metrics?: Record<string, unknown>;
+  call_id?: string;
+  sequence?: number;
+  provider?: string;
+  model?: string;
+  raw_response?: string;
+  duration_ms?: number;
+  error?: string;
+}
+
+export interface AnalysisProgress {
+  run_id: string;
+  phase: string;
+  updated_at: string;
+  status: string;
+  current_stage: string;
+  error_summary?: string | null;
+  pdf: {
+    status: string;
+    parsed_pages: number;
+    total_pages: number;
+    parsed_blocks: number;
+    error: string | null;
+  };
+  index: {
+    status: string;
+    indexed_blocks: number;
+    total_blocks: number;
+  };
+  agents: {
+    agent_name: string;
+    module_id: string;
+    module: string;
+    status: string;
+    latest_action: string;
+    latest_summary: string;
+  }[];
 }
 
 export interface AnalysisRun {
@@ -146,7 +182,6 @@ export interface AnalysisRun {
     structured_data_keys: string[];
     has_document_id?: boolean;
     has_material_url?: boolean;
-    document_id?: string | null;
   };
   understood?: {
     company_name?: string;
@@ -203,10 +238,23 @@ export type AnalysisRunPayload = {
   max_findings?: number;
 };
 
+export type AnalysisRunInputPatch = {
+  company_name?: string;
+  document_text?: string;
+  document_id?: string;
+  material_url?: string;
+  ipo_project_hint?: string;
+  risk_rule_set_id?: string;
+  analysis_depth?: "quick" | "standard" | "deep";
+  structured_data?: Record<string, string>;
+  max_findings?: number;
+};
+
 type BackendEvidence = {
   evidence_id: string;
   finding_id: string;
   document_block_id: string;
+  document_id: string;
   page_number: number;
   section_path: string;
   text: string;
@@ -216,12 +264,27 @@ type BackendEvidence = {
   source_hash: string;
   confidence: number;
   verifier_status: string;
-  document_id?: string | null;
-  bbox_regions?: { page_number: number; bbox: number[] }[];
-  bbox_coordinate_space?: { width: number; height: number; origin: "top-left" };
 };
 
 type BackendAgent = Agent;
+
+export type AnalysisAgentOption = {
+  agent_name: string;
+  title: string;
+  default?: boolean;
+  description?: string;
+  capabilities?: string[];
+  agent_card_url?: string;
+  persona_id?: string;
+  display_name?: string;
+  layer?: string;
+  function?: string;
+  avatar?: string;
+  accent?: string;
+  expertise?: string[];
+  role_zh?: string;
+  skill_id?: string;
+};
 
 export type AnalysisOptions = {
   risk_rule_sets: {
@@ -231,14 +294,7 @@ export type AnalysisOptions = {
     rule_count: number;
     active: boolean;
   }[];
-  agents: {
-    agent_name: string;
-    title: string;
-    default?: boolean;
-    description?: string;
-    capabilities?: string[];
-    agent_card_url?: string;
-  }[];
+  agents: AnalysisAgentOption[];
   analysis_depths: {
     depth: "quick" | "standard" | "deep";
     label: string;
@@ -346,11 +402,8 @@ async function fetchEvidenceDetailItems(id: string): Promise<EvidenceDetailItem[
       conf: item.confidence,
       snippet: item.text,
       risk: riskByFinding[item.finding_id] ?? "风险证据",
-      documentId: item.document_id ?? run.input_summary.document_id ?? null,
-      pdfUrl: documentPdfUrl(item.document_id ?? run.input_summary.document_id),
+      documentId: item.document_id,
       bbox: item.bbox,
-      bboxRegions: toBBoxRegions(item),
-      bboxCoordinateSpace: item.bbox_coordinate_space ?? DEFAULT_BBOX_COORDINATE_SPACE,
     }));
   } catch (err) {
     if (isNotFound(err)) return [];
@@ -389,11 +442,9 @@ async function fetchKnowledgeData(): Promise<KnowledgeData> {
       conf: item.confidence,
       snippet: item.text,
       risk: riskByFinding[item.finding_id] ?? item.verifier_status,
-      documentId: item.document_id ?? run.input_summary.document_id ?? null,
-      pdfUrl: documentPdfUrl(item.document_id ?? run.input_summary.document_id),
+      documentId: item.document_id,
       bbox: item.bbox,
-      bboxRegions: toBBoxRegions(item),
-      bboxCoordinateSpace: item.bbox_coordinate_space ?? DEFAULT_BBOX_COORDINATE_SPACE,
+      createdAt: run.created_at,
     }));
   });
   const companies = [...new Set(runs.map((run) => run.company_name).filter(Boolean))];
@@ -417,23 +468,6 @@ async function fetchKnowledgeData(): Promise<KnowledgeData> {
       linkedConclusions: preview ? [preview.risk] : [],
     },
   };
-}
-
-const DEFAULT_BBOX_COORDINATE_SPACE = {
-  width: 1000,
-  height: 1000,
-  origin: "top-left" as const,
-};
-
-function toBBoxRegions(item: BackendEvidence) {
-  if (item.bbox_regions?.length) {
-    return item.bbox_regions.map((region) => ({ page: region.page_number, bbox: region.bbox }));
-  }
-  return item.bbox.length === 4 ? [{ page: item.page_number, bbox: item.bbox }] : [];
-}
-
-function documentPdfUrl(documentId?: string | null) {
-  return documentId ? `${API_BASE_URL}/documents/${encodeURIComponent(documentId)}/file` : null;
 }
 
 async function fetchBacktestDetailData(id: string): Promise<BacktestDetailData | null> {
@@ -508,17 +542,6 @@ async function fetchRiskRulesData(): Promise<RiskRulesData> {
   return apiRequest<RiskRulesData>("/risk-rules");
 }
 
-async function fetchBacktestNewData(): Promise<BacktestNewData> {
-  return {
-    steps: [
-      { key: "scope", label: "样本范围", desc: "选择回测的港股 IPO 样本时间窗口、行业、规模" },
-      { key: "model", label: "模型版本", desc: "选择 RiskAgent 模型版本与特征集" },
-      { key: "thresh", label: "风险阈值", desc: "定义高 / 中 / 低风险的判定边界" },
-      { key: "metric", label: "评估口径", desc: "选择评估窗口与指标" },
-    ],
-  };
-}
-
 // Analyses
 export async function getAnalyses() {
   return fetchAnalyses();
@@ -530,6 +553,10 @@ export async function getAnalysis(id: string) {
 
 export async function getAnalysisRun(id: string) {
   return apiRequest<AnalysisRun>(`/analysis-runs/${id}`);
+}
+
+export async function getAnalysisProgress(id: string) {
+  return apiRequest<AnalysisProgress>(`/analysis-runs/${id}/progress`);
 }
 
 // Agents
@@ -593,6 +620,13 @@ export async function createAnalysisDraft(payload: AnalysisRunPayload) {
   });
 }
 
+export async function updateAnalysisInputs(runId: string, patch: AnalysisRunInputPatch) {
+  return apiRequest<AnalysisRun>(`/analysis-runs/${runId}/inputs`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+}
+
 export async function startAnalysisRun(runId: string) {
   const response = await fetch(`${API_BASE_URL}/analysis-runs/${runId}/start`, {
     method: "POST",
@@ -630,6 +664,14 @@ export async function uploadDocument(file: File) {
     method: "POST",
     body: form,
   });
+}
+
+export function getDocumentFileUrl(documentId: string) {
+  return `${API_BASE_URL}/documents/${documentId}/file`;
+}
+
+export async function listDocuments() {
+  return apiRequest<UploadedDocument[]>("/documents");
 }
 
 // PDF Q&A — SSE stream from POST /documents/{id}/ask
@@ -766,9 +808,10 @@ export async function streamAnalysisRun(
   runId: string,
   onEvent: (event: AnalysisRunEvent) => void,
   onDone: (run: AnalysisRun) => void,
-  options: { signal?: AbortSignal } = {},
+  options: { signal?: AbortSignal; after?: number } = {},
 ): Promise<void> {
-  const response = await fetch(`${API_BASE_URL}/analysis-runs/${runId}/stream`, {
+  const after = options.after ? `?after=${options.after}` : "";
+  const response = await fetch(`${API_BASE_URL}/analysis-runs/${runId}/stream${after}`, {
     method: "GET",
     headers: { accept: "text/event-stream" },
     signal: options.signal,
@@ -852,11 +895,6 @@ export async function updateRiskRule(ruleId: string, payload: Partial<RiskRulePa
 
 export async function deleteRiskRule(ruleId: string) {
   return apiRequest<void>(`/risk-rules/${ruleId}`, { method: "DELETE" });
-}
-
-// Backtest New
-export async function getBacktestNewData() {
-  return fetchBacktestNewData();
 }
 
 async function fetchEvidenceFeed(id?: string): Promise<EvidenceFeedItem[]> {

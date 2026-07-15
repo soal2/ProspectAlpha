@@ -4,26 +4,31 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping
-from typing import Any
+from collections.abc import Callable, Mapping
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from riskagent.agents.llm_resilience import call_llm_with_resilience
+from riskagent.agents.prompts import render_orchestrator_prompt
 from riskagent.providers.llm import get_default_llm_client
+from riskagent.seed_data import AGENT_NAME_ALIASES
 
 
 STRATEGY_SYSTEM_PROMPT = """\
 你是 ProspectAlpha 的战略层 Agent「沈北辰」。你必须依据用户目标、招股书摘要和本次实时专家名册，
 选择最小但完整的专家编队，并为每位专家分配一个互不重复的风险分析模块。不得使用名册之外的专家，
 不得创建固定顺序或虚构能力。专家启动后会通过 A2A 邮箱自主通信，因此这里只定义主模块，不定义专家间固定连线。
+名册中每位专家附有 runtime_status（实时状态）、call_count/avg_tokens（历史负载）：
+runtime_status 为 WORKING 或 SHUTDOWN、或 available=false 的专家不得选用；负载仅作参考，能力匹配优先。
 
 AVAILABLE_EXPERTS_JSON:
 {available_experts_json}
 
 只输出 JSON：
-{{"summary":str,"focus_areas":[str],"selected_agents":[str],"assignments":[
-{{"module_id":str,"agent_name":str,"module":str,"goal":str,"expected_outputs":[str]}}
-]}}
+{"summary":str,"focus_areas":[str],"selected_agents":[str],"assignments":[
+{"module_id":str,"agent_name":str,"module":str,"goal":str,"expected_outputs":[str]}
+]}
 """
 
 
@@ -112,20 +117,28 @@ async def orchestrate(
     company_name: str,
     document_summary: str,
     available_agents: list[dict[str, Any]],
+    on_delta: Callable[[str], None] | None = None,
+    on_response: Callable[[str], None] | None = None,
 ) -> StrategyDecision:
     """Ask the strategic model for a plan and strictly validate it against the live roster."""
 
     if not available_agents:
         raise ValueError("No executable expert agents are available.")
-    raw = await get_default_llm_client().chat_json(
-        _strategy_messages(
+    messages = _strategy_messages(
             user_requirement=user_requirement,
             company_name=company_name,
             document_summary=document_summary[:4000],
             available_agents=available_agents,
-        ),
-        temperature=0.1,
-    )
+        )
+    client = get_default_llm_client()
+    if on_delta or on_response:
+        raw, raw_response = await client.chat_json_stream(
+            messages, temperature=0.1, on_delta=on_delta
+        )
+        if on_response:
+            on_response(raw_response)
+    else:
+        raw = await client.chat_json(messages, temperature=0.1)
     return validate_strategy_decision(raw, available_agents)
 
 
@@ -133,12 +146,12 @@ def validate_strategy_decision(
     raw: dict[str, Any] | StrategyDecision,
     available_agents: list[dict[str, Any]],
 ) -> StrategyDecision:
-    plan = raw if isinstance(raw, StrategyDecision) else StrategyDecision.model_validate(raw)
     available = {
         str(item.get("agent_name", "")).strip()
         for item in available_agents
         if str(item.get("agent_name", "")).strip()
     }
+    plan = _normalize_strategy_decision(raw, available)
     unknown = sorted(set(plan.selected_agents) - available)
     if unknown:
         raise ValueError(f"Strategy selected unavailable experts: {', '.join(unknown)}")
@@ -156,7 +169,7 @@ def manual_strategy_decision(
         for item in available_agents
         if str(item.get("agent_name", "")).strip()
     }
-    selected = [name.strip() for name in agent_names]
+    selected = [_resolve_agent_name(name.strip(), by_name) for name in agent_names]
     if not selected or any(not name for name in selected):
         raise ValueError("Every selected expert name must be non-empty.")
     if len(selected) != len(set(selected)):
@@ -205,7 +218,7 @@ def manual_recovery_strategy_decision(
         for item in available_agents
         if str(item.get("agent_name", "")).strip()
     }
-    selected = [name.strip() for name in agent_names]
+    selected = [_resolve_agent_name(name.strip(), by_name) for name in agent_names]
     if not selected or any(not name for name in selected):
         raise ValueError("Every selected expert name must be non-empty.")
     if len(selected) != len(set(selected)):
@@ -263,6 +276,25 @@ def manual_recovery_strategy_decision(
         selected_agents=list(ordered_names),
         assignments=assignments,
     )
+
+
+def _normalize_strategy_decision(
+    raw: dict[str, Any] | StrategyDecision,
+    available: set[str],
+) -> StrategyDecision:
+    payload = raw.model_dump() if isinstance(raw, StrategyDecision) else dict(raw)
+    roster = {name: {} for name in available}
+    payload["selected_agents"] = [
+        _resolve_agent_name(str(name).strip(), roster) for name in payload.get("selected_agents", [])
+    ]
+    payload["assignments"] = [
+        {
+            **dict(item),
+            "agent_name": _resolve_agent_name(str(item.get("agent_name", "")).strip(), roster),
+        }
+        for item in payload.get("assignments", [])
+    ]
+    return StrategyDecision.model_validate(payload)
 
 
 def _capability_match_score(
@@ -342,6 +374,15 @@ def validate_replacement_decision(
     return decision
 
 
+def _resolve_agent_name(agent_name: str, roster: dict[str, Any]) -> str:
+    if agent_name in roster:
+        return agent_name
+    alias = AGENT_NAME_ALIASES.get(agent_name)
+    if alias and alias in roster:
+        return alias
+    return agent_name
+
+
 async def synthesize_report(
     *,
     company_name: str,
@@ -349,6 +390,7 @@ async def synthesize_report(
     module_results: list[dict[str, Any]],
     verified_findings: list[dict[str, Any]],
     evidence_index: list[dict[str, Any]],
+    validation_feedback: str | None = None,
 ) -> IntegratedRiskReport:
     raw = await get_default_llm_client().chat_json(
         _report_messages(
@@ -357,6 +399,7 @@ async def synthesize_report(
             module_results=module_results,
             verified_findings=verified_findings,
             evidence_index=evidence_index,
+            validation_feedback=validation_feedback,
         ),
         temperature=0.2,
     )
@@ -456,10 +499,11 @@ def _strategy_messages(
     available_agents: list[dict[str, Any]],
 ) -> list[dict[str, str]]:
     roster = json.dumps(available_agents, ensure_ascii=False, sort_keys=True)
+    template = render_orchestrator_prompt("strategy_system", STRATEGY_SYSTEM_PROMPT)
     return [
         {
             "role": "system",
-            "content": STRATEGY_SYSTEM_PROMPT.format(available_experts_json=roster),
+            "content": template.replace("{available_experts_json}", roster),
         },
         {
             "role": "user",
@@ -472,6 +516,18 @@ def _strategy_messages(
     ]
 
 
+REPORT_SYSTEM_PROMPT = (
+    "你是 ProspectAlpha 战略层 Agent「沈北辰」。整合所有专家模块结果，输出完整、连贯的 IPO 风险报告。"
+    "不得新增输入中不存在的 finding_id 或 evidence_id；每个专家模块都必须有对应 section，即使结论是未发现重大风险。"
+    "每个被引用的 finding 必须在同一 section 中附带至少一条归属于它的 evidence；没有可验证引用时不得创建跨模块风险。"
+    "只输出 JSON："
+    '{"title":str,"executive_summary":str,"overall_risk_level":str,'
+    '"sections":[{"module_id":str,"title":str,"analysis":str,"finding_ids":[str],"evidence_ids":[str]}],'
+    '"cross_module_risks":[{"title":str,"analysis":str,"finding_ids":[str],"evidence_ids":[str]}],'
+    '"recommendations":[str],"limitations":[str]}。'
+)
+
+
 def _report_messages(
     *,
     company_name: str,
@@ -479,6 +535,7 @@ def _report_messages(
     module_results: list[dict[str, Any]],
     verified_findings: list[dict[str, Any]],
     evidence_index: list[dict[str, Any]],
+    validation_feedback: str | None = None,
 ) -> list[dict[str, str]]:
     payload = json.dumps(
         {
@@ -490,19 +547,102 @@ def _report_messages(
         },
         ensure_ascii=False,
     )
-    return [
+    messages = [
         {
             "role": "system",
-            "content": (
-                "你是 ProspectAlpha 战略层 Agent「沈北辰」。整合所有专家模块结果，输出完整、连贯的 IPO 风险报告。"
-                "不得新增输入中不存在的 finding_id 或 evidence_id；每个专家模块都必须有对应 section，即使结论是未发现重大风险。"
-                "每个被引用的 finding 必须在同一 section 中附带至少一条归属于它的 evidence；没有可验证引用时不得创建跨模块风险。"
-                "只输出 JSON："
-                '{"title":str,"executive_summary":str,"overall_risk_level":str,'
-                '"sections":[{"module_id":str,"title":str,"analysis":str,"finding_ids":[str],"evidence_ids":[str]}],'
-                '"cross_module_risks":[{"title":str,"analysis":str,"finding_ids":[str],"evidence_ids":[str]}],'
-                '"recommendations":[str],"limitations":[str]}。'
-            ),
+            "content": render_orchestrator_prompt("report_system", REPORT_SYSTEM_PROMPT),
         },
         {"role": "user", "content": payload},
     ]
+    if validation_feedback:
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    f"上一次输出未通过校验：{validation_feedback}。"
+                    "请修正后重新输出完整 JSON，只引用输入中存在的 finding_id/evidence_id。"
+                ),
+            }
+        )
+    return messages
+
+
+# ============================================================================
+# Debate-phase contracts (Task 3): peer critique, finding revision, arbiter.
+# ============================================================================
+
+
+class PeerCritique(StrictContract):
+    critic_agent: str = Field(min_length=1, max_length=64)
+    target_agent: str = Field(min_length=1, max_length=64)
+    finding_ids: list[str] = Field(min_length=1)
+    critique_summary: str = Field(min_length=1, max_length=2000)
+    suggested_revisions: list[str] = Field(default_factory=list)
+    severity: Literal["info", "minor", "major", "blocker"] = "info"
+
+
+class FindingRevision(StrictContract):
+    agent_name: str = Field(min_length=1, max_length=64)
+    original_finding_ids: list[str] = Field(default_factory=list)
+    revised_summary: str = Field(min_length=1, max_length=4000)
+    added_evidence_ids: list[str] = Field(default_factory=list)
+    removed_finding_ids: list[str] = Field(default_factory=list)
+    revision_reason: str = Field(min_length=1, max_length=2000)
+
+
+class ArbiterRuling(StrictContract):
+    decision: Literal["proceed", "request_supplement", "escalate_human"]
+    reasoning: str = Field(min_length=1, max_length=4000)
+    required_supplements: list[str] = Field(default_factory=list)
+    flagged_finding_ids: list[str] = Field(default_factory=list)
+    approved_finding_ids: list[str] = Field(default_factory=list)
+
+
+ARBITER_SYSTEM_PROMPT = """\
+你是 ProspectAlpha 战略层 Agent「周慎言」，担任质量总检·红队角色。你的职责是审阅专家团队两轮辩论后的 finding、质证意见与修订记录，
+判断当前证据链是否足以立论，并给出明确裁决。不得创建新 finding；只能基于已有证据给出 proceed / request_supplement / escalate_human。
+
+裁决准则：
+- proceed：所有重大 finding 至少有一条互证证据、质证意见已得到合理回应。
+- request_supplement：仍有 finding 缺少原文证据、缺少交叉验证或质证未回应；指出需要补充的内容。
+- escalate_human：存在不可调和的分歧或严重事实冲突，需要人工接管。
+
+只输出 JSON：
+{"decision":"proceed"|"request_supplement"|"escalate_human","reasoning":str,
+"required_supplements":[str],"flagged_finding_ids":[str],"approved_finding_ids":[str]}
+"""
+
+
+async def arbitrate_debate(
+    *,
+    company_name: str,
+    findings_with_critiques: list[dict[str, Any]],
+    arbiter_agent_name: str = "zhou_shenyan_redteam_agent",
+    live_call: Any = None,
+) -> ArbiterRuling:
+    """Invoke the L3 red-team arbiter to rule on the debate outcome."""
+
+    payload = json.dumps(
+        {
+            "company_name": company_name,
+            "arbiter_agent_name": arbiter_agent_name,
+            "findings_with_critiques": findings_with_critiques,
+        },
+        ensure_ascii=False,
+    )
+    try:
+        raw = await call_llm_with_resilience(
+            messages=[
+                {"role": "system", "content": render_orchestrator_prompt("arbiter_system", ARBITER_SYSTEM_PROMPT)},
+                {"role": "user", "content": payload},
+            ],
+            temperature=0.1,
+            context={"phase": "arbitration", "arbiter": arbiter_agent_name},
+            on_delta=live_call.delta if live_call else None,
+            on_response=live_call.complete if live_call else None,
+        )
+    except Exception as exc:
+        if live_call:
+            live_call.fail(exc)
+        raise
+    return ArbiterRuling.model_validate(raw)

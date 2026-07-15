@@ -13,13 +13,16 @@ from riskagent.analysis_runs import (
     AnalysisRun,
     AnalysisRunCreate,
     AnalysisRunInputPatch,
+    AnalysisProgress,
     AnalysisTrace,
     AnalysisRunRepository,
     ExpertSelectionRequest,
     ReportDraft,
     RunEvidence,
+    _build_report_streaming,
     get_default_analysis_repository,
 )
+from riskagent.runtime_events import get_event_broker, subscribe_redis_events
 
 
 router = APIRouter(prefix="/analysis-runs", tags=["analysis-runs"])
@@ -52,6 +55,14 @@ def list_analysis_runs() -> list[AnalysisRun]:
 def get_analysis_run(run_id: str) -> AnalysisRun:
     try:
         return _repo().get(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found") from exc
+
+
+@router.get("/{run_id}/progress", response_model=AnalysisProgress)
+def get_analysis_progress(run_id: str) -> AnalysisProgress:
+    try:
+        return _repo().progress(run_id)
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found") from exc
 
@@ -99,7 +110,7 @@ def get_analysis_events(run_id: str, after: int = 0) -> dict[str, object]:
 
 
 @router.get("/{run_id}/stream")
-async def stream_analysis_run(run_id: str) -> StreamingResponse:
+async def stream_analysis_run(run_id: str, after: int = 0) -> StreamingResponse:
     try:
         run = _repo().get(run_id)
         if _should_resume(run):
@@ -108,29 +119,88 @@ async def stream_analysis_run(run_id: str) -> StreamingResponse:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found") from exc
 
     async def event_source():
-        after = 0
-        while True:
-            try:
+        broker = get_event_broker()
+        queue = await broker.subscribe(run_id)
+        redis_subscription = await subscribe_redis_events(run_id)
+        seen_events: set[tuple[object, object, object, object]] = set()
+        seen_deltas: set[tuple[object, object]] = set()
+        cursor = max(0, after)
+        last_durable_sync = 0.0
+        try:
+            while True:
+                loop = asyncio.get_running_loop().time()
+                if loop - last_durable_sync >= 0.25:
+                    durable_events = _repo().events(run_id, cursor)
+                    cursor += len(durable_events)
+                    last_durable_sync = loop
+                    for event in durable_events:
+                        signature = _event_signature(event)
+                        if signature in seen_events:
+                            continue
+                        seen_events.add(signature)
+                        yield _sse_data(event)
                 run = _repo().get(run_id)
-            except KeyError:
-                yield f"data: {json.dumps({'type': 'error', 'message': 'Run not found'}, ensure_ascii=False)}\n\n"
-                return
-            new_events = _repo().events(run_id, after)
-            for event in new_events:
-                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-            after += len(new_events)
-            if run.status == "awaiting_expert_selection":
-                yield f"data: {json.dumps({'type': 'paused', 'run': run.model_dump()}, ensure_ascii=False)}\n\n"
-                return
-            if run.status in {"completed", "failed"}:
-                yield f"data: {json.dumps({'type': 'done', 'run': run.model_dump()}, ensure_ascii=False)}\n\n"
-                return
-            await asyncio.sleep(0.5)
+                if run.status == "awaiting_expert_selection":
+                    yield _sse_data({"type": "paused", "run": run.model_dump()})
+                    return
+                if run.status in {"completed", "failed"}:
+                    if not _repo().events(run_id, cursor):
+                        yield _sse_data({"type": "done", "run": run.model_dump()})
+                        return
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=0.05)
+                except asyncio.TimeoutError:
+                    event = None
+                if event:
+                    signature = _event_signature(event)
+                    if signature not in seen_events:
+                        seen_events.add(signature)
+                        yield _sse_data(event)
+                if redis_subscription:
+                    event = await redis_subscription.get()
+                    if event:
+                        delta_key = (event.get("call_id"), event.get("sequence"))
+                        if event.get("event_type") != "llm_response_delta" or delta_key not in seen_deltas:
+                            seen_deltas.add(delta_key)
+                            yield _sse_data(event)
+                if event is None:
+                    await asyncio.sleep(0.05)
+        except KeyError:
+            yield _sse_data({"type": "error", "message": "Run not found"})
+            return
+        finally:
+            await broker.unsubscribe(run_id, queue)
+            if redis_subscription:
+                await redis_subscription.close()
 
     return StreamingResponse(
         event_source(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+def _sse_data(payload: dict[str, object]) -> str:
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _is_terminal_event(event: dict[str, object]) -> bool:
+    event_type = event.get("event_type") or event.get("type")
+    if event_type == "run_completed":
+        return True
+    return (
+        event_type == "stage_completed"
+        and event.get("stage_key") == "completed"
+        and event.get("stage_status") == "completed"
+    )
+
+
+def _event_signature(event: dict[str, object]) -> tuple[object, object, object, object]:
+    return (
+        event.get("event_id") or event.get("call_id") or event.get("created_at"),
+        event.get("event_type") or event.get("type"),
+        event.get("actor_name"),
+        event.get("title"),
     )
 
 
@@ -177,6 +247,31 @@ def get_analysis_report(run_id: str) -> ReportDraft:
         return _repo().report(run_id)
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found") from exc
+
+
+@router.get("/{run_id}/stream-report")
+async def stream_report(run_id: str) -> StreamingResponse:
+    try:
+        run = _repo().get(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Run not found") from exc
+    if run.status != "completed":
+        raise HTTPException(status_code=409, detail=f"Run status is {run.status}, not completed")
+
+    async def gen():
+        try:
+            async for chunk in _build_report_streaming(run):
+                yield f"data: {json.dumps({'type': 'report_chunk', 'delta': chunk}, ensure_ascii=False)}\n\n"
+        except Exception as exc:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
+            return
+        yield f"data: {json.dumps({'type': 'report_done'})}\n\n"
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.get("/{run_id}/trace", response_model=AnalysisTrace)

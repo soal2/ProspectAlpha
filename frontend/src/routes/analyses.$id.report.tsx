@@ -29,10 +29,10 @@ function ReportPage() {
     <div className="grid h-[calc(100vh-3.5rem-14.5rem)] min-h-[640px] grid-cols-[280px_minmax(0,1fr)]">
       <aside className="overflow-y-auto border-r border-border bg-card/40 px-4 py-6">
         <div className="px-2">
-          <div className="font-serif text-base font-semibold">真实报告目录</div>
-          <p className="mt-1 text-[11px] text-muted-foreground">
+          <div className="font-serif text-base font-semibold">报告目录</div>
+          {/* <p className="mt-1 text-[11px] text-muted-foreground">
             来自后端 ReportDraft，不含硬编码演示结论
-          </p>
+          </p> */}
         </div>
         <nav className="mt-5 space-y-0.5">
           {sections.map((section, index) => (
@@ -78,7 +78,11 @@ function ReportPage() {
                 to="/analyses/$id/evidence"
                 id={analysis.id}
               />
-              <button className="inline-flex h-9 items-center gap-1.5 rounded-full border border-border bg-card px-3 text-xs text-muted-foreground">
+              <button
+                onClick={() => exportMarkdown(analysis.name, analysis.id, report?.markdown)}
+                disabled={!report?.markdown}
+                className="inline-flex h-9 items-center gap-1.5 rounded-full border border-border bg-card px-3 text-xs text-muted-foreground hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
+              >
                 <Download className="size-3.5" /> 导出
               </button>
             </div>
@@ -108,6 +112,19 @@ function ReportPage() {
       </section>
     </div>
   );
+}
+
+function exportMarkdown(companyName: string, runId: string, markdown?: string) {
+  if (!markdown) return;
+  const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `${companyName}-IPO风险分析报告-${runId}.md`;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
 }
 
 function splitMarkdown(markdown: string) {

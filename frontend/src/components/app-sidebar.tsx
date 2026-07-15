@@ -28,7 +28,7 @@ import type { DashboardStats } from "@/lib/types";
 
 const work = [
   { title: "工作台", url: "/", icon: Home },
-  { title: "新建分析", url: "/intake", icon: Sparkles },
+  // { title: "新建分析", url: "/intake", icon: Sparkles },
   { title: "我的分析", url: "/analyses", icon: ListChecks },
 ];
 

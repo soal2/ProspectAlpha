@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import os
+import threading
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,11 @@ from riskagent.models import RiskRuleDimensionRow, RiskRuleRow, RiskRuleSetRow
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_ROOT = BACKEND_ROOT / "configs"
 DEFAULT_RULES_PATH = CONFIG_ROOT / "risk_rules.yaml"
+
+# Serializes rule CRUD across threads: create does a read-then-write to pick
+# the next rule id, and _write_data replaces the whole rule set, so
+# interleaved writers could otherwise duplicate ids or drop rows.
+_WRITE_LOCK = threading.Lock()
 
 
 class RiskRule(BaseModel):
@@ -159,45 +165,48 @@ class RiskRuleRepository:
         raise KeyError(rule_id)
 
     def create_rule(self, payload: RiskRuleCreate) -> RiskRule:
-        rule_set = self.load()
-        rule = RiskRule(rule_id=self._next_rule_id([item.model_dump() for item in rule_set.rules]), **payload.model_dump())
-        self._ensure_dimension(rule_set.rule_set_id, rule)
-        with self.session_factory() as session:
-            max_order = max(
-                [
-                    row.display_order
-                    for row in session.scalars(
-                        select(RiskRuleRow).where(RiskRuleRow.rule_set_id == rule_set.rule_set_id)
-                    ).all()
-                ],
-                default=0,
-            )
-            session.add(RiskRuleRow(**rule.model_dump(), rule_set_id=rule_set.rule_set_id, display_order=max_order + 1))
-            session.commit()
-        return rule
+        with _WRITE_LOCK:
+            rule_set = self.load()
+            rule = RiskRule(rule_id=self._next_rule_id([item.model_dump() for item in rule_set.rules]), **payload.model_dump())
+            self._ensure_dimension(rule_set.rule_set_id, rule)
+            with self.session_factory() as session:
+                max_order = max(
+                    [
+                        row.display_order
+                        for row in session.scalars(
+                            select(RiskRuleRow).where(RiskRuleRow.rule_set_id == rule_set.rule_set_id)
+                        ).all()
+                    ],
+                    default=0,
+                )
+                session.add(RiskRuleRow(**rule.model_dump(), rule_set_id=rule_set.rule_set_id, display_order=max_order + 1))
+                session.commit()
+            return rule
 
     def update_rule(self, rule_id: str, payload: RiskRuleUpdate) -> RiskRule:
         patch = payload.model_dump(exclude_unset=True)
-        with self.session_factory() as session:
-            row = session.get(RiskRuleRow, rule_id)
-            if row is None:
-                raise KeyError(rule_id)
-            rule_set_id = row.rule_set_id
-            existing = _rule_to_dict(row)
-            updated = RiskRule(**{**existing, **patch})
-            for key, value in updated.model_dump().items():
-                setattr(row, key, value)
-            session.commit()
-        self._ensure_dimension(rule_set_id, updated)
-        return updated
+        with _WRITE_LOCK:
+            with self.session_factory() as session:
+                row = session.get(RiskRuleRow, rule_id)
+                if row is None:
+                    raise KeyError(rule_id)
+                rule_set_id = row.rule_set_id
+                existing = _rule_to_dict(row)
+                updated = RiskRule(**{**existing, **patch})
+                for key, value in updated.model_dump().items():
+                    setattr(row, key, value)
+                session.commit()
+            self._ensure_dimension(rule_set_id, updated)
+            return updated
 
     def delete_rule(self, rule_id: str) -> None:
-        with self.session_factory() as session:
-            row = session.get(RiskRuleRow, rule_id)
-            if row is None:
-                raise KeyError(rule_id)
-            session.delete(row)
-            session.commit()
+        with _WRITE_LOCK:
+            with self.session_factory() as session:
+                row = session.get(RiskRuleRow, rule_id)
+                if row is None:
+                    raise KeyError(rule_id)
+                session.delete(row)
+                session.commit()
 
     def select_rules(
         self,
@@ -220,47 +229,48 @@ class RiskRuleRepository:
 
     def _write_data(self, data: dict[str, Any]) -> None:
         data = self._recalculate(self._normalize_data(data))
-        if self.session_factory is SessionLocal:
-            init_db()
-        else:
-            bind = getattr(self.session_factory, "kw", {}).get("bind")
-            if bind is not None:
-                Base.metadata.create_all(bind=bind)
-        with self.session_factory() as session:
-            rule_set_id = data["rule_set_id"]
-            session.execute(delete(RiskRuleRow).where(RiskRuleRow.rule_set_id == rule_set_id))
-            session.execute(delete(RiskRuleDimensionRow).where(RiskRuleDimensionRow.rule_set_id == rule_set_id))
-            session.execute(delete(RiskRuleSetRow).where(RiskRuleSetRow.rule_set_id == rule_set_id))
-            session.add(
-                RiskRuleSetRow(
-                    rule_set_id=rule_set_id,
-                    version=data["version"],
-                    name=data["name"],
-                    source_workbook=data.get("source_workbook"),
-                    source_main_sheet=data.get("source_main_sheet"),
-                    source_summary_sheet=data.get("source_summary_sheet"),
-                    scope=data.get("scope"),
-                    usage_notes=data.get("usage_notes", []),
-                    active=True,
-                    display_order=1,
-                )
-            )
-            session.flush()
-            for display_order, dimension in enumerate(data["dimensions"], start=1):
+        with _WRITE_LOCK:
+            if self.session_factory is SessionLocal:
+                init_db()
+            else:
+                bind = getattr(self.session_factory, "kw", {}).get("bind")
+                if bind is not None:
+                    Base.metadata.create_all(bind=bind)
+            with self.session_factory() as session:
+                rule_set_id = data["rule_set_id"]
+                session.execute(delete(RiskRuleRow).where(RiskRuleRow.rule_set_id == rule_set_id))
+                session.execute(delete(RiskRuleDimensionRow).where(RiskRuleDimensionRow.rule_set_id == rule_set_id))
+                session.execute(delete(RiskRuleSetRow).where(RiskRuleSetRow.rule_set_id == rule_set_id))
                 session.add(
-                    RiskRuleDimensionRow(
-                        dimension_id=f"{rule_set_id}:{dimension['dimension_code']}",
+                    RiskRuleSetRow(
                         rule_set_id=rule_set_id,
-                        dimension_code=dimension["dimension_code"],
-                        dimension=dimension["dimension"],
-                        rule_type=dimension["rule_type"],
-                        description=dimension.get("description"),
-                        display_order=display_order,
+                        version=data["version"],
+                        name=data["name"],
+                        source_workbook=data.get("source_workbook"),
+                        source_main_sheet=data.get("source_main_sheet"),
+                        source_summary_sheet=data.get("source_summary_sheet"),
+                        scope=data.get("scope"),
+                        usage_notes=data.get("usage_notes", []),
+                        active=True,
+                        display_order=1,
                     )
                 )
-            for display_order, rule in enumerate(data["rules"], start=1):
-                session.add(RiskRuleRow(**rule, rule_set_id=rule_set_id, display_order=display_order))
-            session.commit()
+                session.flush()
+                for display_order, dimension in enumerate(data["dimensions"], start=1):
+                    session.add(
+                        RiskRuleDimensionRow(
+                            dimension_id=f"{rule_set_id}:{dimension['dimension_code']}",
+                            rule_set_id=rule_set_id,
+                            dimension_code=dimension["dimension_code"],
+                            dimension=dimension["dimension"],
+                            rule_type=dimension["rule_type"],
+                            description=dimension.get("description"),
+                            display_order=display_order,
+                        )
+                    )
+                for display_order, rule in enumerate(data["rules"], start=1):
+                    session.add(RiskRuleRow(**rule, rule_set_id=rule_set_id, display_order=display_order))
+                session.commit()
 
     def _normalize_data(self, data: dict[str, Any]) -> dict[str, Any]:
         normalized = dict(data)

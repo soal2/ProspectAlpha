@@ -11,6 +11,7 @@ export default defineConfig({
     server: { entry: "server" },
   },
   vite: {
+    resolve: { dedupe: ["react", "react-dom"] },
     server: { port: 5173 },
     preview: { port: 5173 },
   },
