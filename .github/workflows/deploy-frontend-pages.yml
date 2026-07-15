@@ -1,0 +1,64 @@
+name: Deploy frontend to GitHub Pages
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "frontend/**"
+      - ".github/workflows/deploy-frontend-pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: ${{ vars.VITE_API_BASE_URL != '' }}
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_PAGES_DEPLOY: "true"
+      VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.4"
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: bun install --frozen-lockfile
+      - name: Build static frontend
+        working-directory: frontend
+        run: |
+          bun run lint
+          bun run build
+          node .output/server/index.mjs &
+          server_pid=$!
+          trap 'kill $server_pid' EXIT
+          for _ in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:3000/ProspectAlpha/ --output .output/public/index.html; then
+              break
+            fi
+            sleep 1
+          done
+          test -s .output/public/index.html
+          cp .output/public/index.html .output/public/404.html
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: frontend/.output/public
+
+  deploy:
+    if: ${{ vars.VITE_API_BASE_URL != '' }}
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

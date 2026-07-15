@@ -1,0 +1,138 @@
+services:
+  - type: web
+    name: prospectalpha-api
+    runtime: docker
+    region: singapore
+    plan: starter
+    branch: master
+    dockerContext: ./backend
+    dockerfilePath: ./backend/Dockerfile
+    dockerCommand: ./scripts/start_render.sh
+    healthCheckPath: /health
+    maxShutdownDelaySeconds: 300
+    autoDeployTrigger: checksPass
+    buildFilter:
+      paths:
+        - backend/**
+        - render.yaml
+    disk:
+      name: agent-runtime
+      mountPath: /var/lib/prospectalpha
+      sizeGB: 10
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: ANALYSIS_EXECUTION_MODE
+        value: rq
+      - key: ANALYSIS_QUEUE_NAME
+        value: analysis
+      - key: AGENT_RUNTIME_DATA_DIR
+        value: /var/lib/prospectalpha/agent-runtime
+      - key: LANGGRAPH_CHECKPOINT_BACKEND
+        value: postgres
+      - key: DATABASE_URL
+        fromDatabase:
+          name: prospectalpha-postgres
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: prospectalpha-redis
+          property: connectionString
+      - key: QDRANT_HOSTPORT
+        fromService:
+          type: pserv
+          name: prospectalpha-qdrant
+          property: hostport
+      - key: VECTOR_STORE_PROVIDER
+        value: qdrant
+      - key: MINIO_ENDPOINT
+        fromService:
+          type: pserv
+          name: prospectalpha-minio
+          property: hostport
+      - key: MINIO_ACCESS_KEY
+        fromService:
+          type: pserv
+          name: prospectalpha-minio
+          envVarKey: MINIO_ROOT_USER
+      - key: MINIO_SECRET_KEY
+        fromService:
+          type: pserv
+          name: prospectalpha-minio
+          envVarKey: MINIO_ROOT_PASSWORD
+      - key: MINIO_SECURE
+        value: "0"
+      - key: OBJECT_STORE_PROVIDER
+        value: minio
+      - key: OBJECT_STORE_BUCKET
+        value: prospect-alpha
+      - key: CORS_ALLOW_ORIGINS
+        value: https://soal2.github.io
+      - key: A2A_PUBLIC_BASE_URL
+        fromService:
+          type: web
+          name: prospectalpha-api
+          envVarKey: RENDER_EXTERNAL_URL
+      - key: A2A_SEND_TIMEOUT_SECONDS
+        value: "300"
+      - key: OPENAI_BASE_URL
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        sync: false
+      - key: EMBEDDING_BASE_URL
+        sync: false
+      - key: EMBEDDING_API_KEY
+        sync: false
+      - key: EMBEDDING_MODEL
+        sync: false
+
+  - type: keyvalue
+    name: prospectalpha-redis
+    region: singapore
+    plan: starter
+    maxmemoryPolicy: noeviction
+    persistenceMode: journal-snapshot
+    ipAllowList: []
+
+  - type: pserv
+    name: prospectalpha-qdrant
+    runtime: image
+    region: singapore
+    plan: starter
+    image:
+      url: docker.io/qdrant/qdrant:v1.12.1
+    disk:
+      name: qdrant-data
+      mountPath: /qdrant/storage
+      sizeGB: 10
+
+  - type: pserv
+    name: prospectalpha-minio
+    runtime: image
+    region: singapore
+    plan: starter
+    image:
+      url: docker.io/minio/minio:RELEASE.2024-10-13T13-34-11Z
+    dockerCommand: minio server /data --address 0.0.0.0:9000
+    disk:
+      name: minio-data
+      mountPath: /data
+      sizeGB: 10
+    envVars:
+      - key: MINIO_ROOT_USER
+        generateValue: true
+      - key: MINIO_ROOT_PASSWORD
+        generateValue: true
+      - key: MINIO_BROWSER
+        value: "off"
+
+databases:
+  - name: prospectalpha-postgres
+    region: singapore
+    plan: basic-1gb
+    databaseName: prospect_alpha
+    user: prospect_alpha
+    ipAllowList: []
