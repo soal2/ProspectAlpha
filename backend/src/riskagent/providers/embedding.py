@@ -17,6 +17,8 @@ from tenacity import (
     wait_exponential,
 )
 
+from riskagent.env import load_dotenv
+
 logger = logging.getLogger(__name__)
 
 # DashScope text-embedding-v3/v4 accept up to 8192 tokens per input; keep a
@@ -225,6 +227,10 @@ def get_default_embedding_client() -> EmbeddingClient:
     global _default_client
     if _default_client is not None:
         return _default_client
+    # Embedding retrieval is also used by CLI jobs and workers that do not
+    # necessarily import the general provider config first. Load backend/.env
+    # at this boundary so DASHSCOPE_API_KEY cannot be silently missed.
+    load_dotenv()
     api_key = (
         os.getenv("EMBEDDING_API_KEY", "").strip()
         or os.getenv("DASHSCOPE_API_KEY", "").strip()
@@ -241,12 +247,9 @@ def get_default_embedding_client() -> EmbeddingClient:
             batch_size=int(os.getenv("EMBEDDING_BATCH_SIZE", "10")),
         )
     else:
-        logger.warning(
-            "EMBEDDING_API_KEY is not set; falling back to the deterministic hashing "
-            "embedder. Retrieval quality will be poor — configure a real provider."
-        )
-        _default_client = HashingEmbeddingClient(
-            dimensions=int(os.getenv("EMBEDDING_DIMENSIONS", "1024")),
+        raise EmbeddingConfigError(
+            "Embedding provider is required: configure EMBEDDING_API_KEY or "
+            "DASHSCOPE_API_KEY. Hashing fallback is disabled for application retrieval."
         )
     return _default_client
 

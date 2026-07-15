@@ -65,7 +65,7 @@ def test_expert_handler_applies_llm_second_pass(tmp_path, monkeypatch):
     assert not evaluations[0]["reasoning_summary"].startswith("文本命中规则关键词：")
 
 
-def test_expert_handler_keeps_rule_results_when_llm_fails(tmp_path, monkeypatch):
+def test_expert_handler_fails_closed_when_llm_fails(tmp_path, monkeypatch):
     async def fail_llm(**_kwargs: Any):
         raise RuntimeError("LLM down")
 
@@ -80,8 +80,9 @@ def test_expert_handler_keeps_rule_results_when_llm_fails(tmp_path, monkeypatch)
 
     evaluations = result["evaluations"]
     assert len(evaluations) == 6
-    assert all(item["evaluation_result"] == "triggered" for item in evaluations)
-    assert evaluations[0]["reasoning_summary"].startswith("文本命中规则关键词：")
+    assert all(item["evaluation_result"] != "triggered" for item in evaluations)
+    assert result["module_result"]["rule_ids"] == []
+    assert evaluations[0]["reasoning_summary"].startswith("规则预筛命中特定业务锚点：")
     assert any(
         "LLM 二判失败" in limitation
         for limitation in result["module_result"]["limitations"]

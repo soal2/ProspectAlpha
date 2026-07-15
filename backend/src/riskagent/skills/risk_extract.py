@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import re
+
 from pydantic import BaseModel
 
+from riskagent.retrieval.query_planner import GENERIC_TRIGGER_TERMS, rule_anchor_terms
 from riskagent.risk_rules import RiskRule, RiskRuleRepository, get_default_repository
 
 
@@ -52,9 +55,12 @@ def evaluate_text_against_rules(
     for rule in active_rules:
         terms = _terms_for_rule(rule)
         matched = [term for term in terms if term.lower() in normalized_text]
-        result = "triggered" if matched else "not_evaluated"
+        # Keyword matching is only a recall-oriented prefilter. A candidate is
+        # not a confirmed risk until the expert pass evaluates the rule's
+        # trigger condition against retrieved evidence.
+        result = "candidate" if matched else "not_evaluated"
         summary = (
-            f"文本命中规则关键词：{', '.join(matched)}"
+            f"规则预筛命中特定业务锚点：{', '.join(matched)}；尚未验证触发条件。"
             if matched
             else "未在当前文本片段中命中规则关键词，需结合结构化抽取或人工复核。"
         )
@@ -72,13 +78,14 @@ def evaluate_text_against_rules(
                 reasoning_summary=summary,
                 matched_terms=matched,
                 evidence_snippets=_snippets_for_terms(text, matched),
+                confidence=min(0.45, 0.2 + len(matched) * 0.05) if matched else 0.0,
             )
         )
     return findings
 
 
 def _terms_for_rule(rule: RiskRule) -> list[str]:
-    terms = [rule.risk_item, rule.category]
+    terms = rule_anchor_terms(rule)
     aliases = {
         "对赌": ["valuation adjustment", "vAM", "ratchet"],
         "赎回": ["redemption"],
@@ -114,9 +121,6 @@ def _terms_for_rule(rule: RiskRule) -> list[str]:
         "监管",
         "免责声明",
         "前瞻性陈述",
-        "模糊",
-        "重大",
-        "显著",
         "毛利率",
         "净利率",
         "资产负债率",
@@ -126,7 +130,11 @@ def _terms_for_rule(rule: RiskRule) -> list[str]:
         if token in f"{rule.risk_item} {rule.description} {rule.trigger_condition}":
             terms.append(token)
             terms.extend(aliases.get(token, []))
-    return list(dict.fromkeys(term for term in terms if term))
+    return list(
+        dict.fromkeys(
+            term for term in terms if term and term not in GENERIC_TRIGGER_TERMS
+        )
+    )
 
 
 def _snippets_for_terms(text: str, terms: list[str], *, limit: int = 2, radius: int = 70) -> list[str]:
@@ -139,6 +147,10 @@ def _snippets_for_terms(text: str, terms: list[str], *, limit: int = 2, radius: 
         start = max(0, idx - radius)
         end = min(len(text), idx + len(term) + radius)
         snippet = text[start:end].replace("\n", " ").strip()
+        block_start = text.rfind("\n\n", 0, idx) + 2
+        header = re.match(r"\[第\d+页\]\[[^\]]+\]", text[block_start:idx])
+        if header and not snippet.startswith(header.group(0)):
+            snippet = f"{header.group(0)} {snippet}"
         if snippet and snippet not in snippets:
             snippets.append(snippet)
         if len(snippets) >= limit:

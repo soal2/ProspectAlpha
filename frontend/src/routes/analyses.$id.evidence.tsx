@@ -95,7 +95,9 @@ function AnalysisEvidence() {
                   {e.section} P.{e.page}
                 </span>
                 <span className="ml-auto inline-flex items-center rounded-full bg-primary/8 px-2 py-0.5 font-medium text-primary tabular">
-                  置信度 {e.conf.toFixed(2)}
+                  {e.scoreKind === "relevance"
+                    ? `证据相关性 ${e.conf.toFixed(2)}`
+                    : "旧记录 · 请重新分析"}
                 </span>
               </div>
               <p className="mt-3 text-sm leading-relaxed">{e.snippet}</p>

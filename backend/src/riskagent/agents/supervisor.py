@@ -35,6 +35,7 @@ from riskagent.agents.orchestrator import (
 from riskagent.agents.expert_llm import analyze_findings_with_llm
 from riskagent.agents.prompts import render_expert_prompt
 from riskagent.retrieval import ChunkSearchResult, prospectus_hybrid_search
+from riskagent.retrieval.query_planner import build_module_search_queries
 from riskagent.runtime_events import LiveLLMCall
 from riskagent.risk_rules import RiskRule, RiskRuleRepository
 from riskagent.seed_data import AGENT_EXPERTS, AGENT_NAME_ALIASES, AGENT_SPECS
@@ -56,6 +57,19 @@ MISSION_BRIEF_TIMEOUT_SECONDS = 10.0
 StrategyProvider = Callable[..., Any]
 ReplacementProvider = Callable[..., Any]
 ChunkRetriever = Callable[..., list[ChunkSearchResult]]
+
+
+def _invoke_chunk_retriever(retriever: ChunkRetriever, **kwargs: Any) -> list[ChunkSearchResult]:
+    """Keep test/custom retrievers compatible with optional PostgreSQL weights."""
+
+    signature = inspect.signature(retriever)
+    accepts_kwargs = any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    )
+    if not accepts_kwargs:
+        kwargs = {key: value for key, value in kwargs.items() if key in signature.parameters}
+    return retriever(**kwargs)
 
 
 class ExpertModuleResult(BaseModel):
@@ -870,31 +884,45 @@ class AgentTeamSupervisor:
             )
             analysis_text = text
             if document_id:
-                query = " ".join(
-                    [
-                        assignment.module,
-                        assignment.goal,
-                        *[rule.risk_item for rule in selected_rules[:12]],
-                        *[rule.category for rule in selected_rules[:12]],
-                    ]
+                queries = build_module_search_queries(
+                    module=assignment.module,
+                    goal=assignment.goal,
+                    rules=selected_rules,
                 )
-                chunks = self.chunk_retriever(
-                    query=query,
-                    document_id=document_id,
-                    limit=8,
+                chunks_by_id: dict[str, ChunkSearchResult] = {}
+                for query_index, query in enumerate(queries):
+                    for chunk in _invoke_chunk_retriever(
+                        self.chunk_retriever,
+                        query=query,
+                        document_id=document_id,
+                        limit=8,
+                        vector_weight=0.45 if query_index < 3 else 0.65,
+                    ):
+                        current = chunks_by_id.get(chunk.chunk_id)
+                        if current is None or chunk.score > current.score:
+                            chunks_by_id[chunk.chunk_id] = chunk
+                chunks = sorted(
+                    chunks_by_id.values(), key=lambda item: item.score, reverse=True
                 )
                 if not chunks:
                     raise ValueError(
                         f"No PostgreSQL chunks retrieved for document {document_id}"
                     )
-                analysis_text = "\n\n".join(chunk.text for chunk in chunks)
+                analysis_text = "\n\n".join(
+                    f"[第{chunk.page_idx}页][{chunk.metadata.get('section_path') or chunk.chunk_type}] {chunk.text}"
+                    for chunk in chunks
+                )
             evaluations = evaluate_text_against_rules(
                 analysis_text,
                 rules=selected_rules,
                 repository=self.repository,
                 rule_set_snapshot=rule_snapshot,
             )
-            triggered = [item for item in evaluations if item.evaluation_result == "triggered"]
+            candidates = [
+                item
+                for item in evaluations
+                if item.evaluation_result in {"candidate", "triggered"}
+            ]
             for item in evaluations:
                 item.source_type = spec.name
                 item.skill_id = skill.skill_id if skill else None
@@ -902,19 +930,19 @@ class AgentTeamSupervisor:
                 return {
                     "reviewer_agent": spec.name,
                     "reviewed_module": payload.get("origin_module"),
-                    "related_rule_ids": [item.rule_id for item in triggered[:10]],
+                    "related_rule_ids": [item.rule_id for item in candidates[:10]],
                     "summary": (
                         f"{spec.title} 通过 A2A 对等消息复核，"
-                        f"在自身能力域发现 {len(triggered)} 条可能相关规则命中。"
+                        f"在自身能力域发现 {len(candidates)} 条待验证规则候选。"
                     ),
                 }
 
             llm_failure: str | None = None
             strategy_guidance: dict[str, Any] | None = None
-            if triggered:
+            if candidates:
                 try:
                     snippets = []
-                    for item in triggered:
+                    for item in candidates:
                         if item.evidence_snippets:
                             snippets.append(item.evidence_snippets[0])
                     publish_llm_event(
@@ -922,11 +950,11 @@ class AgentTeamSupervisor:
                             "expert_llm_started",
                             spec.name,
                             f"{spec.title} LLM 二判开始",
-                            f"准备对 {len(triggered)} 条候选 finding 进行 LLM 二判。",
+                            f"准备对 {len(candidates)} 条候选 finding 进行 LLM 二判。",
                             payload={
                                 "agent_name": spec.name,
                                 "module_id": assignment.module_id,
-                                "candidate_count": len(triggered),
+                                "candidate_count": len(candidates),
                             },
                         )
                     )
@@ -942,7 +970,7 @@ class AgentTeamSupervisor:
                             analyze_findings_with_llm(
                                 agent_name=spec.name,
                                 agent_title=spec.title,
-                                candidates=triggered,
+                                candidates=candidates,
                                 evidence_snippets=snippets,
                                 system_prompt=render_expert_prompt(spec.capability_payload()),
                                 on_delta=live_call.delta,
@@ -982,11 +1010,11 @@ class AgentTeamSupervisor:
                             "expert_llm_completed",
                             spec.name,
                             f"{spec.title} LLM 二判完成",
-                            f"完成 {len(triggered)} 条候选 finding 的 LLM 二判。",
+                            f"完成 {len(candidates)} 条候选 finding 的 LLM 二判。",
                             payload={
                                 "agent_name": spec.name,
                                 "module_id": assignment.module_id,
-                                "candidate_count": len(triggered),
+                                "candidate_count": len(candidates),
                             },
                         )
                     )
@@ -1002,12 +1030,13 @@ class AgentTeamSupervisor:
                             payload={
                                 "agent_name": spec.name,
                                 "module_id": assignment.module_id,
-                                "candidate_count": len(triggered),
+                                "candidate_count": len(candidates),
                                 "error": llm_failure,
                             },
                         )
                     )
 
+            triggered = [item for item in evaluations if item.evaluation_result == "triggered"]
             peer_message_ids: list[str] = []
             peer_reviews: list[dict[str, Any]] = []
             peer_review_error: str | None = None

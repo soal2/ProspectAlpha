@@ -55,5 +55,21 @@ def test_agent_text_evaluation_uses_rules(tmp_path):
     findings = evaluate_text_against_rules("公司存在关联交易及持续采购安排。", rules=rules, repository=repo)
 
     assert findings
-    assert any(item.evaluation_result == "triggered" for item in findings)
+    assert any(item.evaluation_result == "candidate" for item in findings)
+    assert all(item.evaluation_result != "triggered" for item in findings)
     assert all(item.rule_set_id == "hk_ipo_prospectus_risk_framework_v1" for item in findings)
+
+
+def test_generic_major_word_does_not_trigger_unrelated_rules(tmp_path):
+    repo = _repo(tmp_path)
+    rules = repo.select_rules(category="持续经营")
+
+    findings = evaluate_text_against_rules(
+        "本次交易构成重大收购，相关承销安排详见封面。",
+        rules=rules,
+        repository=repo,
+    )
+
+    assert findings
+    assert all(item.evaluation_result == "not_evaluated" for item in findings)
+    assert all("重大" not in item.matched_terms for item in findings)

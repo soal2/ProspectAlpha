@@ -1358,3 +1358,54 @@ chunks. A failed background job is visible to the user and remains recorded on
 `prospectus_documents.status`; it is not silently replaced with the legacy
 PyMuPDF retrieval path. Local non-database tests retain the lightweight PyMuPDF
 path only as an isolated test-mode boundary.
+
+### Rule-aware Query Rewriting and Evidence Scores
+
+Broad user instructions such as "review this prospectus for IPO risks" are not
+sent directly to PostgreSQL. The strategist first assigns domain modules, each
+module expands its assigned rules into category-scoped searches, and every
+candidate finding is searched again with complementary exact-disclosure,
+simplified/traditional Chinese, English terminology, report-period fact, and
+counter-evidence queries. Short exact queries give PostgreSQL full-text ranking
+more weight; longer semantic questions retain a larger vector component. Every
+call remains scoped to one required `document_id`.
+
+Rule keyword matching is recall-only and returns `candidate`, never a risk
+finding. Generic adjectives such as `重大`, `显著`, `可能`, and `模糊` cannot
+trigger a rule by themselves. An expert second pass must evaluate the actual
+trigger condition; missing or failed expert verification is fail-closed as
+`insufficient_evidence`.
+
+Evidence stores two distinct values. `retrieval_score` is the raw PostgreSQL
+hybrid ranking signal and is not a probability. `relevance_score` is a separate
+rule-aware score based on specific risk anchors, target-section matches,
+numeric evidence requirements, and the raw ranking signal. The frontend labels
+the latter as evidence relevance instead of confidence. Finding confidence is
+kept separate. Its final value is calibrated from expert judgment and the
+strongest admitted evidence relevance: supported findings are capped at 0.95,
+weakly supported findings at 0.69, and evidence-gate failures below 0.50.
+Finding confidence never substitutes for evidence admission.
+
+Report synthesis receives only findings and evidence that passed the evidence
+gate. Module summaries are regenerated from admitted identifiers so rejected
+candidate counts cannot leak into the report. If no finding is admitted, the
+system emits a deterministic `未评级（无已验证结论）` report and states that absence
+of verified evidence does not prove absence of risk.
+
+The existing `ysyy.pdf` PostgreSQL index was used as a no-reparse regression
+fixture. Targeted searches kept the document boundary, rejected customer
+concentration evidence when no specific passage was retrieved, and recovered
+traditional-Chinese continuing-operation and connected-transaction passages
+with the configured `text-embedding-v4` provider. Representative raw hybrid
+scores around `0.20-0.39` became rule-aware relevance scores around `0.65-0.86`;
+the raw values remain visible for diagnostics and are never treated as
+probabilities.
+
+All embedding entry points load `backend/.env` before resolving provider keys.
+`DASHSCOPE_API_KEY` is a supported fallback for `EMBEDDING_API_KEY`, so API,
+worker, CLI, and regression processes consistently use the configured
+`text-embedding-v4` provider instead of silently mixing dense indexed vectors
+with hashing query vectors. Application retrieval has no hashing fallback: a
+missing provider key fails startup and retrieval with an explicit configuration
+error. `HashingEmbeddingClient` remains available only for explicit unit-test
+injection.

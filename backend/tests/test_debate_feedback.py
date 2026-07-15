@@ -70,7 +70,7 @@ def _run_with_findings(repo: AnalysisRunRepository) -> AnalysisRun:
             text="客户集中度较高。",
             bbox=[0, 0, 10, 10],
             source_hash="hash-f1",
-            confidence=0.8,
+            relevance_score=0.8,
             verifier_status="pending",
         ),
         RunEvidence(
@@ -82,7 +82,7 @@ def _run_with_findings(repo: AnalysisRunRepository) -> AnalysisRun:
             text="回款情况波动。",
             bbox=[0, 0, 10, 10],
             source_hash="hash-f2",
-            confidence=0.75,
+            relevance_score=0.75,
             verifier_status="pending",
         ),
     ]

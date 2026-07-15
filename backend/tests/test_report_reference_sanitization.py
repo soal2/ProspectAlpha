@@ -13,6 +13,7 @@ from riskagent.analysis_runs import (
     RiskFinding,
     RunEvidence,
     VerificationResult,
+    _apply_verification,
 )
 from riskagent.risk_rules import RiskRuleRepository
 
@@ -102,7 +103,7 @@ def _evidence(evidence_id: str, finding_id: str) -> RunEvidence:
         text="客户集中度较高。",
         bbox=[0, 0, 10, 10],
         source_hash=f"hash-{finding_id}",
-        confidence=0.8,
+        relevance_score=0.8,
         verifier_status="pending",
     )
 
@@ -127,6 +128,29 @@ def _run_with_module_results(repo: AnalysisRunRepository) -> AnalysisRun:
         }
     ]
     return run
+
+
+def test_risk_confidence_is_calibrated_after_evidence_verification():
+    finding = _finding("f1", "ev-f1")
+    finding.confidence = 0.9
+    evidence = _evidence("ev-f1", "f1")
+    evidence.relevance_score = 0.8
+    result = VerificationResult(
+        finding_id="f1",
+        status="supported",
+        checked_evidence_ids=["ev-f1"],
+        reason="strong evidence",
+        created_at="2026-07-15T00:00:00+00:00",
+    )
+
+    _apply_verification([finding], [evidence], [result])
+
+    assert finding.verification_status == "supported"
+    assert round(finding.confidence, 3) == 0.855
+
+    result.status = "needs_human_review"
+    _apply_verification([finding], [evidence], [result])
+    assert finding.confidence <= 0.49
 
 
 def test_report_provider_receives_only_admitted_ids(

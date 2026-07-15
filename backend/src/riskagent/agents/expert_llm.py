@@ -62,6 +62,8 @@ async def analyze_findings_with_llm(
     for cand in candidates:
         enriched = by_rule.get(cand.rule_id)
         if not enriched:
+            cand.evaluation_result = "insufficient_evidence"
+            cand.confidence = min(cand.confidence, 0.49)
             continue
         new_summary = enriched.get("reasoning_summary")
         if isinstance(new_summary, str) and new_summary.strip():
@@ -73,5 +75,10 @@ async def analyze_findings_with_llm(
             cand.confidence = float(enriched.get("confidence", cand.confidence))
         except (TypeError, ValueError):
             pass
-        cand.evaluation_result = "triggered"
+        needs_more = bool(enriched.get("needs_more_evidence", False))
+        cand.evaluation_result = (
+            "triggered"
+            if not needs_more and cand.confidence >= 0.55
+            else "insufficient_evidence"
+        )
     return items

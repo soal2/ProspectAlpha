@@ -69,7 +69,7 @@ def _evidence(evidence_id: str, finding_id: str, page_number: int) -> RunEvidenc
         text=f"{finding_id} 原文证据",
         bbox=[0, 0, 10, 10],
         source_hash=f"hash-{evidence_id}",
-        confidence=0.86,
+        relevance_score=0.86,
         verifier_status="supported",
     )
 

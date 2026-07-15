@@ -5,7 +5,7 @@ import { getKnowledgeData } from "@/lib/data-service";
 import { PdfViewer } from "@/components/pdf-viewer";
 import type { KnowledgeData, KnowledgeEvidence } from "@/lib/types";
 
-type SortBy = "time" | "confidence";
+type SortBy = "time" | "relevance";
 
 export const Route = createFileRoute("/evidence")({
   head: () => ({
@@ -31,7 +31,7 @@ function matchConfidence(bucket: string, conf: number) {
 
 function EvidencePage() {
   const [data, setData] = useState<KnowledgeData | null>(null);
-  const [sortBy, setSortBy] = useState<SortBy>("confidence");
+  const [sortBy, setSortBy] = useState<SortBy>("relevance");
   const [keyword, setKeyword] = useState("");
   const [company, setCompany] = useState("全部");
   const [section, setSection] = useState("全部");
@@ -57,7 +57,10 @@ function EvidencePage() {
       if (company !== "全部" && item.name !== company) return false;
       if (section !== "全部" && item.section !== section) return false;
       if (risk !== "全部" && item.risk !== risk) return false;
-      if (!matchConfidence(confidence, item.conf)) return false;
+      if (
+        confidence !== "全部" &&
+        (item.scoreKind !== "relevance" || !matchConfidence(confidence, item.conf))
+      ) return false;
       if (keyword.trim()) {
         const query = keyword.trim().toLowerCase();
         const haystack = `${item.snippet} ${item.section} ${item.name} ${item.risk}`.toLowerCase();
@@ -102,13 +105,15 @@ function EvidencePage() {
         counts: countBy((item) => item.risk),
       },
       {
-        label: "置信度",
+        label: "证据相关性",
         value: confidence,
         set: setConfidence,
         counts: new Map(
           CONFIDENCE_BUCKETS.filter((bucket) => bucket !== "全部").map((bucket) => [
             bucket,
-            evidence.filter((item) => matchConfidence(bucket, item.conf)).length,
+            evidence.filter(
+              (item) => item.scoreKind === "relevance" && matchConfidence(bucket, item.conf),
+            ).length,
           ]),
         ),
       },
@@ -171,7 +176,7 @@ function EvidencePage() {
             <h3 className="font-serif text-xl font-semibold">最近沉淀的证据</h3>
             <p className="mt-1 text-xs text-muted-foreground">
               {filtered.length} / {data?.stats.totalEvidence ?? 0} 条 · 按
-              {sortBy === "time" ? "时间" : "置信度"}排序
+              {sortBy === "time" ? "时间" : "证据相关性"}排序
             </p>
           </div>
           <div className="flex gap-2 text-xs">
@@ -186,14 +191,14 @@ function EvidencePage() {
               按时间
             </button>
             <button
-              onClick={() => setSortBy("confidence")}
+              onClick={() => setSortBy("relevance")}
               className={`rounded-full px-3 py-1.5 ${
-                sortBy === "confidence"
+                sortBy === "relevance"
                   ? "bg-primary text-primary-foreground"
                   : "border border-border bg-card hover:bg-accent"
               }`}
             >
-              按置信度
+              按相关性
             </button>
           </div>
         </div>
@@ -215,7 +220,9 @@ function EvidencePage() {
                   {e.section} P.{e.page}
                 </span>
                 <span className="ml-auto inline-flex items-center gap-1 rounded-full bg-primary/8 px-2 py-0.5 font-medium text-primary tabular">
-                  置信度 {e.conf.toFixed(2)}
+                  {e.scoreKind === "relevance"
+                    ? `相关性 ${e.conf.toFixed(2)}`
+                    : "旧记录 · 请重新分析"}
                 </span>
               </div>
               <p className="mt-3 text-sm leading-relaxed text-foreground">{e.snippet}</p>

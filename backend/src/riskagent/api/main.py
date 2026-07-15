@@ -8,17 +8,17 @@ import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from riskagent.a2a import build_dynamic_expert_a2a_routes
+from riskagent.agent_experts import AgentSpec, AgentSpecRepository
+from riskagent.api import agents, analysis, analysis_options, chat, documents, knowledge, risk_rules, skills
+from riskagent.env import load_dotenv
+from riskagent.seed_data import AGENT_EXPERTS, AGENT_SPECS
+
 logger = logging.getLogger(__name__)
 
 LOCAL_DEVELOPMENT_ORIGIN_REGEX = (
     r"^https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0)(?::\d+)?$"
 )
-
-from riskagent.a2a import build_dynamic_expert_a2a_routes
-from riskagent.agent_experts import AgentSpec, AgentSpecRepository
-from riskagent.api import agents, analysis, analysis_options, chat, documents, knowledge, risk_rules, skills
-from riskagent.seed_data import AGENT_EXPERTS, AGENT_SPECS
-
 
 def _cors_origins() -> list[str]:
     configured = os.getenv("CORS_ALLOW_ORIGINS")
@@ -52,16 +52,16 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     def _probe_embedding_provider() -> None:
+        load_dotenv()
         embedding_key = (
             os.getenv("EMBEDDING_API_KEY", "").strip()
             or os.getenv("DASHSCOPE_API_KEY", "").strip()
         )
         if not embedding_key:
-            logger.warning(
-                "EMBEDDING_API_KEY/DASHSCOPE_API_KEY not configured — retrieval falls back to hashing "
-                "vectors; analysis runs requiring real embeddings will fail fast."
+            raise RuntimeError(
+                "EMBEDDING_API_KEY/DASHSCOPE_API_KEY not configured; "
+                "hashing fallback is disabled."
             )
-            return
         from riskagent.providers.embedding import get_default_embedding_client
 
         try:
@@ -72,8 +72,8 @@ def create_app() -> FastAPI:
                 getattr(client, "provider_id", "unknown"),
                 len(vector),
             )
-        except Exception as exc:  # noqa: BLE001 - startup probe must not kill the app
-            logger.error("Embedding provider probe failed: %s", exc)
+        except Exception as exc:  # noqa: BLE001 - normalized startup failure
+            raise RuntimeError(f"Embedding provider probe failed: {exc}") from exc
 
     app.include_router(risk_rules.router)
     app.include_router(agents.router)

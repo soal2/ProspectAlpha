@@ -249,7 +249,7 @@ def test_run_evidence_backfills_document_id_from_block_id() -> None:
         page_number=3,
         section_path="风险因素",
         text="示例",
-        confidence=0.8,
+        relevance_score=0.8,
         verifier_status="pending",
     )
     assert legacy.document_id == "doc_ab12cd34ef56"
@@ -263,7 +263,7 @@ def test_run_evidence_backfills_document_id_from_block_id() -> None:
         page_number=1,
         section_path="",
         text="示例",
-        confidence=0.5,
+        relevance_score=0.5,
         verifier_status="pending",
     )
     assert explicit.document_id == "doc_explicit"
@@ -276,7 +276,7 @@ def test_run_evidence_backfills_document_id_from_block_id() -> None:
         page_number=1,
         section_path="",
         text="示例",
-        confidence=0.5,
+        relevance_score=0.5,
         verifier_status="pending",
     )
     assert mineru.bbox_coordinate_space == "normalized_1000"

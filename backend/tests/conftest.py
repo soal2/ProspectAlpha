@@ -145,6 +145,27 @@ def analysis_repo_factory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     runtime_root = tmp_path / "agent-runtime"
     monkeypatch.setenv("AGENT_RUNTIME_DATA_DIR", str(runtime_root))
 
+    async def confirm_test_candidates(**kwargs: Any) -> list[dict[str, Any]]:
+        items = []
+        for candidate in kwargs["candidates"]:
+            candidate.evaluation_result = "triggered"
+            candidate.confidence = 0.8
+            items.append(
+                {
+                    "rule_id": candidate.rule_id,
+                    "severity": candidate.severity,
+                    "confidence": 0.8,
+                    "reasoning_summary": candidate.reasoning_summary,
+                    "needs_more_evidence": False,
+                }
+            )
+        return items
+
+    monkeypatch.setattr(
+        "riskagent.agents.supervisor.analyze_findings_with_llm",
+        confirm_test_candidates,
+    )
+
     def build(
         *,
         rule_repository: RiskRuleRepository,

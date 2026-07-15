@@ -859,7 +859,7 @@ function IntakePage() {
             </div>
           ) : (
             <div className="mt-12 text-center text-xs text-muted-foreground">
-              Agent 输出会展示规则编号、触发条件、证据片段和置信度。
+              Agent 输出会分别展示规则编号、触发条件、证据相关性和结论置信度。
             </div>
           )}
         </div>

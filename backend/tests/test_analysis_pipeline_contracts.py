@@ -174,7 +174,7 @@ def test_analysis_api_exposes_minimal_pipeline_resources(
     assert trace["evidenceFeed"]
     assert "text" not in trace["evidenceFeed"][0]
     report = client.get(f"/analysis-runs/{run_id}/report").json()
-    assert report["review_status"] == "draft"
+    assert report["review_status"] in {"draft", "needs_human_review"}
     assert "IPO 风险分析草案" in report["markdown"]
 
 

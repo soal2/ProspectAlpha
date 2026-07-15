@@ -163,18 +163,20 @@ def test_dimensions_adjust_to_actual_response() -> None:
     assert client.provider_id == "text-embedding-v4-768"
 
 
-def test_default_client_falls_back_to_hashing_without_key(monkeypatch) -> None:
+def test_default_client_fails_without_embedding_key(monkeypatch) -> None:
+    monkeypatch.setattr("riskagent.providers.embedding.load_dotenv", lambda: None)
     monkeypatch.delenv("EMBEDDING_API_KEY", raising=False)
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
     reset_default_embedding_client()
     try:
-        client = get_default_embedding_client()
-        assert isinstance(client, HashingEmbeddingClient)
-        assert client.provider_id == "hashing-64"
+        with pytest.raises(EmbeddingConfigError, match="Embedding provider is required"):
+            get_default_embedding_client()
     finally:
         reset_default_embedding_client()
 
 
 def test_default_client_uses_dashscope_with_key(monkeypatch) -> None:
+    monkeypatch.setattr("riskagent.providers.embedding.load_dotenv", lambda: None)
     monkeypatch.setenv("EMBEDDING_API_KEY", "sk-test")
     monkeypatch.setenv("EMBEDDING_MODEL", "text-embedding-v4")
     monkeypatch.setenv("EMBEDDING_DIMENSIONS", "1024")

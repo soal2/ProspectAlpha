@@ -47,6 +47,10 @@ from riskagent.seed_data import AGENT_EXPERTS
 from riskagent.models import AnalysisRunRow, EvidenceLibraryRow, ReportLibraryRow
 from riskagent.providers.llm import get_default_llm_client
 from riskagent.retrieval import ChunkSearchResult, PostgresChunkIndexer, prospectus_hybrid_search
+from riskagent.retrieval.query_planner import (
+    build_rule_search_queries,
+    rerank_rule_candidates,
+)
 from riskagent.workers.analysis import dispatch_analysis_job
 
 
@@ -57,6 +61,19 @@ DEFAULT_EVIDENCE_LIBRARY_PATH = BACKEND_ROOT / "data" / "processed" / "evidence_
 PARSER_VERSION = "local-text-parser-v1"
 _FILE_LOCKS: dict[str, threading.RLock] = {}
 _FILE_LOCKS_GUARD = threading.Lock()
+
+
+def _invoke_chunk_retriever(retriever: Callable[..., Any], **kwargs: Any) -> Any:
+    """Pass optional ranking controls only when a custom retriever supports them."""
+
+    signature = inspect.signature(retriever)
+    accepts_kwargs = any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    )
+    if not accepts_kwargs:
+        kwargs = {key: value for key, value in kwargs.items() if key in signature.parameters}
+    return retriever(**kwargs)
 
 PIPELINE_STAGES: list[tuple[str, str, str]] = [
     ("task_understanding", "任务理解", "任务理解专家"),
@@ -145,7 +162,8 @@ class RunEvidence(BaseModel):
     char_start: int = 0
     char_end: int = 0
     source_hash: str = ""
-    confidence: float
+    retrieval_score: float = 0.0
+    relevance_score: float = 0.0
     verifier_status: str
 
     @model_validator(mode="after")
@@ -711,7 +729,8 @@ class AnalysisRunRepository:
                         metadata.get("source_hash")
                         or hashlib.sha256(chunk.text.encode("utf-8")).hexdigest()
                     ),
-                    confidence=confidence,
+                    retrieval_score=confidence,
+                    relevance_score=0.0,
                     verifier_status="rejected_by_debate",
                 )
             )
@@ -1115,7 +1134,8 @@ class AnalysisRunRepository:
                             "page_number": item.page_number,
                             "bbox": item.bbox,
                             "bbox_coordinate_space": item.bbox_coordinate_space,
-                            "confidence": item.confidence,
+                            "retrieval_score": item.retrieval_score,
+                            "relevance_score": item.relevance_score,
                         },
                     )
                 )
@@ -1256,25 +1276,36 @@ class AnalysisRunRepository:
                 and item.verifier_status in allowed_statuses
             ]
             admitted_evidence_ids = {item.evidence_id for item in admitted_evidence}
-            sanitized_module_results = [
-                {
-                    **module,
-                    "finding_ids": [
-                        fid
-                        for fid in module.get("finding_ids", [])
-                        if str(fid) in admitted_finding_ids
-                    ],
-                    "evidence_ids": [
-                        eid
-                        for eid in module.get("evidence_ids", [])
-                        if str(eid) in admitted_evidence_ids
-                    ],
-                }
-                for module in run.module_results
-            ]
+            sanitized_module_results = []
+            for module in run.module_results:
+                module_finding_ids = [
+                    fid
+                    for fid in module.get("finding_ids", [])
+                    if str(fid) in admitted_finding_ids
+                ]
+                module_evidence_ids = [
+                    eid
+                    for eid in module.get("evidence_ids", [])
+                    if str(eid) in admitted_evidence_ids
+                ]
+                sanitized_module_results.append(
+                    {
+                        **module,
+                        "summary": (
+                            f"本模块有 {len(module_finding_ids)} 条风险判断通过证据门禁，"
+                            "仅可依据随附 finding 与 evidence 撰写。"
+                            if module_finding_ids
+                            else "本模块未形成通过证据门禁的风险结论；不得据此宣称不存在风险。"
+                        ),
+                        "finding_ids": module_finding_ids,
+                        "evidence_ids": module_evidence_ids,
+                    }
+                )
             integrated: IntegratedRiskReport | None = None
             synthesis_error: Exception | None = None
-            for attempt in range(2):
+            if not admitted_findings:
+                integrated = _empty_verified_report(run, sanitized_module_results)
+            for attempt in range(2 if admitted_findings else 0):
                 try:
                     integrated = IntegratedRiskReport.model_validate(
                         _resolve_provider_result(
@@ -1291,7 +1322,9 @@ class AnalysisRunRepository:
                                         "finding_id": item.finding_id,
                                         "page_number": item.page_number,
                                         "section_path": item.section_path,
-                                        "confidence": item.confidence,
+                                        "retrieval_score": item.retrieval_score,
+                                        "relevance_score": item.relevance_score,
+                                        "text": item.text,
                                     }
                                     for item in admitted_evidence
                                 ],
@@ -1387,12 +1420,17 @@ class AnalysisRunRepository:
                         )
                     )
             else:
+                has_verified_findings = bool(admitted_finding_ids)
                 run.events.append(
                     _event(
-                        "qa_passed",
+                        "qa_passed" if has_verified_findings else "qa_no_verified_findings",
                         "quality_reviewer",
-                        "质检审裁通过",
-                        "所有核心结论均附有可回溯证据来源。",
+                        "质检审裁通过" if has_verified_findings else "质检完成：无已验证结论",
+                        (
+                            "所有核心结论均附有可回溯证据来源。"
+                            if has_verified_findings
+                            else "未形成通过证据门禁的正式结论，报告已明确标记为未评级。"
+                        ),
                         stage_key="quality_review",
                         skill_id="quality_review_skill",
                         agent_role="质检审裁专家",
@@ -1574,7 +1612,7 @@ class AnalysisRunRepository:
                     category=item.category,
                     title=item.title,
                     severity=_severity(item),
-                    confidence=min(0.95, 0.55 + len(item.matched_terms) * 0.1),
+                    confidence=max(0.0, min(1.0, item.confidence)),
                     trigger_condition=item.trigger_condition,
                     evaluation_result=item.evaluation_result,
                     reasoning_summary=item.reasoning_summary,
@@ -1592,11 +1630,12 @@ class AnalysisRunRepository:
         blocks: list[DocumentBlock],
     ) -> list[RunEvidence]:
         evidence: list[RunEvidence] = []
+        payload = _payload_from_run(self.get(run_id))
         for finding in findings:
             candidates = self._hybrid_search(run_id, finding)
-            if not candidates:
+            if not candidates and not payload.document_id:
                 candidates = _block_candidates_for_finding(finding, blocks)
-            for candidate in candidates[:2]:
+            for candidate in candidates[:3]:
                 evidence_id = f"ev_{uuid.uuid4().hex[:10]}"
                 evidence.append(
                     RunEvidence(
@@ -1606,13 +1645,14 @@ class AnalysisRunRepository:
                         document_id=str(candidate.get("document_id") or ""),
                         page_number=candidate["page_number"],
                         section_path=candidate["section_path"],
-                        text=candidate["text"][:300],
+                        text=_candidate_excerpt(candidate, limit=300),
                         bbox=candidate["bbox"],
                         bbox_coordinate_space=candidate["bbox_coordinate_space"],
                         char_start=candidate["char_start"],
                         char_end=candidate["char_end"],
                         source_hash=candidate["source_hash"],
-                        confidence=candidate["score"],
+                        retrieval_score=float(candidate.get("retrieval_score") or 0.0),
+                        relevance_score=float(candidate.get("relevance_score") or 0.0),
                         verifier_status="pending",
                     )
                 )
@@ -1620,12 +1660,18 @@ class AnalysisRunRepository:
         return evidence
 
     def _hybrid_search(self, run_id: str, finding: RiskFinding) -> list[dict[str, Any]]:
-        query_terms = tuple(sorted(set(finding.matched_terms + [finding.category, finding.title])))
-        cache_key = hashlib.sha256(f"{run_id}|{'|'.join(query_terms)}".encode("utf-8")).hexdigest()
+        rule = self.rule_repository.get_rule(finding.rule_id)
+        payload = _payload_from_run(self.get(run_id))
+        queries = build_rule_search_queries(
+            rule,
+            user_requirement=payload.ipo_project_hint or "",
+        )
+        cache_key = hashlib.sha256(
+            f"{run_id}|{finding.rule_id}|{'|'.join(queries)}".encode("utf-8")
+        ).hexdigest()
         cached = self.search_cache.get(cache_key)
         if cached is not None:
             return cached
-        payload = _payload_from_run(self.get(run_id))
         document_id = payload.document_id
         if not document_id:
             return []
@@ -1635,14 +1681,19 @@ class AnalysisRunRepository:
             if payload.document_text.strip():
                 return []
             raise
-        candidates = [
-            _chunk_evidence_candidate(item)
-            for item in self.chunk_retriever(
-                query=" ".join(query_terms),
-                document_id=document_id,
-                limit=5,
+        recalled: list[dict[str, Any]] = []
+        for query_index, query in enumerate(queries):
+            recalled.extend(
+                _chunk_evidence_candidate(item)
+                for item in _invoke_chunk_retriever(
+                    self.chunk_retriever,
+                    query=query,
+                    document_id=document_id,
+                    limit=8,
+                    vector_weight=0.35 if query_index < 3 else 0.65,
+                )
             )
-        ]
+        candidates = rerank_rule_candidates(recalled, rule=rule, limit=5)
         self.search_cache.set(cache_key, candidates)
         return candidates
 
@@ -1693,14 +1744,25 @@ class AnalysisRunRepository:
             if payload.document_text.strip():
                 return []
             raise
-        candidates = [
-            _chunk_evidence_candidate(item)
-            for item in self.chunk_retriever(
-                query=search_query,
-                document_id=document_id,
-                limit=2,
+        rule = self.rule_repository.get_rule(target_finding.rule_id)
+        queries = list(
+            dict.fromkeys(
+                [search_query, *build_rule_search_queries(rule, user_requirement=query or "")]
             )
-        ]
+        )[:6]
+        recalled: list[dict[str, Any]] = []
+        for query_index, rewritten_query in enumerate(queries):
+            recalled.extend(
+                _chunk_evidence_candidate(item)
+                for item in _invoke_chunk_retriever(
+                    self.chunk_retriever,
+                    query=rewritten_query,
+                    document_id=document_id,
+                    limit=8,
+                    vector_weight=0.35 if query_index < 3 else 0.65,
+                )
+            )
+        candidates = rerank_rule_candidates(recalled, rule=rule, limit=3)
         evidence: list[RunEvidence] = []
         for index, candidate in enumerate(candidates):
             evidence_id = str(eid) if eid and index == 0 else f"ev_{uuid.uuid4().hex[:10]}"
@@ -1712,13 +1774,14 @@ class AnalysisRunRepository:
                     document_id=candidate["document_id"],
                     page_number=candidate["page_number"],
                     section_path=candidate["section_path"],
-                    text=candidate["text"][:300],
+                    text=_candidate_excerpt(candidate, limit=300),
                     bbox=candidate["bbox"],
                     bbox_coordinate_space=candidate["bbox_coordinate_space"],
                     char_start=candidate["char_start"],
                     char_end=candidate["char_end"],
                     source_hash=candidate["source_hash"],
-                    confidence=candidate["score"],
+                    retrieval_score=candidate["retrieval_score"],
+                    relevance_score=candidate["relevance_score"],
                     verifier_status="pending",
                 )
             )
@@ -1875,6 +1938,17 @@ class AnalysisRunRepository:
                 "confidence": item.confidence,
                 "reasoning_summary": item.reasoning_summary,
                 "evidence_ids": list(item.evidence_ids),
+                "evidence": [
+                    {
+                        "evidence_id": evidence.evidence_id,
+                        "page_number": evidence.page_number,
+                        "section_path": evidence.section_path,
+                        "text": evidence.text,
+                        "relevance_score": evidence.relevance_score,
+                    }
+                    for evidence in run.evidence
+                    if evidence.finding_id == item.finding_id
+                ],
             }
             for item in run.findings
         ]
@@ -2505,13 +2579,17 @@ def _verify_findings(findings: list[RiskFinding], evidence: list[RunEvidence]) -
     results = []
     for finding in findings:
         linked = by_finding.get(finding.finding_id, [])
-        strong = [item for item in linked if item.confidence >= 0.55]
-        if finding.severity == "high" and strong:
+        relevant = [item for item in linked if item.relevance_score >= 0.50]
+        strong = [item for item in linked if item.relevance_score >= 0.68]
+        if strong:
             status = "supported"
-            reason = "高风险发现绑定了至少一条强证据。"
-        elif linked:
+            reason = "风险判断绑定了至少一条通过规则相关性门禁的强证据。"
+        elif relevant:
             status = "weakly_supported"
-            reason = "发现有原文证据，但强度不足或需人工复核。"
+            reason = "原文证据通过最低相关性门禁，但仍需人工复核。"
+        elif linked:
+            status = "needs_human_review"
+            reason = "检索到候选原文，但规则相关性未达到 0.50 证据门禁。"
         else:
             status = "needs_human_review"
             reason = "未找到可回溯原文证据。"
@@ -2594,8 +2672,29 @@ def _chunk_evidence_candidate(item: ChunkSearchResult) -> dict[str, Any]:
             metadata.get("source_hash")
             or hashlib.sha256(item.text.encode("utf-8")).hexdigest()
         ),
+        "retrieval_score": item.score,
+        "vector_score": item.vector_score,
+        "text_score": item.text_score,
         "score": item.score,
     }
+
+
+def _candidate_excerpt(candidate: dict[str, Any], *, limit: int) -> str:
+    """Return the passage around the matched rule anchor, not an unrelated prefix."""
+
+    text = str(candidate.get("text") or "")
+    anchors = [str(item) for item in candidate.get("matched_anchors") or [] if item]
+    positions = [text.lower().find(anchor.lower()) for anchor in anchors]
+    positions = [position for position in positions if position >= 0]
+    if not positions or len(text) <= limit:
+        return text[:limit]
+    center = min(positions)
+    start = max(0, center - limit // 3)
+    end = min(len(text), start + limit)
+    start = max(0, end - limit)
+    prefix = "…" if start else ""
+    suffix = "…" if end < len(text) else ""
+    return f"{prefix}{text[start:end].strip()}{suffix}"
 
 
 def _block_candidates_for_finding(
@@ -2626,6 +2725,8 @@ def _block_candidates_for_finding(
                 "char_start": block.char_start,
                 "char_end": block.char_end,
                 "source_hash": block.source_hash,
+                "retrieval_score": 0.0,
+                "relevance_score": score,
                 "score": score,
             }
         )
@@ -2641,6 +2742,21 @@ def _apply_verification(
     status_by_finding = {item.finding_id: item.status for item in results}
     for finding in findings:
         status = status_by_finding.get(finding.finding_id, "needs_human_review")
+        linked_relevance = [
+            item.relevance_score
+            for item in evidence
+            if item.finding_id == finding.finding_id
+        ]
+        strongest_evidence = max(linked_relevance, default=0.0)
+        expert_confidence = max(0.0, min(1.0, finding.confidence))
+        calibrated = 0.55 * expert_confidence + 0.45 * strongest_evidence
+        if status == "supported":
+            finding.confidence = max(0.55, min(0.95, calibrated))
+        elif status == "weakly_supported":
+            finding.confidence = max(0.50, min(0.69, calibrated))
+        else:
+            finding.confidence = min(0.49, calibrated)
+        finding.verification_status = status
         finding.requires_human_review = status in {"weakly_supported", "needs_human_review"}
     for item in evidence:
         if item.verifier_status == "rejected_by_debate":
@@ -2651,6 +2767,11 @@ def _apply_verification(
 def _quality_review(run: AnalysisRun) -> dict[str, Any]:
     evidence_by_id = {item.evidence_id: item for item in run.evidence}
     issues: list[str] = []
+    admitted = {
+        item.finding_id
+        for item in run.verification_results
+        if item.status in {"supported", "weakly_supported"}
+    }
     for finding in run.findings:
         linked = [evidence_by_id[evidence_id] for evidence_id in finding.evidence_ids if evidence_id in evidence_by_id]
         if not linked:
@@ -2661,9 +2782,43 @@ def _quality_review(run: AnalysisRun) -> dict[str, Any]:
         if finding.severity == "high" and all(item.verifier_status != "supported" for item in linked):
             issues.append(f"{finding.finding_id} / {finding.title} 为高风险但缺少 supported 证据。")
     return {
-        "review_status": "draft" if not issues else "needs_human_review",
+        "review_status": (
+            "draft"
+            if admitted and not issues
+            else "no_verified_findings"
+            if not admitted and not issues
+            else "needs_human_review"
+        ),
         "issues": issues,
     }
+
+
+def _empty_verified_report(
+    run: AnalysisRun,
+    module_results: list[dict[str, Any]],
+) -> IntegratedRiskReport:
+    """Produce a truthful zero-finding report without asking the LLM to infer risk."""
+
+    return IntegratedRiskReport(
+        title=f"{run.company_name} IPO 风险分析报告",
+        executive_summary=(
+            "本次分析未形成通过证据门禁的风险结论。该结果表示现有检索与验证材料"
+            "不足以支持正式判断，不表示相关风险不存在。"
+        ),
+        overall_risk_level="未评级（无已验证结论）",
+        sections=[
+            {
+                "module_id": str(module["module_id"]),
+                "title": str(module.get("module") or module["module_id"]),
+                "analysis": "未形成通过证据门禁的风险结论，需补充定向检索或人工复核。",
+                "finding_ids": [],
+                "evidence_ids": [],
+            }
+            for module in module_results
+        ],
+        recommendations=["针对未充分覆盖的规则执行定向补证和人工复核。"],
+        limitations=["无已验证风险结论，不能据此推断企业不存在相关风险。"],
+    )
 
 
 def _render_report_header(run: AnalysisRun) -> str:
@@ -2738,7 +2893,7 @@ def _render_report_footer(run: AnalysisRun, report_findings: list[RiskFinding]) 
         "",
     ]
     for item in run.evidence[:30]:
-        lines.append(f"- {item.evidence_id}：第 {item.page_number} 页 / {item.section_path} / 可信度 {item.confidence:.2f} / {item.text[:120]}")
+        lines.append(f"- {item.evidence_id}：第 {item.page_number} 页 / {item.section_path} / 证据相关性 {item.relevance_score:.2f} / {item.text[:120]}")
     lines.extend(
         [
             "",
@@ -2953,7 +3108,7 @@ def _build_integrated_report(run: AnalysisRun, integrated: IntegratedRiskReport)
     for item in report_evidence[:50]:
         lines.append(
             f"- {item.evidence_id}：第 {item.page_number} 页 / {item.section_path} / "
-            f"可信度 {item.confidence:.2f} / {item.text[:120]}"
+            f"证据相关性 {item.relevance_score:.2f} / {item.text[:120]}"
         )
     markdown = "\n".join(lines)
     return ReportDraft(
@@ -3012,7 +3167,7 @@ def _build_trace_view(run: AnalysisRun) -> AnalysisTrace:
             id=item.evidence_id,
             source="官方",
             title=f"{item.section_path} P.{item.page_number}",
-            conf=round(item.confidence, 4),
+            conf=round(item.relevance_score, 4),
             time="近实时",
             page=item.page_number,
             snippet=item.text,

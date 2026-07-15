@@ -267,7 +267,8 @@ type BackendEvidence = {
   char_start: number;
   char_end: number;
   source_hash: string;
-  confidence: number;
+  retrieval_score: number;
+  relevance_score: number;
   verifier_status: string;
 };
 
@@ -421,7 +422,8 @@ async function fetchEvidenceDetailItems(id: string): Promise<EvidenceDetailItem[
       id: item.evidence_id,
       section: item.section_path,
       page: item.page_number,
-      conf: item.confidence,
+      conf: item.relevance_score,
+      scoreKind: item.relevance_score > 0 ? "relevance" : "unavailable",
       snippet: item.text,
       risk: riskByFinding[item.finding_id] ?? evidenceStatusLabel(item.verifier_status),
       documentId: item.document_id,
@@ -471,7 +473,8 @@ async function fetchKnowledgeData(): Promise<KnowledgeData> {
       name: run.company_name,
       section: item.section_path,
       page: item.page_number,
-      conf: item.confidence,
+      conf: item.relevance_score,
+      scoreKind: item.relevance_score > 0 ? "relevance" : "unavailable",
       snippet: item.text,
       risk: riskByFinding[item.finding_id] ?? evidenceStatusLabel(item.verifier_status),
       documentId: item.document_id,
@@ -489,7 +492,7 @@ async function fetchKnowledgeData(): Promise<KnowledgeData> {
       { label: "公司", items: ["全部", ...companies] },
       { label: "招股书章节", items: ["全部", ...sections] },
       { label: "风险类别", items: ["全部", ...risks] },
-      { label: "置信度", items: ["全部", "≥ 0.9 高", "0.7–0.9 中", "< 0.7 低"] },
+      { label: "证据相关性", items: ["全部", "≥ 0.9 高", "0.7–0.9 中", "< 0.7 低"] },
     ],
     evidence,
     stats: { totalEvidence: evidence.length, totalCompanies: companies.length },

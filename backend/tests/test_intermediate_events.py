@@ -273,7 +273,7 @@ def _report_run() -> AnalysisRun:
                 text="经营活动现金流为负。",
                 bbox=[0, 0, 10, 10],
                 source_hash="hash-financial",
-                confidence=0.86,
+                relevance_score=0.86,
                 verifier_status="supported",
             ),
             RunEvidence(
@@ -285,7 +285,7 @@ def _report_run() -> AnalysisRun:
                 text="存在关联交易。",
                 bbox=[0, 0, 10, 10],
                 source_hash="hash-legal",
-                confidence=0.82,
+                relevance_score=0.82,
                 verifier_status="supported",
             ),
         ],

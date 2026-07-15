@@ -18,9 +18,10 @@ description: 用数据库中的 143 条港股 IPO 风险规则对招股书文本
 ## 工作步骤
 
 1. 按专家能力域筛选规则子集：优先用技能映射（skill 的 rule_types/categories），否则用 AgentSpec 的 rule_types/categories。
-2. 对文本执行 `evaluate_text_against_rules`，命中即产出 `evaluation_result="triggered"` 的候选条目，附 matched_terms 与证据片段。
-3. 候选条目必须保留 `rule_id`、`rule_set_id`、`rule_version`，保证结论可追溯到规则版本。
-4. 预筛结果只是候选——严禁直接当成最终结论，必须交给专家 LLM 二判（见 expert-risk-analysis 技能）。
+2. 对文本执行 `evaluate_text_against_rules`；关键词命中只产出 `evaluation_result="candidate"` 的预筛条目，附 matched_terms 与证据片段。
+3. `重大`、`显著`、`可能` 等泛化词不得独立形成候选；候选必须由专家二判验证实际触发条件，证据不足时标记 `insufficient_evidence`。
+4. 候选条目必须保留 `rule_id`、`rule_set_id`、`rule_version`，保证结论可追溯到规则版本。
+5. 预筛结果严禁直接当成最终结论，必须交给专家 LLM 二判（见 expert-risk-analysis 技能）。
 
 ## 禁止事项
 
