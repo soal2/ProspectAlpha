@@ -4,6 +4,12 @@ ProspectAlpha 是一个面向港股 IPO 的可解释 RiskAgent 系统，用于�
 
 > 当前状态：FastAPI 服务、SQLAlchemy 持久化、文档入库、风险规则体系、分析运行编排与 RQ worker 已可本地启动（详见 `START.md` 与 `backend/README.md`）。战略层动态选人、LangGraph 中断/恢复、A2A 1.0 与 JSON 邮箱生命周期已实现；真实模型下的专家领域行为、生产多进程验证、评分卡、回测和完整报告渲染仍待补齐。
 
+## GitHub Pages 前端部署
+
+推送到 `master` 后，`.github/workflows/deploy-frontend-pages.yml` 会将前端发布到 GitHub Pages。首次使用前，请在仓库 **Settings → Pages** 将 Source 设为 **GitHub Actions**。后端 Render 服务完成首个部署后，在 **Settings → Secrets and variables → Actions → Variables** 新建仓库变量 `VITE_API_BASE_URL`，值为 Render API 的公开 HTTPS 地址（不要以 `/` 结尾），然后手动运行一次 `Deploy frontend to GitHub Pages` 工作流。
+
+后端由根目录 [`render.yaml`](render.yaml) 定义：Render 会创建 FastAPI 与 RQ Worker 共用的 Web Service、Postgres、Redis 兼容 Key Value、私有 Qdrant 和私有 MinIO。创建 Blueprint 时，Render 会要求填写 OpenAI 兼容模型与嵌入服务的地址、模型名和密钥；这些机密不提交到仓库。部署完成后的访问地址为 `https://soal2.github.io/ProspectAlpha/`。GitHub Pages/Actions 只能托管静态前端，不能运行 FastAPI、RQ、Redis 或数据库。
+
 ![项目全景图](assets/项目全景图.png)
 
 ## 项目要解决什么问题
