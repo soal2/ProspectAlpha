@@ -7,14 +7,14 @@
 后端已经具备以下运行时能力（对应 `riskagent` 包内已落地的模块）：
 
 - **FastAPI 应用**：`riskagent.api.main:app`，挂载 6 个业务路由模块（`risk_rules` / `agents` / `analysis_options` / `documents` / `chat` / `analysis`）、动态 A2A Agent Card/JSON-RPC 路由和 `/health`。
-- **SQLAlchemy 持久化层**：`database.py` 提供引擎、会话工厂与 `Base`；`models.py` 定义 10 张运行时与参考数据表。
+- **SQLAlchemy 持久化层**：`database.py` 提供引擎、会话工厂与 `Base`；检索块与向量由 PostgreSQL `rag` schema 管理。
 - **文档入库与查询**：`documents.py` + `parsing/`，支持 PDF 与纯文本入库、`sha256` 去重、文本切块与页码定位。
-- **providers 抽象层**：`providers/embedding.py`、`providers/object_store.py`（local 或 MinIO）、`providers/vector_store.py`（默认 in-memory，可切 Qdrant）。
+- **providers 抽象层**：`providers/embedding.py` 与 `providers/object_store.py`（local 或 MinIO）。
 - **分析运行编排**：`analysis_runs.py` 实现运行状态机（含 `clarifying` / `ready` / `running` / `awaiting_expert_selection` / `completed`），支持 `inline` 与 `rq` 两种执行模式和人工专家选择恢复。
 - **RQ worker**：`workers/rq_worker.py`，控制台入口 `prospect-alpha-worker`，监听 `analysis` 队列。
 - **动态战略编排**：`agent_experts.py` 输出实时专家能力目录，`agents/orchestrator.py` 定义并校验 `StrategyDecision`、替补决策与最终 `IntegratedRiskReport`；LangGraph 运行时只固定协议生命周期，不固定专家链路。
 - **A2A 与 JSON 邮箱**：`a2a/` 使用官方 A2A 1.0 `AgentCard` / `Task` / `Message` / `Artifact` 数据边界，提供 run 隔离、跨进程原子 claim/lease、可重放的 JSONL 邮箱，并通过官方 SDK JSON-RPC dispatcher 把实时 Agent Card 与端点连接到进程内 TeamRuntime 或 API/RQ 共享文件存储。
-- **混合检索**：`retrieval/hybrid.py` 提供 BM25 + 向量召回的混合检索能力。
+- **混合检索**：`retrieval/hybrid.py` 通过 PostgreSQL pg_jieba + pgvector 提供按 `document_id` 隔离的混合检索。
 - **风险规则体系**：`risk_rules.py` 加载 `configs/risk_rules.yaml` 与 `configs/hk_ipo_risk_rules_v1.json`，并暴露规则 CRUD 与快照接口。
 - **测试套件**：`tests/` 覆盖 worker、analysis pipeline contracts、retrieval hybrid、supervisor、agent experts、risk rules 等。
 
@@ -25,7 +25,7 @@ backend/
 ├── configs/                    # 风险 taxonomy、风险规则、agent graph、模型与特征配置
 ├── data/                       # 本地开发数据目录（raw / processed / gold_labels）
 ├── docs/backend_api.md         # FastAPI 路由的完整 API 文档
-├── docker-compose.yml          # api + worker + postgres + redis + qdrant + minio
+├── docker-compose.yml          # api + worker + postgres + redis + minio
 ├── Dockerfile
 ├── pyproject.toml
 └── src/riskagent/
@@ -39,7 +39,7 @@ backend/
     │   ├── evidence.py         # 证据相关占位路由
     │   └── health.py
     ├── database.py             # SQLAlchemy 引擎、SessionLocal、init_db()
-    ├── models.py               # 10 张运行时与参考数据表的 ORM（见下方“数据模型”）
+    ├── models.py               # 运行时与参考数据表 ORM（见下方“数据模型”）
     ├── documents.py            # 文档资产入库、解析、切块
     ├── analysis_runs.py        # 分析运行状态机、事件流、findings
     ├── risk_rules.py           # 风险规则加载、CRUD 与规则集快照
@@ -55,7 +55,6 @@ backend/
     ├── providers/              # 外部依赖抽象
     │   ├── embedding.py
     │   ├── object_store.py     # local 或 MinIO
-    │   └── vector_store.py     # in-memory（默认）或 Qdrant
     ├── workers/                # 分析任务执行
     │   ├── analysis.py         # 任务体
     │   └── rq_worker.py        # RQ worker 入口（prospect-alpha-worker）
@@ -75,15 +74,16 @@ backend/
 
 ## 数据模型
 
-`src/riskagent/models.py` 定义了 10 张运行时与参考数据表：
+`src/riskagent/models.py` 定义了 11 张运行时与参考数据表；可检索 chunk/vector 另存于 PostgreSQL `rag` schema：
 
 | ORM 类 | 表名 | 用途 |
 | --- | --- | --- |
+| `ProspectusDocumentRow` | `prospectus_documents` | MinerU 管线注册的招股书元数据 |
 | `DocumentAssetRow` | `documents` | 招股书文件资产（`file_sha256` 去重、`page_count`、`text_chars`、`block_count` 等） |
 | `DocumentBlockRow` | `document_blocks` | 文档切块（`page_number`、`section_path`、`bbox`、`char_start/end`、`source_hash`） |
 | `AnalysisRunRow` | `analysis_runs` | 分析运行实例（`status`、`current_stage`、`inputs_frozen`、`payload`） |
 | `EvidenceLibraryRow` | `evidence_library` | 跨运行证据库（`dedupe_key` 去重、`source_run_id`、`document_block_id`） |
-| `RetrievalIndexRow` | `retrieval_index` | 检索索引（`terms`、`embedding`、`payload`） |
+| `ReportLibraryRow` | `report_library` | 已完成报告与分节归档 |
 | `AgentExpertRow` | `agent_experts` | Agent 专家目录（前端 expert guild 页数据源） |
 | `AgentSpecRow` | `agent_specs` | 可执行专家能力与规则分工目录（战略动态选人的数据源） |
 | `RiskRuleSetRow` | `risk_rule_sets` | 风险规则集版本与元数据 |
@@ -119,7 +119,7 @@ analysis_runs 状态机（analysis_runs.py）
                 └──► A2A 1.0 Message / Task / Artifact ↔ JSONL 邮箱
                 │
                 ▼
-  providers：database / vector_store / object_store / embedding
+  providers：database / object_store / embedding
                 │
                 ▼
   事件、findings、证据 → 写回 PostgreSQL / SQLite
@@ -138,7 +138,7 @@ analysis_runs 状态机（analysis_runs.py）
 | `REDIS_URL` | RQ 队列依赖的 Redis 连接 |
 | `ANALYSIS_EXECUTION_MODE` | `inline`（开发默认）或 `rq`（生产） |
 | `ANALYSIS_QUEUE_NAME` | RQ 队列名，默认 `analysis` |
-| `QDRANT_URL` / `VECTOR_STORE_PROVIDER` | 向量检索服务地址与 provider 选择 |
+| `EMBEDDING_BASE_URL` / `EMBEDDING_API_KEY` / `EMBEDDING_MODEL` | PostgreSQL 入库前的 embedding provider 配置 |
 | `MINIO_ENDPOINT` / `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` / `MINIO_SECURE` | MinIO 对象存储连接 |
 | `OBJECT_STORE_PROVIDER` / `OBJECT_STORE_BUCKET` / `OBJECT_STORE_LOCAL_ROOT` | 对象存储 provider（`minio` 或 `local`）与 bucket / 本地根目录 |
 | `CORS_ALLOW_ORIGINS` | 逗号分隔的允许跨域来源 |
@@ -171,7 +171,7 @@ ANALYSIS_EXECUTION_MODE=inline uvicorn riskagent.api.main:app --host 127.0.0.1 -
 prospect-alpha-worker  # 等价于 python -m riskagent.workers.rq_worker
 ```
 
-Docker 全栈启动（含 postgres / redis / qdrant / minio）：
+Docker 全栈启动（含 postgres / redis / minio）：
 
 ```bash
 cd backend

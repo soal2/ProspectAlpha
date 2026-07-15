@@ -28,7 +28,6 @@ from riskagent.models import (
     DocumentAssetRow,
     DocumentBlockRow,
     EvidenceLibraryRow,
-    RetrievalIndexRow,
     RiskRuleDimensionRow,
     RiskRuleRow,
     RiskRuleSetRow,
@@ -37,7 +36,6 @@ from riskagent.seed_data import seed_reference_data
 
 # Reverse-FK deletion order: leaf tables first, root reference tables last.
 TABLES_IN_RESET_ORDER: list[Type[DeclarativeBase]] = [
-    RetrievalIndexRow,      # -> documents, document_blocks
     EvidenceLibraryRow,     # -> analysis_runs
     DocumentBlockRow,       # -> documents
     AnalysisRunRow,         # -> documents
@@ -51,7 +49,7 @@ TABLES_IN_RESET_ORDER: list[Type[DeclarativeBase]] = [
 
 
 def reset_database(database_url: str) -> dict[str, int]:
-    """Delete every row from the 10 business tables, then reseed reference data.
+    """Delete every row from the current business tables, then reseed reference data.
 
     Returns a mapping of ``{table_name: deleted_row_count}`` for observability.
     """

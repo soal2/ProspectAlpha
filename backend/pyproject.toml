@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Backend skeleton for the HK-IPO RiskAgent pipeline."
 requires-python = ">=3.11"
 dependencies = [
+  "dashscope>=1.20.0",
   "a2a-sdk[http-server]>=1.1,<2",
   "fastapi>=0.115.0",
   "langgraph>=1.2.0",
@@ -14,7 +15,6 @@ dependencies = [
   "pydantic>=2.8.0",
   "PyYAML>=6.0.0",
   "python-multipart>=0.0.9",
-  "qdrant-client>=1.12.0,<1.14.0",
   "redis>=5.0.0",
   "rq>=1.16.0",
   "SQLAlchemy>=2.0.0",
@@ -28,9 +28,16 @@ dev = [
 ]
 pipeline = [
   "alembic>=1.13.0",
+  "mineru",
+  "ftfy>=6.3.0",
   "langgraph-checkpoint-postgres>=3.1,<4",
   "pdfplumber>=0.11.0",
+  "pyclipper>=1.4.0",
   "psycopg[binary]>=3.2.0",
+  "shapely>=2.1.0",
+  "torch>=2.13.0",
+  "torchvision>=0.28.0",
+  "transformers>=4.57.3,<5.0.0",
 ]
 
 [project.scripts]

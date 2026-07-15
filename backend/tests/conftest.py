@@ -10,6 +10,7 @@ from riskagent.agent_experts import AgentSpec
 from riskagent.agents.orchestrator import StrategyDecision
 from riskagent.agents.supervisor import AgentTeamSupervisor
 from riskagent.analysis_runs import AnalysisRunRepository
+from riskagent.retrieval import ChunkSearchResult
 from riskagent.risk_rules import RiskRuleRepository
 
 
@@ -35,6 +36,31 @@ def _test_agent_specs() -> list[AgentSpec]:
             title="Business and disclosure specialist",
             default=True,
         ),
+    ]
+
+
+def _test_chunk_retriever(*, document_id: str, **_kwargs: Any) -> list[ChunkSearchResult]:
+    return [
+        ChunkSearchResult(
+            chunk_id=f"chunk_{document_id}_001",
+            document_id=document_id,
+            doc_key="test",
+            chunk_type="text",
+            text=(
+                "风险因素：公司存在关联交易、对赌和赎回安排，经营活动现金流持续为负，"
+                "并存在供应商集中度风险。"
+            ),
+            page_idx=1,
+            source_file="test.pdf",
+            source_item_indices=[0],
+            bbox_refs=[{"page_idx": 1, "bbox": [1, 2, 3, 4], "source_item_index": 0}],
+            merged_bboxes=[{"page_idx": 1, "bbox": [1, 2, 3, 4]}],
+            image_path=None,
+            mineru_img_path=None,
+            table_html=None,
+            metadata={"section_path": "风险因素"},
+            score=0.9,
+        )
     ]
 
 
@@ -128,10 +154,12 @@ def analysis_repo_factory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         **repository_kwargs: Any,
     ) -> AnalysisRunRepository:
         index = next(sequence)
+        chunk_retriever = repository_kwargs.pop("chunk_retriever", _test_chunk_retriever)
         supervisor = AgentTeamSupervisor(
             repository=rule_repository,
             agent_specs=_test_agent_specs(),
             strategy_provider=strategy_provider or _strategy_provider(selected_agents),
+            chunk_retriever=chunk_retriever,
             runtime_root=runtime_root / str(index),
         )
         repository_kwargs.setdefault("use_database", False)
@@ -140,6 +168,7 @@ def analysis_repo_factory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             rule_repository=rule_repository,
             agent_supervisor=supervisor,
             report_provider=deterministic_report_provider,
+            chunk_retriever=chunk_retriever,
             **repository_kwargs,
         )
 

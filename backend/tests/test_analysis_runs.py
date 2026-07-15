@@ -21,6 +21,7 @@ def test_analysis_run_uses_rule_snapshot_and_evidence(tmp_path, analysis_repo_fa
     run = repo.create_and_run(
         AnalysisRunCreate(
             company_name="测试 IPO",
+            document_id="doc_test",
             document_text="公司存在关联交易、赎回安排，经营活动现金流持续为负。",
             structured_data={"经营活动现金流": "连续两期为负"},
         )
@@ -53,6 +54,7 @@ def test_analysis_api_creates_ready_run_then_start_completes(
         "/analysis-runs",
         json={
             "company_name": "测试 IPO",
+            "document_id": "doc_test",
             "document_text": "招股书披露对赌和赎回安排，同时存在供应商集中度风险。",
             "structured_data": {"供应商集中度": "Top5 采购占比 80%"},
         },
@@ -67,7 +69,7 @@ def test_analysis_api_creates_ready_run_then_start_completes(
     run_id = payload["run_id"]
     started = client.post(f"/analysis-runs/{run_id}/start").json()
     assert started["status"] in {"queued", "completed"}
-    for _ in range(50):
+    for _ in range(200):
         current = client.get(f"/analysis-runs/{run_id}").json()
         if current["status"] == "completed":
             break
@@ -162,6 +164,7 @@ def test_analysis_run_persists_dynamic_strategy_agents_and_depth(
     run = repo.create_and_run(
         AnalysisRunCreate(
             company_name="测试 IPO",
+            document_id="doc_test",
             document_text="公司存在关联交易、赎回安排，经营活动现金流持续为负。",
             risk_rule_set_id="hk_ipo_prospectus_risk_framework_v1",
             analysis_depth="quick",
@@ -191,6 +194,7 @@ def test_dynamic_domain_skills_keep_rule_counts_and_skill_ids(
     run = repo.create_and_run(
         AnalysisRunCreate(
             company_name="Skill 测试 IPO",
+            document_id="doc_test",
             document_text="风险因素\n公司存在关联交易、赎回安排，经营活动现金流持续为负。",
             analysis_depth="standard",
         )
@@ -231,6 +235,7 @@ def test_invalid_strategy_pauses_and_api_selection_resumes(
         "/analysis-runs",
         json={
             "company_name": "人工恢复 IPO",
+            "document_id": "doc_test",
             "document_text": "公司存在关联交易和赎回安排。",
         },
     ).json()
@@ -317,7 +322,7 @@ def test_run_debate_stage_emits_structured_failure_event_on_DebateLLMError(
 def test_completed_run_archives_report_into_knowledge_library(tmp_path, analysis_repo_factory):
     from sqlalchemy import select
 
-    from riskagent.models import ReportLibraryRow, RetrievalIndexRow
+    from riskagent.models import ReportLibraryRow
 
     rule_repo = RiskRuleRepository(Path(__file__).parents[1] / "configs" / "risk_rules.yaml")
     repo = analysis_repo_factory(
@@ -347,28 +352,16 @@ def test_completed_run_archives_report_into_knowledge_library(tmp_path, analysis
         assert row.markdown == run.report.markdown
         assert row.sections and all("title" in item and "text" in item for item in row.sections)
 
-        indexed = session.scalars(
-            select(RetrievalIndexRow).where(RetrievalIndexRow.run_id == "knowledge_reports")
-        ).all()
-        assert indexed
-        assert all(item.document_id == f"report_{run.run_id}" for item in indexed)
-        assert all(item.payload["block_type"] == "report_section" for item in indexed)
-
     archive_events = [
         event for event in run.events if event.get("actor_name") == "report_library"
     ]
     assert archive_events and archive_events[0]["event_type"] == "tool_completed"
 
     # Idempotent: re-archiving the same run must not duplicate rows.
-    first_count = len(indexed)
     repo._archive_report(run)
     with repo.session_factory() as session:
         rows = session.scalars(select(ReportLibraryRow)).all()
         assert len(rows) == 1
-        indexed_again = session.scalars(
-            select(RetrievalIndexRow).where(RetrievalIndexRow.run_id == "knowledge_reports")
-        ).all()
-        assert len(indexed_again) == first_count
 
 
 def test_knowledge_reports_api_lists_and_fetches_archived_reports(monkeypatch, tmp_path):

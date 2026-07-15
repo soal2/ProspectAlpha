@@ -1,1 +1,0 @@
-"""Prospectus section detection boundary."""

@@ -5,10 +5,6 @@ if [[ "${DATABASE_URL:-}" == postgresql://* ]]; then
   export DATABASE_URL="postgresql+psycopg://${DATABASE_URL#postgresql://}"
 fi
 
-if [[ -n "${QDRANT_HOSTPORT:-}" ]]; then
-  export QDRANT_URL="http://${QDRANT_HOSTPORT}"
-fi
-
 mkdir -p "${AGENT_RUNTIME_DATA_DIR:?AGENT_RUNTIME_DATA_DIR is required}"
 
 python -c 'from riskagent.database import init_reference_data; init_reference_data()'

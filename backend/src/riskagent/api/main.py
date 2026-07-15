@@ -10,6 +10,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 logger = logging.getLogger(__name__)
 
+LOCAL_DEVELOPMENT_ORIGIN_REGEX = (
+    r"^https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0)(?::\d+)?$"
+)
+
 from riskagent.a2a import build_dynamic_expert_a2a_routes
 from riskagent.agent_experts import AgentSpec, AgentSpecRepository
 from riskagent.api import agents, analysis, analysis_options, chat, documents, knowledge, risk_rules, skills
@@ -33,6 +37,10 @@ def create_app() -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=_cors_origins(),
+        # Vite can move to another port when 5173 is occupied, and developers
+        # commonly alternate between localhost and 127.0.0.1. Keep loopback
+        # origins usable without weakening the configured production allowlist.
+        allow_origin_regex=LOCAL_DEVELOPMENT_ORIGIN_REGEX,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -44,9 +52,13 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     def _probe_embedding_provider() -> None:
-        if not os.getenv("EMBEDDING_API_KEY", "").strip():
+        embedding_key = (
+            os.getenv("EMBEDDING_API_KEY", "").strip()
+            or os.getenv("DASHSCOPE_API_KEY", "").strip()
+        )
+        if not embedding_key:
             logger.warning(
-                "EMBEDDING_API_KEY not configured — retrieval falls back to hashing "
+                "EMBEDDING_API_KEY/DASHSCOPE_API_KEY not configured — retrieval falls back to hashing "
                 "vectors; analysis runs requiring real embeddings will fail fast."
             )
             return
@@ -66,9 +78,8 @@ def create_app() -> FastAPI:
     app.include_router(risk_rules.router)
     app.include_router(agents.router)
     app.include_router(analysis_options.router)
-    app.include_router(documents.router)
-    app.include_router(chat.router)
     app.include_router(chat.general_router)
+    app.include_router(documents.router)
     app.include_router(analysis.router)
     app.include_router(knowledge.router)
     app.include_router(skills.router)

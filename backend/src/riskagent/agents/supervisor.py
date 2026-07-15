@@ -34,6 +34,7 @@ from riskagent.agents.orchestrator import (
 )
 from riskagent.agents.expert_llm import analyze_findings_with_llm
 from riskagent.agents.prompts import render_expert_prompt
+from riskagent.retrieval import ChunkSearchResult, prospectus_hybrid_search
 from riskagent.runtime_events import LiveLLMCall
 from riskagent.risk_rules import RiskRule, RiskRuleRepository
 from riskagent.seed_data import AGENT_EXPERTS, AGENT_NAME_ALIASES, AGENT_SPECS
@@ -54,6 +55,7 @@ MISSION_BRIEF_TIMEOUT_SECONDS = 10.0
 
 StrategyProvider = Callable[..., Any]
 ReplacementProvider = Callable[..., Any]
+ChunkRetriever = Callable[..., list[ChunkSearchResult]]
 
 
 class ExpertModuleResult(BaseModel):
@@ -100,6 +102,7 @@ class AgentState(TypedDict, total=False):
     user_requirement: str
     document_summary: str
     text: str
+    document_id: str
     max_findings: int
     rule_snapshot: dict[str, Any]
     available_agents: list[dict[str, Any]]
@@ -128,6 +131,7 @@ class AgentTeamSupervisor:
         agent_specs: list[AgentSpec] | None = None,
         strategy_provider: StrategyProvider | None = None,
         replacement_provider: ReplacementProvider | None = None,
+        chunk_retriever: ChunkRetriever | None = None,
         checkpointer: Any | None = None,
         runtime_root: Path | str | None = None,
     ) -> None:
@@ -136,6 +140,7 @@ class AgentTeamSupervisor:
         self._agent_specs_override = list(agent_specs) if agent_specs is not None else None
         self.strategy_provider = strategy_provider or orchestrate
         self.replacement_provider = replacement_provider or select_replacement
+        self.chunk_retriever = chunk_retriever or prospectus_hybrid_search
         self.runtime_root = resolve_agent_runtime_root(runtime_root)
         self._runtime_events: dict[str, list[dict[str, Any]]] = {}
         self._runtime_events_lock = threading.Lock()
@@ -162,6 +167,7 @@ class AgentTeamSupervisor:
         user_requirement: str,
         document_summary: str,
         text: str,
+        document_id: str = "",
         max_findings: int,
         rule_snapshot: dict[str, Any] | None = None,
         manual_agent_names: list[str] | None = None,
@@ -173,6 +179,7 @@ class AgentTeamSupervisor:
             "user_requirement": user_requirement,
             "document_summary": document_summary[:4000],
             "text": text,
+            "document_id": document_id,
             "max_findings": max_findings,
             "rule_snapshot": rule_snapshot or self.repository.snapshot(),
             "available_agents": self.agent_options(),
@@ -450,6 +457,7 @@ class AgentTeamSupervisor:
                             spec=spec,
                             assignment=resolved_assignment,
                             text=state["text"],
+                            document_id=state.get("document_id", ""),
                             rules=all_rules,
                             rule_snapshot=state["rule_snapshot"],
                         ),
@@ -589,6 +597,7 @@ class AgentTeamSupervisor:
                                 spec=replacement_spec,
                                 assignment=replacement_assignment,
                                 text=state["text"],
+                                document_id=state.get("document_id", ""),
                                 rules=all_rules,
                                 rule_snapshot=state["rule_snapshot"],
                             ),
@@ -817,6 +826,7 @@ class AgentTeamSupervisor:
         spec: AgentSpec,
         assignment: StrategyAssignment,
         text: str,
+        document_id: str = "",
         rules: list[RiskRule],
         rule_snapshot: dict[str, Any],
     ):
@@ -858,8 +868,28 @@ class AgentTeamSupervisor:
             selected_rules = (
                 rules_for_skill(skill, rules, set()) if skill else _rules_for_spec(spec, rules)
             )
+            analysis_text = text
+            if document_id:
+                query = " ".join(
+                    [
+                        assignment.module,
+                        assignment.goal,
+                        *[rule.risk_item for rule in selected_rules[:12]],
+                        *[rule.category for rule in selected_rules[:12]],
+                    ]
+                )
+                chunks = self.chunk_retriever(
+                    query=query,
+                    document_id=document_id,
+                    limit=8,
+                )
+                if not chunks:
+                    raise ValueError(
+                        f"No PostgreSQL chunks retrieved for document {document_id}"
+                    )
+                analysis_text = "\n\n".join(chunk.text for chunk in chunks)
             evaluations = evaluate_text_against_rules(
-                text,
+                analysis_text,
                 rules=selected_rules,
                 repository=self.repository,
                 rule_set_snapshot=rule_snapshot,

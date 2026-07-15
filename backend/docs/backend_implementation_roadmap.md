@@ -26,7 +26,7 @@ Phase 4：证据晋升、回测、监控、正式化加固
 | 文件存储 | MinIO |
 | PDF 解析 | PyMuPDF + pdfplumber |
 | OCR | PaddleOCR 可选兜底 |
-| 向量库 | Qdrant |
+| 向量库 | PostgreSQL / pgvector |
 | 全文检索 | PostgreSQL FTS 或轻量 BM25 |
 | Agent 编排 | LangGraph 固定 DAG |
 | LLM / Embedding | OpenAI-compatible API，经 provider 封装 |
@@ -45,7 +45,7 @@ Phase 4：证据晋升、回测、监控、正式化加固
 | 文件存储 | S3 / OSS / COS / 企业私有 MinIO |
 | 大文件上传 | 预签名 URL + 分片上传 |
 | URL 获取 | 下载沙箱 + 白名单 + 文件嗅探 + 恶意文件扫描 |
-| 向量库 | Qdrant / Milvus |
+| 向量库 | PostgreSQL / pgvector |
 | 全文检索 | OpenSearch / Elasticsearch / PostgreSQL FTS |
 | Rerank | cross-encoder 或 LLM rerank |
 | Agent 编排 | LangGraph 可配置图 |
@@ -155,7 +155,7 @@ docker compose up -d postgres redis minio
 6. 对扫描页或图片页预留 OCR 兜底。
 7. 生成 `source_hash` 和 `parser_version`。
 8. 写入 `document_blocks`。
-9. 向 Qdrant 写入 embedding，payload 回指 `block_id`。
+9. 向 PostgreSQL `rag.prospectus_chunks` 写入 embedding，记录 `document_id`、页码和 bbox。
 10. 建立 PostgreSQL FTS 或轻量 BM25 索引。
 11. 实现 `retrieval.hybrid_search(query, filters)`。
 12. 解析和索引阶段持续写 `analysis_events`。

@@ -39,7 +39,6 @@ AGENT_SKILL_MAP: dict[str, tuple[str, ...]] = {
     ),
     "cheng_zheng_evidence_agent": (
         "pdf-parse-and-trace",
-        "rag-embedding-index",
         "evidence-verification",
     ),
 }

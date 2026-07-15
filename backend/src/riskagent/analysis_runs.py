@@ -46,7 +46,7 @@ from riskagent.seed_data import AGENT_SPECS
 from riskagent.seed_data import AGENT_EXPERTS
 from riskagent.models import AnalysisRunRow, EvidenceLibraryRow, ReportLibraryRow
 from riskagent.providers.llm import get_default_llm_client
-from riskagent.retrieval.hybrid import HybridSearchIndex
+from riskagent.retrieval import ChunkSearchResult, PostgresChunkIndexer, prospectus_hybrid_search
 from riskagent.workers.analysis import dispatch_analysis_job
 
 
@@ -125,6 +125,7 @@ class DocumentBlock(BaseModel):
     block_type: str = "text"
     text: str
     bbox: list[float]
+    bbox_coordinate_space: Literal["pdf_points", "normalized_1000"] = "pdf_points"
     char_start: int = 0
     char_end: int = 0
     source_hash: str
@@ -140,6 +141,7 @@ class RunEvidence(BaseModel):
     section_path: str
     text: str
     bbox: list[float] = Field(default_factory=list)
+    bbox_coordinate_space: Literal["pdf_points", "normalized_1000"] | None = None
     char_start: int = 0
     char_end: int = 0
     source_hash: str = ""
@@ -154,6 +156,12 @@ class RunEvidence(BaseModel):
             match = re.match(r"^block_(.+)_\d{4}_\d{3}$", self.document_block_id)
             if match:
                 self.document_id = match.group(1)
+        if self.bbox_coordinate_space is None:
+            self.bbox_coordinate_space = (
+                "normalized_1000"
+                if "_chunk_" in self.document_block_id
+                else "pdf_points"
+            )
         return self
 
 
@@ -325,7 +333,7 @@ class AnalysisRunRepository:
         document_repository: DocumentRepository | None = None,
         session_factory=SessionLocal,
         use_database: bool | None = None,
-        search_index: HybridSearchIndex | None = None,
+        chunk_retriever: Callable[..., list[ChunkSearchResult]] | None = None,
         agent_supervisor: AgentTeamSupervisor | None = None,
         report_provider: Callable[..., Any] | None = None,
     ) -> None:
@@ -358,7 +366,7 @@ class AnalysisRunRepository:
                 future=True,
             )
         self.search_cache: TTLCache[list[dict[str, Any]]] = TTLCache(ttl_seconds=30, max_items=256)
-        self.search_index = search_index or HybridSearchIndex(session_factory=self.session_factory)
+        self.chunk_retriever = chunk_retriever or prospectus_hybrid_search
         self.agent_supervisor = agent_supervisor or AgentTeamSupervisor(
             repository=self.rule_repository,
             agent_specs=None if self.use_database else _seed_agent_specs(),
@@ -610,7 +618,105 @@ class AnalysisRunRepository:
         return self.get(run_id).events[after:]
 
     def evidence(self, run_id: str) -> list[RunEvidence]:
-        return self.get(run_id).evidence
+        run = self.get(run_id)
+        if run.evidence:
+            return run.evidence
+        return self._recover_rejected_evidence(run)
+
+    def _recover_rejected_evidence(self, run: AnalysisRun) -> list[RunEvidence]:
+        """Recover legacy debate-rejected evidence from audit events and PG chunks."""
+        if not self.use_database:
+            return []
+        event_payloads = [
+            event.get("payload") or {}
+            for event in run.events
+            if event.get("event_type") == "evidence_found"
+            and isinstance(event.get("payload"), dict)
+        ]
+        document_ids = {
+            str(payload.get("document_id") or "") for payload in event_payloads
+        } - {""}
+        if not document_ids:
+            return []
+        indexer = PostgresChunkIndexer()
+        try:
+            chunks_by_document = {
+                document_id: indexer.list_document_chunks(document_id)
+                for document_id in document_ids
+            }
+        finally:
+            indexer.close()
+
+        recovered: list[RunEvidence] = []
+        seen_evidence_ids: set[str] = set()
+        for payload in event_payloads:
+            document_id = str(payload.get("document_id") or "")
+            evidence_id = str(payload.get("evidence_id") or "")
+            if evidence_id in seen_evidence_ids:
+                continue
+            try:
+                page_number = int(payload.get("page_number") or 0)
+                bbox = [float(value) for value in payload.get("bbox") or []]
+                confidence = float(payload.get("confidence") or 0)
+            except (TypeError, ValueError):
+                continue
+            if page_number < 1 or len(bbox) != 4:
+                continue
+            block_id = str(payload.get("document_block_id") or "")
+            candidates = chunks_by_document.get(document_id, [])
+            chunk = next((item for item in candidates if item.chunk_id == block_id), None)
+            if chunk is None:
+                target_bbox = tuple(round(value, 4) for value in bbox)
+                chunk = next(
+                    (
+                        item
+                        for item in candidates
+                        if item.page_idx == page_number
+                        and any(
+                            isinstance(region, dict)
+                            and int(region.get("page_idx", -1)) == page_number
+                            and tuple(
+                                round(float(value), 4)
+                                for value in region.get("bbox", [])
+                            )
+                            == target_bbox
+                            for region in item.merged_bboxes
+                        )
+                    ),
+                    None,
+                )
+            if chunk is None:
+                continue
+            metadata = chunk.metadata if isinstance(chunk.metadata, dict) else {}
+            recovered_evidence_id = evidence_id or f"ev_{chunk.chunk_id}"
+            if recovered_evidence_id in seen_evidence_ids:
+                continue
+            coordinate_space = str(metadata.get("bbox_coordinate_space") or "pdf_points")
+            if coordinate_space not in {"pdf_points", "normalized_1000"}:
+                coordinate_space = "pdf_points"
+            recovered.append(
+                RunEvidence(
+                    evidence_id=recovered_evidence_id,
+                    finding_id=str(payload.get("finding_id") or "rejected_finding"),
+                    document_block_id=chunk.chunk_id,
+                    document_id=document_id,
+                    page_number=page_number,
+                    section_path=str(metadata.get("section_path") or chunk.chunk_type),
+                    text=chunk.text[:300],
+                    bbox=bbox,
+                    bbox_coordinate_space=coordinate_space,
+                    char_start=int(metadata.get("char_start") or 0),
+                    char_end=int(metadata.get("char_end") or 0),
+                    source_hash=str(
+                        metadata.get("source_hash")
+                        or hashlib.sha256(chunk.text.encode("utf-8")).hexdigest()
+                    ),
+                    confidence=confidence,
+                    verifier_status="rejected_by_debate",
+                )
+            )
+            seen_evidence_ids.add(recovered_evidence_id)
+        return recovered
 
     def report(self, run_id: str) -> ReportDraft:
         report = self.get(run_id).report
@@ -673,7 +779,11 @@ class AnalysisRunRepository:
             )
             total_pages = 0
             if payload.document_id:
-                total_pages = self.document_repository.get(payload.document_id).page_count
+                try:
+                    total_pages = self.document_repository.get(payload.document_id).page_count
+                except KeyError:
+                    if not payload.document_text.strip():
+                        raise
             run.progress = {
                 **run.progress,
                 "phase": "pdf_parsing",
@@ -739,8 +849,8 @@ class AnalysisRunRepository:
                 _event(
                     "tool_started",
                     "hybrid_search",
-                    "建立材料检索索引",
-                    "将 document_blocks 写入轻量全文和语义检索索引，后续 Agent 不重复读取原始 PDF。",
+                    "校验 PostgreSQL 材料索引",
+                    "复用上传阶段按 document_id 写入的 PostgreSQL 全文与向量索引。",
                     stage_key="pdf_parsing",
                     action_label="建立索引",
                     metrics={"tool_calls": 1},
@@ -771,8 +881,8 @@ class AnalysisRunRepository:
                     _event(
                         "tool_progress",
                         "hybrid_search",
-                        "向量化进行中",
-                        f"已向量化 {done}/{total} 个原文块。",
+                        "索引校验中",
+                        f"已确认 {done}/{total} 个原文块的文档映射。",
                         stage_key="pdf_parsing",
                         action_label="向量化",
                         metrics={"embedded_blocks": done, "total_blocks": total},
@@ -780,11 +890,8 @@ class AnalysisRunRepository:
                 )
                 self._save_run(run)
 
-            indexed_count = self.search_index.index_blocks(
-                run_id=run.run_id,
-                blocks=run.document_blocks,
-                on_progress=_on_index_progress,
-            )
+            indexed_count = len(run.document_blocks)
+            _on_index_progress(indexed_count, indexed_count)
             run.progress = {
                 **run.progress,
                 "updated_at": _now(),
@@ -804,8 +911,8 @@ class AnalysisRunRepository:
                 _event(
                     "stage_completed",
                     "hybrid_search",
-                    "PDF 解析与材料索引已就绪",
-                    f"已索引 {indexed_count} 个 document_blocks，索引以原文块为事实源。",
+                    "PDF 解析与 PostgreSQL 材料索引已就绪",
+                    f"已确认 {indexed_count} 个 document_blocks，检索按 document_id 隔离。",
                     stage_key="pdf_parsing",
                     stage_status="completed",
                     action_label="材料库就绪",
@@ -862,6 +969,7 @@ class AnalysisRunRepository:
                     or "对招股书进行风险分析",
                     document_summary=doc_summary,
                     text=text,
+                    document_id=payload_for_orchestra.document_id or "",
                     max_findings=_effective_max_findings(payload),
                     rule_snapshot=run.frozen_rule_snapshot,
                     event_sink=_persist_team_event,
@@ -1002,9 +1110,11 @@ class AnalysisRunRepository:
                         payload={
                             "evidence_id": item.evidence_id,
                             "finding_id": item.finding_id,
+                            "document_block_id": item.document_block_id,
                             "document_id": item.document_id,
                             "page_number": item.page_number,
                             "bbox": item.bbox,
+                            "bbox_coordinate_space": item.bbox_coordinate_space,
                             "confidence": item.confidence,
                         },
                     )
@@ -1320,7 +1430,7 @@ class AnalysisRunRepository:
                         "tool_completed",
                         "report_library",
                         "报告沉淀完成",
-                        f"报告已入知识库并索引 {archived} 个分节，供后续分析检索复用。",
+                        f"报告已入知识库，共沉淀 {archived} 个分节。",
                         stage_key="quality_review",
                         action_label="报告沉淀",
                     )
@@ -1388,11 +1498,18 @@ class AnalysisRunRepository:
         on_progress: Callable[[int, int, int], None] | None = None,
     ) -> list[ParsedDocumentBlock]:
         if payload.document_id:
-            return self.document_repository.ensure_parsed(
-                payload.document_id,
-                on_progress=on_progress,
-            )
-        document_id = f"doc_{hashlib.sha256(payload.document_text.encode('utf-8')).hexdigest()[:12]}"
+            try:
+                self.document_repository.prepare_for_retrieval(
+                    payload.document_id,
+                    on_progress=on_progress,
+                )
+                return self.document_repository.get_blocks(payload.document_id)
+            except KeyError:
+                if not payload.document_text.strip():
+                    raise
+        document_id = payload.document_id or (
+            f"doc_{hashlib.sha256(payload.document_text.encode('utf-8')).hexdigest()[:12]}"
+        )
         return [
             ParsedDocumentBlock(
                 block_id=block.block_id,
@@ -1491,6 +1608,7 @@ class AnalysisRunRepository:
                         section_path=candidate["section_path"],
                         text=candidate["text"][:300],
                         bbox=candidate["bbox"],
+                        bbox_coordinate_space=candidate["bbox_coordinate_space"],
                         char_start=candidate["char_start"],
                         char_end=candidate["char_end"],
                         source_hash=candidate["source_hash"],
@@ -1507,22 +1625,21 @@ class AnalysisRunRepository:
         cached = self.search_cache.get(cache_key)
         if cached is not None:
             return cached
+        payload = _payload_from_run(self.get(run_id))
+        document_id = payload.document_id
+        if not document_id:
+            return []
+        try:
+            self.document_repository.get(document_id)
+        except KeyError:
+            if payload.document_text.strip():
+                return []
+            raise
         candidates = [
-            {
-                "block_id": item.block_id,
-                "document_id": item.document_id,
-                "page_number": item.page_number,
-                "section_path": item.section_path,
-                "text": item.text,
-                "bbox": item.bbox,
-                "char_start": item.char_start,
-                "char_end": item.char_end,
-                "source_hash": item.source_hash,
-                "score": item.score,
-            }
-            for item in self.search_index.search(
-                run_id=run_id,
+            _chunk_evidence_candidate(item)
+            for item in self.chunk_retriever(
                 query=" ".join(query_terms),
+                document_id=document_id,
                 limit=5,
             )
         ]
@@ -1566,7 +1683,24 @@ class AnalysisRunRepository:
         if not search_query:
             search_query = eid or target_finding.title
 
-        candidates = self.search_index.search(run_id=run.run_id, query=search_query, limit=2)
+        payload = _payload_from_run(run)
+        document_id = payload.document_id
+        if not document_id:
+            return []
+        try:
+            self.document_repository.get(document_id)
+        except KeyError:
+            if payload.document_text.strip():
+                return []
+            raise
+        candidates = [
+            _chunk_evidence_candidate(item)
+            for item in self.chunk_retriever(
+                query=search_query,
+                document_id=document_id,
+                limit=2,
+            )
+        ]
         evidence: list[RunEvidence] = []
         for index, candidate in enumerate(candidates):
             evidence_id = str(eid) if eid and index == 0 else f"ev_{uuid.uuid4().hex[:10]}"
@@ -1574,16 +1708,17 @@ class AnalysisRunRepository:
                 RunEvidence(
                     evidence_id=evidence_id,
                     finding_id=target_finding.finding_id,
-                    document_block_id=candidate.block_id,
-                    document_id=candidate.document_id,
-                    page_number=candidate.page_number,
-                    section_path=candidate.section_path,
-                    text=candidate.text[:300],
-                    bbox=candidate.bbox,
-                    char_start=candidate.char_start,
-                    char_end=candidate.char_end,
-                    source_hash=candidate.source_hash,
-                    confidence=candidate.score,
+                    document_block_id=candidate["block_id"],
+                    document_id=candidate["document_id"],
+                    page_number=candidate["page_number"],
+                    section_path=candidate["section_path"],
+                    text=candidate["text"][:300],
+                    bbox=candidate["bbox"],
+                    bbox_coordinate_space=candidate["bbox_coordinate_space"],
+                    char_start=candidate["char_start"],
+                    char_end=candidate["char_end"],
+                    source_hash=candidate["source_hash"],
+                    confidence=candidate["score"],
                     verifier_status="pending",
                 )
             )
@@ -1663,13 +1798,7 @@ class AnalysisRunRepository:
         return promoted
 
     def _archive_report(self, run: AnalysisRun) -> int:
-        """Persist the final report into the knowledge library and retrieval index.
-
-        Idempotent per run: the DB row is keyed by source_run_id, and section
-        blocks reuse deterministic block_ids under the shared
-        ``knowledge_reports`` index (append semantics, replace=False) so later
-        runs can retrieve historical conclusions. Failures are tolerated — a
-        completed analysis must never be failed by archival."""
+        """Persist the final report into the report library, idempotently per run."""
 
         if run.report is None or not run.report.markdown.strip():
             return 0
@@ -1717,38 +1846,7 @@ class AnalysisRunRepository:
                 )
             )
             return 0
-        blocks = [
-            DocumentBlock(
-                block_id=f"reportsec_{run.run_id}_{index:03d}",
-                document_id=f"report_{run.run_id}",
-                page_number=0,
-                section_path=f"{run.company_name}/{section['title']}",
-                block_type="report_section",
-                text=section["text"][:4000],
-                bbox=[],
-                source_hash=hashlib.sha256(section["text"].encode("utf-8")).hexdigest(),
-            )
-            for index, section in enumerate(sections)
-            if section["text"].strip()
-        ]
-        if not blocks:
-            return 0
-        try:
-            return self.search_index.index_blocks(
-                run_id="knowledge_reports", blocks=blocks, replace=False
-            )
-        except Exception as exc:
-            run.events.append(
-                _event(
-                    "tool_failed",
-                    "report_library",
-                    "报告索引失败",
-                    f"报告已入库，但检索索引失败：{type(exc).__name__}: {exc}",
-                    stage_key="quality_review",
-                    action_label="报告沉淀",
-                )
-            )
-            return 0
+        return len([section for section in sections if section["text"].strip()])
 
     def _run_debate_stage(self, run: AnalysisRun) -> AnalysisRun:
         """Run the 2-round expert debate phase between risk_identification and cross_validation."""
@@ -2042,7 +2140,9 @@ class AnalysisRunRepository:
             removed_evidence_ids = {
                 item.evidence_id for item in run.evidence if item.finding_id in removed_ids
             }
-            run.evidence = [item for item in run.evidence if item.finding_id not in removed_ids]
+            for item in run.evidence:
+                if item.finding_id in removed_ids:
+                    item.verifier_status = "rejected_by_debate"
             for module in run.module_results:
                 module["finding_ids"] = [
                     fid
@@ -2467,6 +2567,37 @@ def _dedupe_evidence(evidence: list[RunEvidence]) -> list[RunEvidence]:
     return deduped
 
 
+def _chunk_evidence_candidate(item: ChunkSearchResult) -> dict[str, Any]:
+    metadata = item.metadata if isinstance(item.metadata, dict) else {}
+    region = next(
+        (
+            candidate
+            for candidate in item.merged_bboxes
+            if isinstance(candidate, dict)
+            and int(candidate.get("page_idx", -1)) == item.page_idx
+        ),
+        {},
+    )
+    return {
+        "block_id": item.chunk_id,
+        "document_id": item.document_id,
+        "page_number": item.page_idx,
+        "section_path": str(metadata.get("section_path") or item.chunk_type),
+        "text": item.text,
+        "bbox": [float(value) for value in region.get("bbox", [])],
+        "bbox_coordinate_space": str(
+            metadata.get("bbox_coordinate_space") or "pdf_points"
+        ),
+        "char_start": int(metadata.get("char_start") or 0),
+        "char_end": int(metadata.get("char_end") or 0),
+        "source_hash": str(
+            metadata.get("source_hash")
+            or hashlib.sha256(item.text.encode("utf-8")).hexdigest()
+        ),
+        "score": item.score,
+    }
+
+
 def _block_candidates_for_finding(
     finding: RiskFinding,
     blocks: list[DocumentBlock],
@@ -2491,6 +2622,7 @@ def _block_candidates_for_finding(
                 "section_path": block.section_path,
                 "text": block.text,
                 "bbox": block.bbox,
+                "bbox_coordinate_space": block.bbox_coordinate_space,
                 "char_start": block.char_start,
                 "char_end": block.char_end,
                 "source_hash": block.source_hash,
@@ -2511,6 +2643,8 @@ def _apply_verification(
         status = status_by_finding.get(finding.finding_id, "needs_human_review")
         finding.requires_human_review = status in {"weakly_supported", "needs_human_review"}
     for item in evidence:
+        if item.verifier_status == "rejected_by_debate":
+            continue
         item.verifier_status = status_by_finding.get(item.finding_id, "needs_human_review")
 
 

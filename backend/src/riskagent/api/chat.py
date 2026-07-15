@@ -1,99 +1,15 @@
-"""Document chat routes."""
+"""General chat routes."""
 
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from riskagent.documents import DocumentBlock, get_default_document_repository
 from riskagent.providers.llm import get_default_llm_client
-
-
-router = APIRouter(prefix="/documents", tags=["chat"])
-
-
-class AskRequest(BaseModel):
-    question: str
-    top_k: int = 6
-
-
-class AskCitation(BaseModel):
-    block_id: str
-    page_number: int
-    section_path: str
-    snippet: str
-
-
-def _retrieve(blocks: list[DocumentBlock], query: str, top_k: int) -> list[DocumentBlock]:
-    limit = max(1, top_k)
-    terms = _terms(query)
-    if not terms:
-        return blocks[:limit]
-    scored = []
-    for block in blocks:
-        text = block.text.lower()
-        score = sum(text.count(term) for term in terms)
-        if score > 0:
-            scored.append((score, block))
-    scored.sort(key=lambda item: item[0], reverse=True)
-    return [block for _, block in scored[:limit]] or blocks[:limit]
-
-
-@router.post("/{document_id}/ask")
-async def ask_document(document_id: str, payload: AskRequest) -> StreamingResponse:
-    try:
-        blocks = get_default_document_repository().get_blocks(document_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail="Document not found") from exc
-
-    retrieved = _retrieve(blocks, payload.question, payload.top_k)
-    messages = _messages(payload.question, retrieved)
-
-    async def event_source() -> AsyncIterator[str]:
-        try:
-            async for delta in get_default_llm_client().chat_stream(messages):
-                yield f"data: {json.dumps({'type': 'delta', 'delta': delta}, ensure_ascii=False)}\n\n"
-            citations = [
-                AskCitation(
-                    block_id=block.block_id,
-                    page_number=block.page_number,
-                    section_path=block.section_path,
-                    snippet=block.text[:240],
-                ).model_dump()
-                for block in retrieved
-            ]
-            yield f"data: {json.dumps({'type': 'done', 'citations': citations, 'answer_complete': True}, ensure_ascii=False)}\n\n"
-        except Exception as exc:
-            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
-
-    return StreamingResponse(
-        event_source(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
-
-
-def _messages(question: str, blocks: list[DocumentBlock]) -> list[dict[str, str]]:
-    snippets = "\n\n".join(
-        f"[P.{block.page_number}] ({block.section_path}) {block.text}" for block in blocks
-    )
-    return [
-        {
-            "role": "system",
-            "content": f"严格基于下方招股书片段回答；无法回答时直说；引用时用 [P.<页码>]。\n\n{snippets}",
-        },
-        {"role": "user", "content": question},
-    ]
-
-
-def _terms(query: str) -> list[str]:
-    lowered = query.lower()
-    return re.findall(r"[a-z0-9]+|[\u4e00-\u9fff]{2,}", lowered)
 
 
 general_router = APIRouter(tags=["chat"])

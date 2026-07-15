@@ -12,8 +12,6 @@ services:
       CORS_ALLOW_ORIGINS: http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174
       DATABASE_URL: postgresql+psycopg://prospect_alpha:prospect_alpha@postgres:5432/prospect_alpha
       REDIS_URL: redis://redis:6379/0
-      QDRANT_URL: http://qdrant:6333
-      VECTOR_STORE_PROVIDER: qdrant
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: root
       MINIO_SECRET_KEY: root1234
@@ -23,6 +21,11 @@ services:
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-v4}
+      EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-1024}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
     ports:
       - "8000:8000"
     volumes:
@@ -32,8 +35,6 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      qdrant:
-        condition: service_started
       minio:
         condition: service_started
     healthcheck:
@@ -54,17 +55,20 @@ services:
       LANGGRAPH_CHECKPOINT_BACKEND: postgres
       DATABASE_URL: postgresql+psycopg://prospect_alpha:prospect_alpha@postgres:5432/prospect_alpha
       REDIS_URL: redis://redis:6379/0
-      QDRANT_URL: http://qdrant:6333
-      VECTOR_STORE_PROVIDER: qdrant
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: root
-      MINIO_SECRET_KEY: root
+      MINIO_SECRET_KEY: root1234
       MINIO_SECURE: "0"
       OBJECT_STORE_PROVIDER: minio
       OBJECT_STORE_BUCKET: prospect-alpha
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-v4}
+      EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-1024}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
     volumes:
       - agent_runtime_data:/app/data/agent_runtime
     depends_on:
@@ -72,13 +76,14 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      qdrant:
-        condition: service_started
       minio:
         condition: service_started
 
   postgres:
-    image: postgres:16
+    build:
+      context: .
+      dockerfile: docker/postgres/Dockerfile
+    image: prospect-alpha-postgres-pgvector-jieba:pg16
     environment:
       POSTGRES_DB: prospect_alpha
       POSTGRES_USER: prospect_alpha
@@ -103,14 +108,6 @@ services:
       timeout: 5s
       retries: 12
 
-  qdrant:
-    image: qdrant/qdrant:v1.12.1
-    ports:
-      - "6333:6333"
-      - "6334:6334"
-    volumes:
-      - qdrant_data:/qdrant/storage
-
   minio:
     image: minio/minio:RELEASE.2024-10-13T13-34-11Z
     command: server /data --console-address ":9001"
@@ -126,5 +123,4 @@ services:
 volumes:
   agent_runtime_data:
   postgres_data:
-  qdrant_data:
   minio_data:

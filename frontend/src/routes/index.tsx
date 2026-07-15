@@ -19,7 +19,9 @@ import {
   getAgents,
   getAnalyses,
   getAnalysisOptions,
+  listDocuments,
   uploadDocument,
+  waitForDocumentReady,
   type AnalysisOptions,
   type UploadedDocument,
 } from "@/lib/data-service";
@@ -52,6 +54,9 @@ function inferCompanyName(text: string, document?: UploadedDocument | null) {
   const trimmed = text.trim();
   const quoted = trimmed.match(/[「《“"]([^」》”"]{2,40})[」》”"]/);
   if (quoted?.[1]) return quoted[1];
+  if (document?.filename && /(?:该|上传的)\s*PDF/i.test(trimmed)) {
+    return document.filename.replace(/\.pdf$/i, "");
+  }
   const companyMatch = trimmed.match(
     /([\u4e00-\u9fa5A-Za-z0-9-]{2,40})(?:公司|集团|科技|时代|控股|生物|健康|股份|有限)?/,
   );
@@ -94,6 +99,7 @@ function createSessionId() {
 function WorkspacePage() {
   const navigate = useNavigate();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const processingDocumentIdRef = useRef<string | null>(null);
   const [analyses, setAnalyses] = useState<AnalysisSummary[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [options, setOptions] = useState<AnalysisOptions | null>(null);
@@ -102,7 +108,9 @@ function WorkspacePage() {
     "请根据我上传的 PDF，对该 PDF 所示企业进行 IPO 上市风险审核。",
   );
   const [uploadedDocument, setUploadedDocument] = useState<UploadedDocument | null>(null);
+  const [availableDocuments, setAvailableDocuments] = useState<UploadedDocument[]>([]);
   const [uploading, setUploading] = useState(false);
+  const [documentProcessing, setDocumentProcessing] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [dispatching, setDispatching] = useState(false);
@@ -116,12 +124,13 @@ function WorkspacePage() {
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([getAnalyses(), getAgents(), getAnalysisOptions()]).then(
-      ([analysesData, agentsData, optionsData]) => {
+    Promise.all([getAnalyses(), getAgents(), getAnalysisOptions(), listDocuments()]).then(
+      ([analysesData, agentsData, optionsData, documentsData]) => {
         if (cancelled) return;
         setAnalyses(analysesData);
         setAgents(agentsData);
         setOptions(optionsData);
+        setAvailableDocuments(documentsData);
       },
     );
     return () => {
@@ -151,7 +160,9 @@ function WorkspacePage() {
   const activeRuleSet =
     options?.risk_rule_sets.find((item) => item.active) ?? options?.risk_rule_sets[0];
   const deepDepth = options?.analysis_depths.find((item) => item.depth === "deep");
-  const canConfirm = Boolean(uploadedDocument && requestText.trim() && !uploading);
+  const canConfirm = Boolean(
+    uploadedDocument && uploadedDocument.block_count > 0 && requestText.trim() && !uploading,
+  );
 
   return (
     <div className="relative isolate">
@@ -263,10 +274,54 @@ function WorkspacePage() {
                 </div>
               ) : null}
 
+              {availableDocuments.length > 0 ? (
+                <label className="mb-3 block text-left">
+                  <span className="mb-1.5 block text-[11px] font-medium text-muted-foreground">
+                    选择数据库中已有的招股书（无需重新上传或解析）
+                  </span>
+                  <select
+                    aria-label="选择已有招股书"
+                    value={uploadedDocument?.document_id ?? ""}
+                    onChange={(event) => {
+                      const selected = availableDocuments.find(
+                        (document) => document.document_id === event.target.value,
+                      );
+                      setUploadedDocument(selected ?? null);
+                      processingDocumentIdRef.current =
+                        selected && selected.block_count <= 0 ? selected.document_id : null;
+                      setDocumentProcessing(Boolean(selected && selected.block_count <= 0));
+                      setFlowError(
+                        selected?.processing_status === "failed"
+                          ? "该文档的 MinerU 解析失败，请检查后端日志后重新上传。"
+                          : null,
+                      );
+                      if (selected && selected.block_count <= 0) {
+                        void monitorDocumentProcessing(selected.document_id);
+                      }
+                    }}
+                    className="h-9 w-full rounded-sm border border-border bg-background px-3 text-[12px] text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                  >
+                    <option value="">请选择已有 PDF</option>
+                    {availableDocuments.map((document) => (
+                      <option key={document.document_id} value={document.document_id}>
+                        {document.filename} · {document.page_count} 页 ·{" "}
+                        {document.block_count > 0
+                          ? `${document.block_count} 个检索块`
+                          : document.processing_status === "failed"
+                            ? "解析失败"
+                            : "MinerU 后台解析中"}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : null}
+
               <div className="flex flex-wrap items-center gap-3">
                 <span className="text-[11px] text-muted-foreground">
                   {uploadedDocument
-                    ? "PDF 已上传；点击启动后确认分析范围"
+                    ? documentProcessing
+                      ? "PDF 已上传；MinerU 正在后台解析并写入 PostgreSQL，可继续浏览页面"
+                      : "PDF 已选择；点击启动后确认分析范围"
                     : "选择或拖拽招股书 PDF 后，即可启动 IPO 风险审核"}
                 </span>
                 <div className="ml-auto flex items-center gap-2">
@@ -280,7 +335,7 @@ function WorkspacePage() {
                     ) : (
                       <UploadCloud className="size-3.5" />
                     )}
-                    {uploadedDocument ? "重新选择 PDF" : "上传 PDF"}
+                    {uploadedDocument ? "上传其他 PDF" : "上传 PDF"}
                   </button>
                   <button
                     onClick={() => {
@@ -506,10 +561,43 @@ function WorkspacePage() {
     try {
       const document = await uploadDocument(file);
       setUploadedDocument(document);
+      setAvailableDocuments((current) => [
+        document,
+        ...current.filter((item) => item.document_id !== document.document_id),
+      ]);
+      if (document.block_count <= 0) {
+        void monitorDocumentProcessing(document.document_id);
+      } else {
+        setDocumentProcessing(false);
+      }
     } catch (err) {
       setFlowError(err instanceof Error ? err.message : "PDF 上传失败");
     } finally {
       setUploading(false);
+    }
+  }
+
+  async function monitorDocumentProcessing(documentId: string) {
+    processingDocumentIdRef.current = documentId;
+    setDocumentProcessing(true);
+    try {
+      const ready = await waitForDocumentReady(documentId, (current) => {
+        setUploadedDocument((selected) =>
+          selected?.document_id === documentId ? current : selected,
+        );
+      });
+      setUploadedDocument((selected) => (selected?.document_id === documentId ? ready : selected));
+      setAvailableDocuments((current) => [
+        ready,
+        ...current.filter((item) => item.document_id !== ready.document_id),
+      ]);
+    } catch (err) {
+      setFlowError(err instanceof Error ? err.message : "MinerU 解析失败");
+    } finally {
+      if (processingDocumentIdRef.current === documentId) {
+        processingDocumentIdRef.current = null;
+        setDocumentProcessing(false);
+      }
     }
   }
 

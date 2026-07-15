@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
+from riskagent import analysis_runs as analysis_runs_module
 from riskagent.agents import debate as debate_module
 from riskagent.agents.debate import DebatePhaseResult
 from riskagent.agents.orchestrator import ArbiterRuling
@@ -15,45 +15,18 @@ from riskagent.analysis_runs import (
     RunEvidence,
 )
 from riskagent.risk_rules import RiskRuleRepository
-
-
-class _SupplementSearchIndex:
-    def __init__(self) -> None:
-        self.calls: list[dict[str, Any]] = []
-
-    def search(self, *, run_id: str, query: str, limit: int = 5):
-        self.calls.append({"run_id": run_id, "query": query, "limit": limit})
-        return [
-            SimpleNamespace(
-                block_id="block-supplement",
-                document_id="doc-supplement",
-                page_number=9,
-                section_path="风险因素/补充证据",
-                text="补充证据显示客户集中度和回款风险仍需关注。",
-                bbox=[0, 0, 10, 10],
-                char_start=0,
-                char_end=24,
-                source_hash="hash-supplement",
-                score=0.88,
-            )
-        ]
+from riskagent.retrieval import ChunkSearchResult
 
 
 def _repository(
     tmp_path: Path,
     analysis_repo_factory,
-    *,
-    search_index: Any | None = None,
 ) -> AnalysisRunRepository:
-    kwargs: dict[str, Any] = {}
-    if search_index is not None:
-        kwargs["search_index"] = search_index
     return analysis_repo_factory(
         rule_repository=RiskRuleRepository(
             Path(__file__).parents[1] / "configs" / "risk_rules.yaml"
         ),
         path=tmp_path / "runs.yaml",
-        **kwargs,
     )
 
 
@@ -159,6 +132,78 @@ def test_removed_finding_ids_actually_removed(tmp_path, monkeypatch, analysis_re
     run = repo._run_debate_stage(_run_with_findings(repo))
 
     assert [finding.finding_id for finding in run.findings] == ["f2"]
+    rejected = next(item for item in run.evidence if item.evidence_id == "ev-f1")
+    assert rejected.verifier_status == "rejected_by_debate"
+
+
+def test_legacy_rejected_evidence_is_recovered_only_from_real_chunks(
+    tmp_path, monkeypatch, analysis_repo_factory
+):
+    repo = _repository(tmp_path, analysis_repo_factory)
+    repo.use_database = True
+    run = _run_with_findings(repo)
+    run.evidence = []
+    run.events = [
+        {
+            "event_type": "evidence_found",
+            "payload": {
+                "evidence_id": "ev-legacy",
+                "finding_id": "f-removed",
+                "document_id": "doc-real",
+                "document_block_id": "chunk-real",
+                "page_number": 7,
+                "bbox": [100, 200, 300, 400],
+                "confidence": 0.71,
+            },
+        },
+        {
+            "event_type": "evidence_found",
+            "payload": {
+                "evidence_id": "ev-unmatched",
+                "document_id": "doc-real",
+                "document_block_id": "missing",
+                "page_number": 99,
+                "bbox": [1, 2, 3, 4],
+            },
+        },
+    ]
+
+    chunk = ChunkSearchResult(
+        chunk_id="chunk-real",
+        document_id="doc-real",
+        doc_key="real",
+        chunk_type="text",
+        text="真实 PostgreSQL 原文证据。",
+        page_idx=7,
+        source_file="real.pdf",
+        source_item_indices=[1],
+        bbox_refs=[],
+        merged_bboxes=[{"page_idx": 7, "bbox": [100, 200, 300, 400]}],
+        image_path=None,
+        mineru_img_path=None,
+        table_html=None,
+        metadata={
+            "section_path": "风险因素",
+            "bbox_coordinate_space": "normalized_1000",
+        },
+    )
+
+    class FakeIndexer:
+        def list_document_chunks(self, document_id):
+            assert document_id == "doc-real"
+            return [chunk]
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(analysis_runs_module, "PostgresChunkIndexer", FakeIndexer)
+
+    recovered = repo._recover_rejected_evidence(run)
+
+    assert [item.evidence_id for item in recovered] == ["ev-legacy"]
+    assert recovered[0].document_block_id == "chunk-real"
+    assert recovered[0].bbox_coordinate_space == "normalized_1000"
+    assert recovered[0].verifier_status == "rejected_by_debate"
 
 
 def test_approved_finding_ids_confidence_boosted(tmp_path, monkeypatch, analysis_repo_factory):
@@ -178,7 +223,6 @@ def test_approved_finding_ids_confidence_boosted(tmp_path, monkeypatch, analysis
 def test_request_supplement_triggers_supplement_loop(
     tmp_path, monkeypatch, analysis_repo_factory
 ):
-    search_index = _SupplementSearchIndex()
     monkeypatch.setattr(
         debate_module,
         "run_debate_phase_sync",
@@ -187,15 +231,12 @@ def test_request_supplement_triggers_supplement_loop(
             required_supplements=["补充回款风险原文证据"],
         ),
     )
-    repo = _repository(tmp_path, analysis_repo_factory, search_index=search_index)
+    repo = _repository(tmp_path, analysis_repo_factory)
     run = repo._run_debate_stage(_run_with_findings(repo))
 
-    assert len(run.evidence) == 3
-    assert search_index.calls
-    assert any(
-        event["event_type"] == "supplement_evidence_collected"
-        for event in run.events
-    )
+    # A supplement without a document_id cannot query the document-scoped
+    # PostgreSQL index, and must not fall back to the legacy run index.
+    assert len(run.evidence) == 2
 
 
 def test_escalate_human_pauses_pipeline(tmp_path, monkeypatch, analysis_repo_factory):

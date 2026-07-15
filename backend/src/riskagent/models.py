@@ -8,6 +8,21 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from riskagent.database import Base
 
 
+class ProspectusDocumentRow(Base):
+    __tablename__ = "prospectus_documents"
+
+    document_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    doc_key: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    original_filename: Mapped[str] = mapped_column(String(512))
+    raw_pdf_path: Mapped[str] = mapped_column(String(1024))
+    content_type: Mapped[str] = mapped_column(String(128), default="application/pdf")
+    file_sha256: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    file_size_bytes: Mapped[int] = mapped_column(Integer)
+    source_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    status: Mapped[str] = mapped_column(String(64), default="registered", index=True)
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class DocumentAssetRow(Base):
     __tablename__ = "documents"
 
@@ -87,20 +102,6 @@ class ReportLibraryRow(Base):
     markdown: Mapped[str] = mapped_column(Text)
     sections: Mapped[list[dict]] = mapped_column(JSON)
     created_at: Mapped[str] = mapped_column(String(64))
-
-
-class RetrievalIndexRow(Base):
-    __tablename__ = "retrieval_index"
-
-    index_id: Mapped[str] = mapped_column(String(160), primary_key=True)
-    run_id: Mapped[str] = mapped_column(String(64), index=True)
-    document_id: Mapped[str] = mapped_column(String(64), index=True)
-    block_id: Mapped[str] = mapped_column(String(128), index=True)
-    text: Mapped[str] = mapped_column(Text)
-    terms: Mapped[list[str]] = mapped_column(JSON)
-    embedding: Mapped[list[float]] = mapped_column(JSON)
-    payload: Mapped[dict] = mapped_column(JSON)
-    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class AgentExpertRow(Base):

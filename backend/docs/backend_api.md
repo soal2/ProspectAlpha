@@ -81,27 +81,13 @@ No returned agent is implicitly part of a fixed team. The strategist chooses the
 
 ## Documents
 
-### `POST /documents`
-
-Creates a document asset from plain text.
-
-Request body:
-
-```json
-{
-  "filename": "prospectus.txt",
-  "content_text": "招股书正文...",
-  "source_url": "https://example.com/prospectus"
-}
-```
-
 ### `POST /documents/upload`
 
-Uploads and parses a PDF or text document.
+Uploads, parses, chunks, and indexes a prospectus PDF.
 
 Request: `multipart/form-data`
 
-- `file`: required PDF or text file, max 50 MB
+- `file`: required PDF file
 - `source_url`: optional source URL
 
 ### `GET /documents/{document_id}`
@@ -120,7 +106,11 @@ Document response fields:
 - `text_chars`
 - `block_count`
 - `source_url`
-- `created_at`
+- `storage_uri` points to the original-PDF route below
+
+### `GET /documents/{document_id}/file`
+
+Streams the original prospectus with `application/pdf` and inline content disposition.
 
 Errors:
 
@@ -263,6 +253,17 @@ Streams analysis events as Server-Sent Events. Terminal runs end with a `done` e
 ### `GET /analysis-runs/{run_id}/evidence`
 
 Returns source-grounded evidence snippets for the run.
+
+Location fields:
+
+- `document_id`: source prospectus identifier
+- `page_number`: 0-based PDF page index
+- `bbox`: primary page-local MinerU bbox
+- `bbox_regions[]`: page-local bbox unions; regions from different pages are never merged
+- `bbox_coordinate_space`: MinerU normalized `1000 x 1000`, top-left origin
+
+Clients display `page_number + 1`, request the PDF.js page with `page_number + 1`,
+and scale bbox coordinates from `bbox_coordinate_space` into the rendered viewport.
 
 ### `GET /analysis-runs/{run_id}/findings`
 

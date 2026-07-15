@@ -19,7 +19,6 @@ from riskagent.models import (
     AnalysisRunRow,
     DocumentAssetRow,
     EvidenceLibraryRow,
-    RetrievalIndexRow,
     RiskRuleSetRow,
 )
 from riskagent.seed_data import AGENT_EXPERTS, AGENT_SPECS
@@ -65,8 +64,8 @@ def test_reset_database_clears_business_tables_and_reseeds(tmp_path: Path) -> No
 
     deleted = reset_database(db_url)
 
-    # All 10 tables were touched.
-    assert len(deleted) == 10
+    # All current reset-managed tables were touched.
+    assert len(deleted) == 9
     for table_name, count in deleted.items():
         assert isinstance(table_name, str)
         assert isinstance(count, int)
@@ -76,7 +75,6 @@ def test_reset_database_clears_business_tables_and_reseeds(tmp_path: Path) -> No
         assert session.scalar(select(func.count()).select_from(DocumentAssetRow)) == 0
         assert session.scalar(select(func.count()).select_from(AnalysisRunRow)) == 0
         assert session.scalar(select(func.count()).select_from(EvidenceLibraryRow)) == 0
-        assert session.scalar(select(func.count()).select_from(RetrievalIndexRow)) == 0
 
     # Reference tables must be re-populated to the seed constants' length.
     with session_factory() as session:
@@ -96,7 +94,7 @@ def test_reset_database_is_idempotent(tmp_path: Path) -> None:
     reset_database(db_url)
     deleted_again = reset_database(db_url)
 
-    assert len(deleted_again) == 10
+    assert len(deleted_again) == 9
     with session_factory() as session:
         assert session.scalar(select(func.count()).select_from(AgentExpertRow)) == len(AGENT_EXPERTS)
         assert session.scalar(select(func.count()).select_from(AgentSpecRow)) == len(AGENT_SPECS)

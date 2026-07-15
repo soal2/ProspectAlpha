@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
-from sqlalchemy import create_engine
-from sqlalchemy.orm import DeclarativeBase, sessionmaker
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
@@ -43,6 +45,25 @@ def session_factory_from_url(database_url: str) -> sessionmaker:
 
 engine = make_engine()
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+
+
+@contextmanager
+def session_scope(session_factory: sessionmaker = SessionLocal) -> Iterator[Session]:
+    session = session_factory()
+    try:
+        yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def check_database_connection(session_factory: sessionmaker = SessionLocal) -> bool:
+    with session_factory() as session:
+        session.execute(text("SELECT 1"))
+    return True
 
 
 def init_db(database_url: str | None = None) -> None:

@@ -1,0 +1,24 @@
+pdf_processor:
+  default: mineru
+  mineru:
+    method: ocr
+    backend: pipeline
+    lang: chinese_cht
+    reuse_existing: true
+    image_analysis: true
+
+chunker:
+  default: block
+  block:
+    max_chars: 1200
+    include_types:
+      - text
+      - table
+      - image
+    skip_types:
+      - header
+      - footer
+      - page_number
+    merge_text: true
+    require_image_description: true
+    image_context_window_blocks: 3
