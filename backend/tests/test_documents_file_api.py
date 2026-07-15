@@ -12,6 +12,8 @@ from pathlib import Path
 from riskagent.analysis_runs import RunEvidence
 from riskagent.api.main import create_app
 from riskagent.documents import DocumentRepository
+from riskagent.ingestion import ProspectusIngestionRepository, ProspectusRegisterRequest
+from riskagent.retrieval import ChunkSearchResult
 from riskagent.providers.object_store import LocalObjectStore
 from riskagent.risk_rules import RiskRuleRepository
 
@@ -110,6 +112,79 @@ def test_local_object_store_get_bytes(tmp_path) -> None:
     assert store.get_bytes(key="documents/x.pdf") == b"%PDF-abc"
     with pytest.raises(KeyError):
         store.get_bytes(key="documents/missing.pdf")
+
+
+def test_registered_postgres_document_is_visible_without_reparsing(tmp_path) -> None:
+    from sqlalchemy.orm import sessionmaker
+
+    from riskagent.database import make_engine
+
+    class ExistingChunkIndexer:
+        document_id = ""
+        normalized: list[str] = []
+
+        def normalize_legacy_bbox_contract(self, document_id: str) -> int:
+            self.normalized.append(document_id)
+            return 1
+
+        def indexed_chunk_count(self, document_id: str) -> int:
+            return 1 if document_id == self.document_id else 0
+
+        def list_document_chunks(self, document_id: str):
+            assert document_id == self.document_id
+            return [
+                ChunkSearchResult(
+                    chunk_id=f"{document_id}_chunk_1",
+                    document_id=document_id,
+                    doc_key="existing",
+                    chunk_type="text",
+                    text="真实招股书风险因素",
+                    page_idx=3,
+                    source_file="existing.pdf",
+                    source_item_indices=[1],
+                    bbox_refs=[],
+                    merged_bboxes=[{"page_idx": 3, "bbox": [10, 20, 30, 40]}],
+                    image_path=None,
+                    mineru_img_path=None,
+                    table_html=None,
+                    metadata={"bbox_coordinate_space": "normalized_1000"},
+                )
+            ]
+
+    engine = make_engine(f"sqlite:///{tmp_path / 'registered.db'}")
+    session_factory = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+    pdf_path = tmp_path / "existing.pdf"
+    pdf_path.write_bytes(_sample_pdf_bytes("Existing prospectus"))
+    ingestion = ProspectusIngestionRepository(
+        raw_dir=tmp_path / "raw",
+        session_factory=session_factory,
+    )
+    registration = ingestion.register(
+        ProspectusRegisterRequest(source_path=pdf_path, doc_key="existing")
+    )
+    indexer = ExistingChunkIndexer()
+    indexer.document_id = registration.document_id
+
+    repository = DocumentRepository(
+        session_factory=session_factory,
+        use_database=True,
+        object_store=LocalObjectStore(tmp_path / "objects", bucket="test"),
+        chunk_indexer=indexer,  # type: ignore[arg-type]
+    )
+
+    listed = repository.list_assets()
+    assert [(item.document_id, item.block_count) for item in listed] == [
+        (registration.document_id, 1)
+    ]
+    content, content_type, filename = repository.get_file(registration.document_id)
+    assert content == pdf_path.read_bytes()
+    assert content_type == "application/pdf"
+    assert filename == "existing.pdf"
+    assert repository.prepare_for_retrieval(registration.document_id).block_count == 1
+    assert indexer.normalized == [registration.document_id]
+    blocks = repository.get_blocks(registration.document_id)
+    assert blocks[0].page_number == 3
+    assert blocks[0].bbox == [10.0, 20.0, 30.0, 40.0]
 
 
 def test_run_evidence_backfills_document_id_from_block_id() -> None:

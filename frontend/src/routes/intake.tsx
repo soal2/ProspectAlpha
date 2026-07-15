@@ -425,6 +425,7 @@ function IntakePage() {
                                   ? {
                                       page: region.page_number,
                                       bbox: region.bbox,
+                                      coordinateSpace: c.bbox_coordinate_space,
                                       label: `${c.section_path} · 证据 ${c.block_id}`,
                                     }
                                   : { page: c.page_number, bbox: [], label: c.section_path },

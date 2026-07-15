@@ -1271,6 +1271,39 @@ The environment reported a PostgreSQL collation-version warning (database 2.41
 versus container operating system 2.36). It did not affect this acceptance run, but the
 local database should be refreshed during infrastructure maintenance.
 
+### Existing Indexed Prospectus Discovery
+
+The document API merges frontend-uploaded `documents` with registered
+`prospectus_documents` that already have rows in `rag.prospectus_chunks`.
+Registered indexed prospectuses are therefore selectable by the frontend
+without copying, parsing, or embedding them again. Their canonical
+`raw_pdf_path` is served by `/documents/{document_id}/file`, and existing chunks
+are materialized as `DocumentBlock` values only when an analysis workflow asks
+for them.
+
+Legacy MinerU chunks are upgraded idempotently on first retrieval. Rows without
+`metadata.page_number_base=1` receive a one-time `page_idx + 1` update in the
+chunk row and both bbox JSON arrays, plus:
+
+```json
+{
+  "bbox_coordinate_space": "normalized_1000",
+  "page_number_base": 1
+}
+```
+
+No text, embedding, ranking data, or source-item linkage changes during this
+upgrade. New MinerU chunks write this metadata at chunk creation. PyMuPDF upload
+chunks explicitly use `bbox_coordinate_space=pdf_points`.
+
+The real pre-indexed `ysyy.pdf` was verified without rerunning MinerU or
+embedding: `doc_269f78d05439`, 700 pages, and 1091 PostgreSQL chunks appeared in
+the frontend. A question for the stock code returned `6855`; citation
+`doc_269f78d05439_chunk_000001` opened PDF page 1 and highlighted normalized
+bbox `[55, 98, 247, 157]` over the cover text `股份代号: 6855`. At a 744 by 992
+pixel canvas, the observed padded overlay was left `37.922`, top `94.227`, width
+`148.859`, and height `64.531`, matching normalized scaling exactly.
+
 This implementation changes document/evidence data handling and evidence
 traceability and adds grounded document QA. Generated-report contracts are
 unchanged.

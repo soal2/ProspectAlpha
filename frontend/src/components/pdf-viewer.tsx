@@ -11,8 +11,9 @@ import { getDocumentFileUrl } from "@/lib/data-service";
 
 export interface PdfHighlight {
   page: number;
-  /** PyMuPDF bbox in PDF points, top-left origin, y-down: [x0, y0, x1, y1]. */
+  /** Top-left-origin, y-down bbox: [x0, y0, x1, y1]. */
   bbox: number[];
+  coordinateSpace?: "pdf_points" | "normalized_1000";
   label?: string;
 }
 
@@ -143,7 +144,12 @@ export function PdfViewer({
           if (highlight && highlight.page === currentPage && highlight.bbox?.length === 4) {
             const [x0, y0, x1, y1] = highlight.bbox;
             let left: number, top: number, width: number, height: number;
-            if ((viewport.rotation ?? 0) % 360 === 0) {
+            if (highlight.coordinateSpace === "normalized_1000") {
+              left = (x0 / 1000) * viewport.width;
+              top = (y0 / 1000) * viewport.height;
+              width = ((x1 - x0) / 1000) * viewport.width;
+              height = ((y1 - y0) / 1000) * viewport.height;
+            } else if ((viewport.rotation ?? 0) % 360 === 0) {
               left = x0 * scale;
               top = y0 * scale;
               width = (x1 - x0) * scale;

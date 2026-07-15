@@ -265,6 +265,9 @@ class BlockChunker:
                 chunks.append(chunk)
 
         flush_text()
+        for output_chunk in chunks:
+            output_chunk.metadata.setdefault("bbox_coordinate_space", "normalized_1000")
+            output_chunk.metadata.setdefault("page_number_base", 1)
         output_path = self._write_chunks(request.output_dir, chunks)
         return ChunkResult(
             document_id=document_id,

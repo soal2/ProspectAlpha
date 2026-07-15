@@ -32,6 +32,7 @@ class DocumentCitation:
     section_path: str
     snippet: str
     bbox_regions: list[dict[str, object]]
+    bbox_coordinate_space: str
 
 
 @dataclass(frozen=True)
@@ -100,6 +101,9 @@ def _citation(chunk: ChunkSearchResult) -> DocumentCitation:
         section_path=_section(chunk),
         snippet=chunk.text[:500],
         bbox_regions=_page_local_regions(chunk.merged_bboxes),
+        bbox_coordinate_space=str(
+            chunk.metadata.get("bbox_coordinate_space") or "pdf_points"
+        ),
     )
 
 

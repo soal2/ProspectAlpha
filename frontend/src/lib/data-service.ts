@@ -93,6 +93,7 @@ export interface AskCitation {
   section_path: string;
   snippet: string;
   bbox_regions: { page_number: number; bbox: number[] }[];
+  bbox_coordinate_space: "pdf_points" | "normalized_1000";
 }
 
 export interface AskResult {

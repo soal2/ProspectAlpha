@@ -11,6 +11,7 @@ from riskagent.retrieval.vector import vector_search
 class FakeCursor:
     def __init__(self, conn):
         self.conn = conn
+        self.rowcount = 0
 
     def __enter__(self):
         return self
@@ -20,6 +21,8 @@ class FakeCursor:
 
     def execute(self, sql, params=None):
         self.conn.calls.append({"sql": sql, "params": params})
+        if sql.lstrip().startswith("UPDATE"):
+            self.rowcount = 2
 
     def fetchall(self):
         return self.conn.rows
@@ -210,6 +213,28 @@ def test_postgres_chunk_indexer_search_requires_document_id():
         assert "document_id is required" in str(exc)
     else:
         raise AssertionError("expected ChunkIndexError")
+
+
+def test_legacy_bbox_contract_upgrade_is_document_scoped_and_idempotent():
+    conn = FakeConnection()
+    indexer = PostgresChunkIndexer(
+        schema="rag_test",
+        conn=conn,
+        embedding_client=FakeEmbeddingClient(),
+        embedding_dim=3,
+        ensure=False,
+    )
+
+    updated = indexer.normalize_legacy_bbox_contract("doc_ysyy")
+
+    assert updated == 2
+    call = conn.calls[-1]
+    assert 'UPDATE "rag_test".prospectus_chunks' in call["sql"]
+    assert "page_idx = chunk.page_idx + 1" in call["sql"]
+    assert "bbox_coordinate_space" in call["sql"]
+    assert "page_number_base" in call["sql"]
+    assert call["params"] == ("doc_ysyy",)
+    assert conn.commits == 1
 
 
 def test_create_chunk_indexer_factory_returns_postgres_indexer():

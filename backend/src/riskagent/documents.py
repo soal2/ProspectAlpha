@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import uuid
+from urllib.parse import unquote, urlparse
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,7 +24,7 @@ from riskagent.ingestion import (
     ProspectusRegisterRequest,
     ProspectusRegistration,
 )
-from riskagent.models import DocumentAssetRow, DocumentBlockRow
+from riskagent.models import DocumentAssetRow, DocumentBlockRow, ProspectusDocumentRow
 from riskagent.parsing import (
     ChunkResult,
     ChunkerFactory,
@@ -236,13 +237,23 @@ class DocumentRepository:
         on_progress: Callable[[int, int, int], None] | None = None,
     ) -> DocumentAsset:
         """Parse one asset and persist its searchable chunks in PostgreSQL."""
-        blocks = self.ensure_parsed(document_id, on_progress=on_progress)
         asset = self.get(document_id)
         configured_indexer = chunk_indexer or self.chunk_indexer
         if not self.use_database and configured_indexer is None:
-            return asset
+            self.ensure_parsed(document_id, on_progress=on_progress)
+            return self.get(document_id)
         indexer = configured_indexer or PostgresChunkIndexer()
         try:
+            if asset.storage_uri.startswith("file://"):
+                normalize = getattr(indexer, "normalize_legacy_bbox_contract", None)
+                if callable(normalize):
+                    normalize(document_id)
+            indexed_count = indexer.indexed_chunk_count(document_id)
+            if asset.storage_uri.startswith("file://") and indexed_count > 0:
+                if on_progress is not None:
+                    on_progress(asset.page_count, asset.page_count, indexed_count)
+                return asset
+            blocks = self.ensure_parsed(document_id, on_progress=on_progress)
             if indexer.indexed_chunk_count(document_id) != len(blocks):
                 indexed_count = indexer.index_chunks(
                     registration=_prospectus_registration(asset),
@@ -258,15 +269,21 @@ class DocumentRepository:
             raise RuntimeError(
                 f"PostgreSQL indexed {indexed_count} chunks for {len(blocks)} document blocks."
             )
-        return asset
+        return self.get(document_id)
 
     def get(self, document_id: str) -> DocumentAsset:
         if self.use_database:
             with self.session_factory() as session:
                 row = session.get(DocumentAssetRow, document_id)
-                if row is None:
-                    raise KeyError(document_id)
-                return _asset_from_row(row)
+                if row is not None:
+                    return _asset_from_row(row)
+                registered = session.get(ProspectusDocumentRow, document_id)
+            if registered is None:
+                raise KeyError(document_id)
+            return _asset_from_registered_row(
+                registered,
+                block_count=self._indexed_chunk_count(document_id),
+            )
         item = self._load_all().get(document_id)
         if item is None:
             raise KeyError(document_id)
@@ -275,6 +292,9 @@ class DocumentRepository:
     def get_file(self, document_id: str) -> tuple[bytes, str, str]:
         """Return (content, content_type, filename) for the original uploaded file."""
         asset = self.get(document_id)
+        if asset.storage_uri.startswith("file://"):
+            path = Path(unquote(urlparse(asset.storage_uri).path))
+            return path.read_bytes(), asset.content_type, asset.filename
         suffix = ".pdf" if asset.content_type == "application/pdf" else ".txt"
         key = f"documents/{document_id}{suffix}"
         content = self.object_store.get_bytes(key=key)
@@ -286,7 +306,20 @@ class DocumentRepository:
                 rows = session.scalars(
                     select(DocumentAssetRow).order_by(DocumentAssetRow.created_at.desc())
                 ).all()
-                return [_asset_from_row(row, include_blocks=False) for row in rows]
+                registered_rows = session.scalars(
+                    select(ProspectusDocumentRow).order_by(ProspectusDocumentRow.created_at.desc())
+                ).all()
+            assets = [_asset_from_row(row, include_blocks=False) for row in rows]
+            existing_ids = {asset.document_id for asset in assets}
+            for registered in registered_rows:
+                if registered.document_id in existing_ids:
+                    continue
+                block_count = self._indexed_chunk_count(registered.document_id)
+                if block_count <= 0:
+                    continue
+                assets.append(_asset_from_registered_row(registered, block_count=block_count))
+            assets.sort(key=lambda asset: asset.created_at, reverse=True)
+            return assets
         items = []
         for item in self._load_all().values():
             data = dict(item)
@@ -308,7 +341,10 @@ class DocumentRepository:
                 ).all()
                 if not rows:
                     if session.get(DocumentAssetRow, document_id) is None:
-                        raise KeyError(document_id)
+                        registered = session.get(ProspectusDocumentRow, document_id)
+                        if registered is None:
+                            raise KeyError(document_id)
+                        return self._indexed_document_blocks(document_id)
                 return [_block_from_row(row) for row in rows]
         item = self._load_all().get(document_id)
         if item is None:
@@ -326,6 +362,23 @@ class DocumentRepository:
             if item["file_sha256"] == file_sha256:
                 return DocumentAsset.model_validate(item)
         return None
+
+    def _indexed_chunk_count(self, document_id: str) -> int:
+        indexer = self.chunk_indexer or PostgresChunkIndexer()
+        try:
+            return indexer.indexed_chunk_count(document_id)
+        finally:
+            if self.chunk_indexer is None:
+                indexer.close()
+
+    def _indexed_document_blocks(self, document_id: str) -> list[DocumentBlock]:
+        indexer = self.chunk_indexer or PostgresChunkIndexer()
+        try:
+            chunks = indexer.list_document_chunks(document_id)
+        finally:
+            if self.chunk_indexer is None:
+                indexer.close()
+        return [_block_from_indexed_chunk(chunk) for chunk in chunks]
 
     def _save_asset(self, asset: DocumentAsset) -> None:
         if self.use_database:
@@ -596,6 +649,7 @@ def _document_chunks(
                 "char_end": block.char_end,
                 "source_hash": block.source_hash,
                 "parser_version": block.parser_version,
+                "bbox_coordinate_space": "pdf_points",
             },
         )
         for index, block in enumerate(blocks)
@@ -652,6 +706,62 @@ def _asset_from_row(row: DocumentAssetRow, include_blocks: bool = True) -> Docum
         source_url=row.source_url,
         created_at=row.created_at.isoformat() if hasattr(row.created_at, "isoformat") else str(row.created_at),
         blocks=[] if not include_blocks else [_block_from_row(block) for block in row.blocks],
+    )
+
+
+def _asset_from_registered_row(
+    row: ProspectusDocumentRow,
+    *,
+    block_count: int,
+) -> DocumentAsset:
+    raw_path = Path(row.raw_pdf_path)
+    if not raw_path.is_absolute():
+        raw_path = (BACKEND_ROOT.parent / raw_path).resolve()
+    page_count = 0
+    if raw_path.exists():
+        with fitz.open(raw_path) as pdf:
+            page_count = pdf.page_count
+    return DocumentAsset(
+        document_id=row.document_id,
+        filename=row.original_filename,
+        content_type=row.content_type,
+        file_sha256=row.file_sha256,
+        storage_uri=raw_path.as_uri(),
+        file_size_bytes=row.file_size_bytes,
+        page_count=page_count,
+        text_chars=0,
+        block_count=block_count,
+        source_url=row.source_url,
+        created_at=row.created_at.isoformat()
+        if hasattr(row.created_at, "isoformat")
+        else str(row.created_at),
+        blocks=[],
+    )
+
+
+def _block_from_indexed_chunk(chunk: Any) -> DocumentBlock:
+    metadata = chunk.metadata if isinstance(chunk.metadata, dict) else {}
+    bbox = next(
+        (
+            item.get("bbox", [])
+            for item in chunk.merged_bboxes
+            if isinstance(item, dict) and int(item.get("page_idx", -1)) == chunk.page_idx
+        ),
+        [],
+    )
+    text = str(chunk.text)
+    return DocumentBlock(
+        block_id=chunk.chunk_id,
+        document_id=chunk.document_id,
+        page_number=chunk.page_idx,
+        section_path=str(metadata.get("section_path") or chunk.chunk_type),
+        block_type=chunk.chunk_type,
+        text=text,
+        bbox=[float(value) for value in bbox],
+        char_start=int(metadata.get("char_start") or 0),
+        char_end=int(metadata.get("char_end") or len(text)),
+        source_hash=str(metadata.get("source_hash") or hashlib.sha256(text.encode()).hexdigest()),
+        parser_version=str(metadata.get("parser_version") or "postgres-index-v1"),
     )
 
 

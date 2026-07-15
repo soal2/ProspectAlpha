@@ -307,6 +307,58 @@ class PostgresChunkIndexer:
             row = cur.fetchone()
         return int(row[0]) if row else 0
 
+    def list_document_chunks(self, document_id: str) -> list[ChunkSearchResult]:
+        """Return already-indexed chunks without embedding or ranking calls."""
+        schema_sql = _quote_ident(self.schema)
+        doc_filter, doc_params = _document_id_filter(document_id)
+        with self.conn.cursor() as cur:
+            cur.execute(
+                f"""
+SELECT {_RESULT_COLUMNS}, 0.0 AS vector_score, 0.0 AS text_score, 0.0 AS score
+FROM {schema_sql}.prospectus_chunks
+WHERE TRUE {doc_filter}
+ORDER BY page_idx, chunk_id
+                """,
+                doc_params,
+            )
+            return [_search_result(row) for row in cur.fetchall()]
+
+    def normalize_legacy_bbox_contract(self, document_id: str) -> int:
+        """Upgrade pre-contract MinerU rows to 1-based pages without re-indexing."""
+        schema_sql = _quote_ident(self.schema)
+        with index_transaction(self.conn):
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    f"""
+UPDATE {schema_sql}.prospectus_chunks AS chunk
+SET page_idx = chunk.page_idx + 1,
+    bbox_refs = COALESCE(
+        (
+            SELECT jsonb_agg(
+                jsonb_set(item, '{{page_idx}}', to_jsonb((item->>'page_idx')::int + 1))
+            )
+            FROM jsonb_array_elements(chunk.bbox_refs) AS item
+        ),
+        '[]'::jsonb
+    ),
+    merged_bboxes = COALESCE(
+        (
+            SELECT jsonb_agg(
+                jsonb_set(item, '{{page_idx}}', to_jsonb((item->>'page_idx')::int + 1))
+            )
+            FROM jsonb_array_elements(chunk.merged_bboxes) AS item
+        ),
+        '[]'::jsonb
+    ),
+    metadata = COALESCE(chunk.metadata, '{{}}'::jsonb)
+        || '{{"bbox_coordinate_space":"normalized_1000","page_number_base":1}}'::jsonb
+WHERE chunk.document_id = %s
+  AND COALESCE(chunk.metadata->>'page_number_base', '0') <> '1'
+                    """,
+                    (document_id,),
+                )
+                return int(cur.rowcount or 0)
+
     def index_chunks_jsonl(
         self,
         *,

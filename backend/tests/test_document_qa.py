@@ -51,7 +51,10 @@ def _retriever(**kwargs) -> list[ChunkSearchResult]:
             image_path=None,
             mineru_img_path=None,
             table_html=None,
-            metadata={"section_path": "风险因素"},
+            metadata={
+                "section_path": "风险因素",
+                "bbox_coordinate_space": "normalized_1000",
+            },
             score=0.91,
         )
     ]
@@ -73,6 +76,7 @@ def test_document_qa_uses_document_scoped_postgres_retrieval_and_page_local_bbox
         {"page_number": 3, "bbox": [5.0, 20.0, 35.0, 45.0]},
         {"page_number": 4, "bbox": [1.0, 2.0, 3.0, 4.0]},
     ]
+    assert context.citations[0].bbox_coordinate_space == "normalized_1000"
 
 
 def test_document_ask_stream_contract(monkeypatch):

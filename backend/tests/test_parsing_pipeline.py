@@ -90,6 +90,8 @@ def test_block_chunker_outputs_unified_text_table_image_chunks(tmp_path):
     assert text_chunk.text == "第一段\n第二段"
     assert text_chunk.source_item_indices == [0, 1]
     assert text_chunk.merged_bboxes[0].bbox == [1.0, 2.0, 8.0, 9.0]
+    assert text_chunk.metadata["bbox_coordinate_space"] == "normalized_1000"
+    assert text_chunk.metadata["page_number_base"] == 1
 
     table_chunk = result.chunks[1]
     assert table_chunk.table_html is not None
