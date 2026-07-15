@@ -9,7 +9,6 @@ services:
     dockerfilePath: ./backend/Dockerfile
     dockerCommand: ./scripts/start_render.sh
     healthCheckPath: /health
-    maxShutdownDelaySeconds: 300
     autoDeployTrigger: checksPass
     buildFilter:
       paths:
