@@ -2,6 +2,7 @@ from pathlib import Path
 import time
 
 from fastapi.testclient import TestClient
+import yaml
 
 from riskagent.agents import debate as debate_module
 from riskagent.agents.exceptions import DebateLLMError
@@ -121,6 +122,31 @@ def test_analysis_create_rejects_legacy_preselected_expert_chain(monkeypatch):
     )
 
     assert response.status_code == 422
+
+
+def test_analysis_list_tolerates_legacy_persisted_preselected_expert_chain(
+    tmp_path, monkeypatch, analysis_repo_factory
+):
+    monkeypatch.setenv("USE_DATABASE", "0")
+    rule_repo = RiskRuleRepository(Path(__file__).parents[1] / "configs" / "risk_rules.yaml")
+    path = tmp_path / "runs.yaml"
+    repo = analysis_repo_factory(rule_repository=rule_repo, path=path)
+    run = repo.create_draft(
+        AnalysisRunCreate(company_name="历史 IPO", document_text="历史招股书正文")
+    )
+    persisted = run.model_dump()
+    persisted["input_payload"] = {
+        "company_name": "历史 IPO",
+        "document_text": "历史招股书正文",
+        "selected_agent_names": ["financial_agent", "legal_agent"],
+    }
+    path.write_text(yaml.safe_dump({run.run_id: persisted}, allow_unicode=True))
+    monkeypatch.setattr("riskagent.api.analysis._repo", lambda: repo)
+
+    response = TestClient(create_app()).get("/analysis-runs")
+
+    assert response.status_code == 200
+    assert response.json()[0]["run_id"] == run.run_id
 
 
 def test_analysis_run_persists_dynamic_strategy_agents_and_depth(

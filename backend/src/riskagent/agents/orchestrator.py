@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -117,20 +117,28 @@ async def orchestrate(
     company_name: str,
     document_summary: str,
     available_agents: list[dict[str, Any]],
+    on_delta: Callable[[str], None] | None = None,
+    on_response: Callable[[str], None] | None = None,
 ) -> StrategyDecision:
     """Ask the strategic model for a plan and strictly validate it against the live roster."""
 
     if not available_agents:
         raise ValueError("No executable expert agents are available.")
-    raw = await get_default_llm_client().chat_json(
-        _strategy_messages(
+    messages = _strategy_messages(
             user_requirement=user_requirement,
             company_name=company_name,
             document_summary=document_summary[:4000],
             available_agents=available_agents,
-        ),
-        temperature=0.1,
-    )
+        )
+    client = get_default_llm_client()
+    if on_delta or on_response:
+        raw, raw_response = await client.chat_json_stream(
+            messages, temperature=0.1, on_delta=on_delta
+        )
+        if on_response:
+            on_response(raw_response)
+    else:
+        raw = await client.chat_json(messages, temperature=0.1)
     return validate_strategy_decision(raw, available_agents)
 
 
@@ -610,6 +618,7 @@ async def arbitrate_debate(
     company_name: str,
     findings_with_critiques: list[dict[str, Any]],
     arbiter_agent_name: str = "zhou_shenyan_redteam_agent",
+    live_call: Any = None,
 ) -> ArbiterRuling:
     """Invoke the L3 red-team arbiter to rule on the debate outcome."""
 
@@ -621,15 +630,19 @@ async def arbitrate_debate(
         },
         ensure_ascii=False,
     )
-    raw = await call_llm_with_resilience(
-        messages=[
-            {
-                "role": "system",
-                "content": render_orchestrator_prompt("arbiter_system", ARBITER_SYSTEM_PROMPT),
-            },
-            {"role": "user", "content": payload},
-        ],
-        temperature=0.1,
-        context={"phase": "arbitration", "arbiter": arbiter_agent_name},
-    )
+    try:
+        raw = await call_llm_with_resilience(
+            messages=[
+                {"role": "system", "content": render_orchestrator_prompt("arbiter_system", ARBITER_SYSTEM_PROMPT)},
+                {"role": "user", "content": payload},
+            ],
+            temperature=0.1,
+            context={"phase": "arbitration", "arbiter": arbiter_agent_name},
+            on_delta=live_call.delta if live_call else None,
+            on_response=live_call.complete if live_call else None,
+        )
+    except Exception as exc:
+        if live_call:
+            live_call.fail(exc)
+        raise
     return ArbiterRuling.model_validate(raw)

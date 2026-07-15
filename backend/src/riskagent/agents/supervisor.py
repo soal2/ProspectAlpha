@@ -9,6 +9,7 @@ import os
 import sqlite3
 import threading
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any, Callable, Literal, TypedDict
 from uuid import uuid4
@@ -33,6 +34,7 @@ from riskagent.agents.orchestrator import (
 )
 from riskagent.agents.expert_llm import analyze_findings_with_llm
 from riskagent.agents.prompts import render_expert_prompt
+from riskagent.runtime_events import LiveLLMCall
 from riskagent.risk_rules import RiskRule, RiskRuleRepository
 from riskagent.seed_data import AGENT_EXPERTS, AGENT_NAME_ALIASES, AGENT_SPECS
 from riskagent.skills.risk_extract import RuleEvaluation, evaluate_text_against_rules
@@ -137,6 +139,7 @@ class AgentTeamSupervisor:
         self.runtime_root = resolve_agent_runtime_root(runtime_root)
         self._runtime_events: dict[str, list[dict[str, Any]]] = {}
         self._runtime_events_lock = threading.Lock()
+        self._event_sinks: dict[str, Callable[[dict[str, Any]], None]] = {}
         self._checkpointer = checkpointer
         self._graph: Any | None = None
         self._graph_lock = threading.Lock()
@@ -162,6 +165,7 @@ class AgentTeamSupervisor:
         max_findings: int,
         rule_snapshot: dict[str, Any] | None = None,
         manual_agent_names: list[str] | None = None,
+        event_sink: Callable[[dict[str, Any]], None] | None = None,
     ) -> AgentTeamResult:
         initial: AgentState = {
             "run_id": run_id,
@@ -179,19 +183,33 @@ class AgentTeamSupervisor:
             "replacement_history": [],
         }
         config = {"configurable": {"thread_id": run_id}}
-        output = self.graph.invoke(initial, config)
-        return self._result_from_output(output, config)
+        self._set_event_sink(run_id, event_sink)
+        try:
+            output = self.graph.invoke(initial, config)
+            return self._result_from_output(output, config)
+        finally:
+            self._set_event_sink(run_id, None)
 
-    def resume_with_selection(self, *, run_id: str, agent_names: list[str]) -> AgentTeamResult:
+    def resume_with_selection(
+        self,
+        *,
+        run_id: str,
+        agent_names: list[str],
+        event_sink: Callable[[dict[str, Any]], None] | None = None,
+    ) -> AgentTeamResult:
         config = {"configurable": {"thread_id": run_id}}
-        output = self.graph.invoke(
-            Command(
-                resume={"agent_names": agent_names},
-                update={"available_agents": self.agent_options()},
-            ),
-            config,
-        )
-        return self._result_from_output(output, config)
+        self._set_event_sink(run_id, event_sink)
+        try:
+            output = self.graph.invoke(
+                Command(
+                    resume={"agent_names": agent_names},
+                    update={"available_agents": self.agent_options()},
+                ),
+                config,
+            )
+            return self._result_from_output(output, config)
+        finally:
+            self._set_event_sink(run_id, None)
 
     def agent_options(
         self, *, runtime_states: dict[str, str] | None = None
@@ -267,14 +285,33 @@ class AgentTeamSupervisor:
                 return {"strategy_error": str(exc)}
         else:
             try:
-                plan = _resolve(
-                    self.strategy_provider(
-                        user_requirement=state["user_requirement"],
-                        company_name=state["company_name"],
-                        document_summary=state["document_summary"],
-                        available_agents=state["available_agents"],
+                provider_args = {
+                    "user_requirement": state["user_requirement"],
+                    "company_name": state["company_name"],
+                    "document_summary": state["document_summary"],
+                    "available_agents": state["available_agents"],
+                }
+                if self.strategy_provider is orchestrate:
+                    live_call = LiveLLMCall(
+                        run_id=state["run_id"],
+                        agent_name="orchestrator",
+                        provider="openai-compatible",
+                        model=os.getenv("OPENAI_MODEL", "unknown"),
+                        persist=lambda event: self._record_runtime_event(state["run_id"], event),
                     )
-                )
+                    try:
+                        plan = _resolve(
+                            orchestrate(
+                                **provider_args,
+                                on_delta=live_call.delta,
+                                on_response=live_call.complete,
+                            )
+                        )
+                    except Exception as exc:
+                        live_call.fail(exc)
+                        raise
+                else:
+                    plan = _resolve(self.strategy_provider(**provider_args))
                 plan = validate_strategy_decision(plan, state["available_agents"])
             except Exception as exc:
                 return {
@@ -786,12 +823,15 @@ class AgentTeamSupervisor:
         def publish_llm_event(event: dict[str, Any]) -> None:
             if not run_id:
                 return
-            try:
-                from riskagent.runtime_events import get_event_broker
+            event.setdefault("event_id", f"evt_{uuid4().hex}")
+            event.setdefault("created_at", datetime.now(timezone.utc).isoformat())
+            self._record_runtime_event(run_id, event)
+            # Keep standalone handlers and thread-mode callers observable.  The
+            # run-level sink persists the same event in production; SSE dedupes
+            # it by event_id when both transports deliver it.
+            from riskagent.runtime_events import get_event_broker
 
-                get_event_broker().publish_sync(run_id, event)
-            except Exception:
-                pass
+            get_event_broker().publish_sync(run_id, event)
 
         def handle(payload: dict[str, Any], peer_context: Any) -> dict[str, Any]:
             if peer_context.message_type == MessageType.TASK:
@@ -860,15 +900,28 @@ class AgentTeamSupervisor:
                             },
                         )
                     )
-                    llm_items = asyncio.run(
-                        analyze_findings_with_llm(
-                            agent_name=spec.name,
-                            agent_title=spec.title,
-                            candidates=triggered,
-                            evidence_snippets=snippets,
-                            system_prompt=render_expert_prompt(spec.capability_payload()),
-                        )
+                    live_call = LiveLLMCall(
+                        run_id=run_id,
+                        agent_name=spec.name,
+                        provider="openai-compatible",
+                        model=os.getenv("OPENAI_MODEL", "unknown"),
+                        persist=publish_llm_event,
                     )
+                    try:
+                        llm_items = asyncio.run(
+                            analyze_findings_with_llm(
+                                agent_name=spec.name,
+                                agent_title=spec.title,
+                                candidates=triggered,
+                                evidence_snippets=snippets,
+                                system_prompt=render_expert_prompt(spec.capability_payload()),
+                                on_delta=live_call.delta,
+                                on_response=live_call.complete,
+                            )
+                        )
+                    except Exception as exc:
+                        live_call.fail(exc)
+                        raise
                     needs_more = [
                         str(item.get("rule_id"))
                         for item in llm_items
@@ -1035,27 +1088,42 @@ class AgentTeamSupervisor:
         task_parts = task_id.split("::", 3)
         if len(task_parts) == 4 and task_parts[0] == run_id:
             payload.setdefault("module_id", task_parts[1])
+        normalized = _runtime_event_to_event(payload)
         with self._runtime_events_lock:
-            self._runtime_events.setdefault(run_id, []).append(payload)
+            self._runtime_events.setdefault(run_id, []).append(normalized)
+            sink = self._event_sinks.get(run_id)
+        if sink:
+            sink(normalized)
+
+    def _set_event_sink(
+        self,
+        run_id: str,
+        sink: Callable[[dict[str, Any]], None] | None,
+    ) -> None:
+        with self._runtime_events_lock:
+            if sink is None:
+                self._event_sinks.pop(run_id, None)
+            else:
+                self._event_sinks[run_id] = sink
 
     def _take_runtime_events(self, run_id: str) -> list[dict[str, Any]]:
         with self._runtime_events_lock:
             raw = self._runtime_events.pop(run_id, [])
-        events = []
-        for item in raw:
-            event_type = str(item.get("event_type") or item.get("type") or "a2a_runtime_event")
-            actor = str(item.get("actor_name") or item.get("agent_name") or "a2a_runtime")
-            events.append(
-                _event(
-                    event_type,
-                    actor,
-                    str(item.get("title") or event_type.replace("_", " ")),
-                    str(item.get("summary") or item.get("error") or "A2A runtime state changed."),
-                    payload=item,
-                )
-            )
-        return events
+        return raw
 
+
+def _runtime_event_to_event(item: dict[str, Any]) -> dict[str, Any]:
+    event_type = str(item.get("event_type") or item.get("type") or "a2a_runtime_event")
+    actor = str(item.get("actor_name") or item.get("agent_name") or "a2a_runtime")
+    if {"title", "summary", "actor_name", "event_type"}.issubset(item):
+        return item
+    return _event(
+        event_type,
+        actor,
+        str(item.get("title") or event_type.replace("_", " ")),
+        str(item.get("summary") or item.get("error") or "A2A runtime state changed."),
+        payload=item,
+    )
 
 def _resolve(value: Any) -> Any:
     return asyncio.run(value) if inspect.isawaitable(value) else value

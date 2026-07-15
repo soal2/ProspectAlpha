@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import AsyncIterator
+from collections.abc import Callable
 from typing import Any
 
 
@@ -83,6 +84,49 @@ class LLMClient:
         if not isinstance(parsed, dict):
             raise LLMParseError(f"LLM JSON response must be an object: {content}")
         return parsed
+
+    async def chat_json_stream(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.2,
+        on_delta: Callable[[str], None] | None = None,
+    ) -> tuple[dict[str, Any], str]:
+        """Collect an OpenAI-compatible JSON response while forwarding text deltas.
+
+        The caller owns presentation and persistence.  In particular, it can
+        broadcast deltas without turning every token into a database row.
+        """
+
+        try:
+            stream = await self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=temperature,
+                response_format={"type": "json_object"},
+                stream=True,
+            )
+        except Exception as exc:
+            raise _classify_openai_error(exc) from exc
+        chunks: list[str] = []
+        try:
+            async for chunk in stream:
+                delta = chunk.choices[0].delta.content
+                if not delta:
+                    continue
+                chunks.append(delta)
+                if on_delta:
+                    on_delta(delta)
+        except Exception as exc:
+            raise _classify_openai_error(exc) from exc
+        content = "".join(chunks)
+        try:
+            parsed = json.loads(content)
+        except ValueError as exc:
+            raise LLMParseError(f"Failed to parse LLM JSON response: {content}") from exc
+        if not isinstance(parsed, dict):
+            raise LLMParseError(f"LLM JSON response must be an object: {content}")
+        return parsed, content
 
     async def chat_stream(self, messages: list[dict[str, str]], *, temperature: float = 0.4) -> AsyncIterator[str]:
         try:

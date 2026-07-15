@@ -100,7 +100,7 @@ def _debate_result() -> DebatePhaseResult:
     )
 
 
-def test_publish_event_pushes_to_broker_without_writing_to_run_events(
+def test_publish_event_persists_and_pushes_to_broker(
     tmp_path, monkeypatch, analysis_repo_factory
 ):
     import riskagent.runtime_events as runtime_events
@@ -122,8 +122,9 @@ def test_publish_event_pushes_to_broker_without_writing_to_run_events(
 
     repo._publish_event(run, event)
 
-    assert queue.get_nowait() == event
-    assert len(run.events) == event_count
+    assert queue.get_nowait()["event_type"] == event["event_type"]
+    assert len(run.events) == event_count + 1
+    assert run.events[-1]["event_id"]
 
 
 def test_run_debate_stage_emits_llm_call_started_and_completed(
@@ -390,4 +391,6 @@ def test_expert_handler_emits_llm_second_pass_started_and_completed(
 
     assert result["evaluations"]
     event_types = [event["event_type"] for event in captured]
-    assert event_types == ["expert_llm_started", "expert_llm_completed"]
+    assert "llm_response_started" in event_types
+    assert "expert_llm_started" in event_types
+    assert "expert_llm_completed" in event_types

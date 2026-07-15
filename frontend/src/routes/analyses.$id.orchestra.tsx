@@ -639,7 +639,8 @@ function kindClass(eventType: string): string {
   const label = kindLabel(eventType);
   if (label === "失败") return "bg-destructive/10 text-destructive";
   if (label === "接管" || label === "替补") return "bg-amber-500/15 text-amber-700";
-  if (label === "裁定" || label === "仲裁") return "bg-[color:var(--risk-high)]/15 text-[color:var(--risk-high)]";
+  if (label === "裁定" || label === "仲裁")
+    return "bg-[color:var(--risk-high)]/15 text-[color:var(--risk-high)]";
   if (label === "质证") return "bg-[color:var(--gold)]/20 text-[color:var(--navy)]";
   if (label === "修订") return "bg-sky-500/15 text-sky-700";
   if (label === "辩论") return "bg-[color:var(--gold)]/15 text-[color:var(--navy)]";

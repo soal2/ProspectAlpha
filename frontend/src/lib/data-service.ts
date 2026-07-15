@@ -3,7 +3,6 @@ import type {
   Agent,
   AnalysisSummary,
   BacktestDetailData,
-  BacktestNewData,
   BacktestSummary,
   DashboardStats,
   EvidenceDetailItem,
@@ -102,6 +101,7 @@ export interface AskResult {
 export type OrchestraStageStatus = "queued" | "running" | "done" | "failed" | "paused";
 
 export interface AnalysisRunEvent {
+  event_id?: string;
   event_type: string;
   actor_name: string;
   title: string;
@@ -114,6 +114,42 @@ export interface AnalysisRunEvent {
   action_label?: string;
   payload?: Record<string, unknown>;
   metrics?: Record<string, unknown>;
+  call_id?: string;
+  sequence?: number;
+  provider?: string;
+  model?: string;
+  raw_response?: string;
+  duration_ms?: number;
+  error?: string;
+}
+
+export interface AnalysisProgress {
+  run_id: string;
+  phase: string;
+  updated_at: string;
+  status: string;
+  current_stage: string;
+  error_summary?: string | null;
+  pdf: {
+    status: string;
+    parsed_pages: number;
+    total_pages: number;
+    parsed_blocks: number;
+    error: string | null;
+  };
+  index: {
+    status: string;
+    indexed_blocks: number;
+    total_blocks: number;
+  };
+  agents: {
+    agent_name: string;
+    module_id: string;
+    module: string;
+    status: string;
+    latest_action: string;
+    latest_summary: string;
+  }[];
 }
 
 export interface AnalysisRun {
@@ -506,17 +542,6 @@ async function fetchRiskRulesData(): Promise<RiskRulesData> {
   return apiRequest<RiskRulesData>("/risk-rules");
 }
 
-async function fetchBacktestNewData(): Promise<BacktestNewData> {
-  return {
-    steps: [
-      { key: "scope", label: "样本范围", desc: "选择回测的港股 IPO 样本时间窗口、行业、规模" },
-      { key: "model", label: "模型版本", desc: "选择 RiskAgent 模型版本与特征集" },
-      { key: "thresh", label: "风险阈值", desc: "定义高 / 中 / 低风险的判定边界" },
-      { key: "metric", label: "评估口径", desc: "选择评估窗口与指标" },
-    ],
-  };
-}
-
 // Analyses
 export async function getAnalyses() {
   return fetchAnalyses();
@@ -528,6 +553,10 @@ export async function getAnalysis(id: string) {
 
 export async function getAnalysisRun(id: string) {
   return apiRequest<AnalysisRun>(`/analysis-runs/${id}`);
+}
+
+export async function getAnalysisProgress(id: string) {
+  return apiRequest<AnalysisProgress>(`/analysis-runs/${id}/progress`);
 }
 
 // Agents
@@ -779,9 +808,10 @@ export async function streamAnalysisRun(
   runId: string,
   onEvent: (event: AnalysisRunEvent) => void,
   onDone: (run: AnalysisRun) => void,
-  options: { signal?: AbortSignal } = {},
+  options: { signal?: AbortSignal; after?: number } = {},
 ): Promise<void> {
-  const response = await fetch(`${API_BASE_URL}/analysis-runs/${runId}/stream`, {
+  const after = options.after ? `?after=${options.after}` : "";
+  const response = await fetch(`${API_BASE_URL}/analysis-runs/${runId}/stream${after}`, {
     method: "GET",
     headers: { accept: "text/event-stream" },
     signal: options.signal,
@@ -865,11 +895,6 @@ export async function updateRiskRule(ruleId: string, payload: Partial<RiskRulePa
 
 export async function deleteRiskRule(ruleId: string) {
   return apiRequest<void>(`/risk-rules/${ruleId}`, { method: "DELETE" });
-}
-
-// Backtest New
-export async function getBacktestNewData() {
-  return fetchBacktestNewData();
 }
 
 async function fetchEvidenceFeed(id?: string): Promise<EvidenceFeedItem[]> {

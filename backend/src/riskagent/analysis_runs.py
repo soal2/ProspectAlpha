@@ -231,6 +231,41 @@ class AnalysisTrace(BaseModel):
     evidenceFeed: list[TraceEvidenceItem]
 
 
+class PdfProgress(BaseModel):
+    status: str = "pending"
+    parsed_pages: int = 0
+    total_pages: int = 0
+    parsed_blocks: int = 0
+    error: str | None = None
+
+
+class IndexProgress(BaseModel):
+    status: str = "pending"
+    indexed_blocks: int = 0
+    total_blocks: int = 0
+
+
+class AgentCollaborationProgress(BaseModel):
+    agent_name: str
+    module_id: str
+    module: str
+    status: str
+    latest_action: str
+    latest_summary: str
+
+
+class AnalysisProgress(BaseModel):
+    run_id: str
+    phase: str
+    updated_at: str
+    status: str = "ready"
+    current_stage: str = "ready"
+    error_summary: str | None = None
+    pdf: PdfProgress
+    index: IndexProgress
+    agents: list[AgentCollaborationProgress] = Field(default_factory=list)
+
+
 class AnalysisRun(BaseModel):
     run_id: str
     company_name: str
@@ -256,6 +291,7 @@ class AnalysisRun(BaseModel):
     replacement_history: list[dict[str, Any]] = Field(default_factory=list)
     module_results: list[dict[str, Any]] = Field(default_factory=list)
     debate_history: dict[str, Any] = Field(default_factory=dict)
+    progress: dict[str, Any] = Field(default_factory=dict)
     frozen_rule_snapshot: dict[str, Any] = Field(default_factory=dict, exclude=True)
     document_blocks: list[DocumentBlock] = Field(default_factory=list, exclude=True)
     findings: list[RiskFinding] = Field(default_factory=list)
@@ -264,6 +300,20 @@ class AnalysisRun(BaseModel):
     report: ReportDraft | None = Field(default=None, exclude=True)
     events: list[dict[str, Any]] = Field(default_factory=list)
     input_payload: AnalysisRunCreate | None = Field(default=None, exclude=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _discard_legacy_preselected_agents(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        legacy_payload = value.get("input_payload")
+        if not isinstance(legacy_payload, dict) or "selected_agent_names" not in legacy_payload:
+            return value
+        normalized = dict(value)
+        normalized_payload = dict(legacy_payload)
+        normalized_payload.pop("selected_agent_names")
+        normalized["input_payload"] = normalized_payload
+        return normalized
 
 
 class AnalysisRunRepository:
@@ -352,6 +402,12 @@ class AnalysisRunRepository:
                     action_label="任务创建",
                 ),
             ],
+            progress={
+                "phase": status,
+                "updated_at": now,
+                "pdf": {"status": "pending"},
+                "index": {"status": "pending"},
+            },
             input_payload=payload,
         )
         self._save_run(run)
@@ -422,7 +478,7 @@ class AnalysisRunRepository:
             _event(
                 "tool_completed",
                 "worker_dispatcher",
-                "后台任务执行完成",
+                "后台任务已入队",
                 f"job_id={job_id}",
                 stage_key="task_understanding",
                 action_label="worker dispatch",
@@ -461,7 +517,7 @@ class AnalysisRunRepository:
             _event(
                 "tool_completed",
                 "worker_dispatcher",
-                "后台恢复任务已创建",
+                "后台恢复任务已入队",
                 f"job_id={job_id}",
                 stage_key="task_understanding",
                 action_label="resume dispatch",
@@ -566,6 +622,20 @@ class AnalysisRunRepository:
         run = self.get(run_id)
         return _build_trace_view(run)
 
+    def progress(self, run_id: str) -> AnalysisProgress:
+        return _build_analysis_progress(self.get(run_id))
+
+    def append_event(self, run_id: str, event: dict[str, Any]) -> AnalysisRun:
+        """Append one durable event without replacing worker-written events."""
+
+        run = self.get(run_id)
+        item = dict(event)
+        item.setdefault("event_id", f"evt_{uuid.uuid4().hex}")
+        item.setdefault("created_at", _now())
+        run.events = _merge_events(run.events, [item])
+        self._save_run(run)
+        return run
+
     def _execute_pipeline(self, run: AnalysisRun, payload: AnalysisRunCreate) -> AnalysisRun:
         try:
             run = self._transition(
@@ -601,13 +671,59 @@ class AnalysisRunRepository:
                 actor_name="pdf_parser",
                 action_label="解析中",
             )
-            parsed_blocks = self._document_blocks(payload)
+            total_pages = 0
+            if payload.document_id:
+                total_pages = self.document_repository.get(payload.document_id).page_count
+            run.progress = {
+                **run.progress,
+                "phase": "pdf_parsing",
+                "updated_at": _now(),
+                "pdf": {
+                    "status": "parsing",
+                    "parsed_pages": 0,
+                    "total_pages": total_pages,
+                    "parsed_blocks": 0,
+                },
+                "index": {"status": "pending", "indexed_blocks": 0, "total_blocks": 0},
+            }
+            self._save_run(run)
+
+            def _on_parse_progress(done: int, total: int, blocks: int) -> None:
+                run.progress = {
+                    **run.progress,
+                    "phase": "pdf_parsing",
+                    "updated_at": _now(),
+                    "pdf": {
+                        "status": "parsing",
+                        "parsed_pages": done,
+                        "total_pages": total,
+                        "parsed_blocks": blocks,
+                    },
+                }
+                self._save_run(run)
+
+            parsed_blocks = self._document_blocks(payload, on_progress=_on_parse_progress)
             run.document_blocks = _run_blocks_from_document(run.run_id, payload, parsed_blocks)
             text = _merge_text_and_data(
                 "\n\n".join(block.text for block in run.document_blocks),
                 payload.structured_data,
             )
             block_stats = _document_block_stats(run.document_blocks)
+            run.progress = {
+                **run.progress,
+                "updated_at": _now(),
+                "pdf": {
+                    "status": "completed",
+                    "parsed_pages": total_pages or max((item.page_number for item in run.document_blocks), default=0),
+                    "total_pages": total_pages or max((item.page_number for item in run.document_blocks), default=0),
+                    "parsed_blocks": len(run.document_blocks),
+                },
+                "index": {
+                    "status": "indexing",
+                    "indexed_blocks": 0,
+                    "total_blocks": len(run.document_blocks),
+                },
+            }
             run.events.append(
                 _event(
                     "tool_completed",
@@ -634,11 +750,21 @@ class AnalysisRunRepository:
             progress_state = {"last_emitted": 0}
 
             def _on_index_progress(done: int, total: int) -> None:
-                # Emit at most one progress event per ~10% to keep the SSE stream lean.
                 if total <= 0:
                     return
+                run.progress = {
+                    **run.progress,
+                    "updated_at": _now(),
+                    "index": {
+                        "status": "indexing",
+                        "indexed_blocks": done,
+                        "total_blocks": total,
+                    },
+                }
+                # Persist every batch; emit SSE audit events only every ~10%.
                 threshold = progress_state["last_emitted"] + max(1, total // 10)
                 if done < threshold and done < total:
+                    self._save_run(run)
                     return
                 progress_state["last_emitted"] = done
                 run.events.append(
@@ -659,6 +785,21 @@ class AnalysisRunRepository:
                 blocks=run.document_blocks,
                 on_progress=_on_index_progress,
             )
+            run.progress = {
+                **run.progress,
+                "updated_at": _now(),
+                "pdf": {
+                    "status": "completed",
+                    "parsed_pages": total_pages or max((item.page_number for item in run.document_blocks), default=0),
+                    "total_pages": total_pages or max((item.page_number for item in run.document_blocks), default=0),
+                    "parsed_blocks": len(run.document_blocks),
+                },
+                "index": {
+                    "status": "completed",
+                    "indexed_blocks": indexed_count,
+                    "total_blocks": len(run.document_blocks),
+                },
+            }
             run.events.append(
                 _event(
                     "stage_completed",
@@ -694,10 +835,23 @@ class AnalysisRunRepository:
             manual_agent_names = list(
                 run.analysis_config.pop("manual_agent_names", []) or []
             )
+            team_event_lock = threading.Lock()
+
+            def _persist_team_event(event: dict[str, Any]) -> None:
+                # Expert threads may emit concurrently.  Keep the in-flight run
+                # object and durable event log aligned so the final save cannot
+                # overwrite a message the browser has already seen.
+                with team_event_lock:
+                    event.setdefault("event_id", f"evt_{uuid.uuid4().hex}")
+                    event.setdefault("created_at", _now())
+                    run.events = _merge_events(run.events, [event])
+                    self._save_run(run)
+
             if manual_agent_names:
                 team_result = self.agent_supervisor.resume_with_selection(
                     run_id=run.run_id,
                     agent_names=manual_agent_names,
+                    event_sink=_persist_team_event,
                 )
             else:
                 team_result = self.agent_supervisor.run(
@@ -710,6 +864,7 @@ class AnalysisRunRepository:
                     text=text,
                     max_findings=_effective_max_findings(payload),
                     rule_snapshot=run.frozen_rule_snapshot,
+                    event_sink=_persist_team_event,
                 )
             run.events = _merge_events(run.events, team_result.events)
             run.strategy_plan = team_result.strategy_plan
@@ -1195,6 +1350,12 @@ class AnalysisRunRepository:
             return run
         except Exception as exc:
             failed_stage = run.current_stage
+            if failed_stage == "pdf_parsing":
+                run.progress = {
+                    **run.progress,
+                    "updated_at": _now(),
+                    "pdf": {**run.progress.get("pdf", {}), "status": "failed", "error": str(exc)},
+                }
             run.status = "failed"
             run.current_stage = "failed"
             run.failed_stage = failed_stage
@@ -1220,9 +1381,17 @@ class AnalysisRunRepository:
             return self.document_repository.get_text(payload.document_id)
         return ""
 
-    def _document_blocks(self, payload: AnalysisRunCreate) -> list[ParsedDocumentBlock]:
+    def _document_blocks(
+        self,
+        payload: AnalysisRunCreate,
+        *,
+        on_progress: Callable[[int, int, int], None] | None = None,
+    ) -> list[ParsedDocumentBlock]:
         if payload.document_id:
-            return self.document_repository.get_blocks(payload.document_id)
+            return self.document_repository.ensure_parsed(
+                payload.document_id,
+                on_progress=on_progress,
+            )
         document_id = f"doc_{hashlib.sha256(payload.document_text.encode('utf-8')).hexdigest()[:12]}"
         return [
             ParsedDocumentBlock(
@@ -1585,6 +1754,7 @@ class AnalysisRunRepository:
         """Run the 2-round expert debate phase between risk_identification and cross_validation."""
 
         from riskagent.agents.debate import run_debate_phase_sync
+        from riskagent.runtime_events import LiveLLMCall
 
         run = self._transition(
             run,
@@ -1635,10 +1805,20 @@ class AnalysisRunRepository:
             ),
         )
         try:
+            def _debate_live_call(agent_name: str) -> LiveLLMCall:
+                return LiveLLMCall(
+                    run_id=run.run_id,
+                    agent_name=agent_name,
+                    provider="openai-compatible",
+                    model=os.getenv("OPENAI_MODEL", "unknown"),
+                    persist=lambda event: self._publish_event(run, event),
+                )
+
             debate_result = run_debate_phase_sync(
                 company_name=run.company_name,
                 findings=finding_payloads,
                 module_results=module_results,
+                live_call_factory=_debate_live_call,
             )
         except DebateLLMError as exc:
             self._publish_event(
@@ -2013,17 +2193,12 @@ class AnalysisRunRepository:
             return
 
     def _publish_event(self, run: AnalysisRun, event: dict) -> None:
-        """Push an intermediate progress event to the broker without persisting to run.events.
+        """Persist an intermediate event so API and worker processes agree."""
 
-        Used for fine-grained LLM-call lifecycle signals (started/completed/failed)
-        so subscribers see progress without polluting the durable event audit log.
-        """
-        from riskagent.runtime_events import get_event_broker
-
-        try:
-            get_event_broker().publish_sync(run.run_id, event)
-        except Exception:
-            pass
+        event.setdefault("event_id", f"evt_{uuid.uuid4().hex}")
+        event.setdefault("created_at", _now())
+        run.events = _merge_events(run.events, [event])
+        self._save_run(run)
 
     def _load_all(self) -> dict[str, Any]:
         with _path_lock(self.path):
@@ -2715,6 +2890,83 @@ def _build_trace_view(run: AnalysisRun) -> AnalysisTrace:
     return AnalysisTrace(stages=stages, seed=flow[:8], flow=flow, evidenceFeed=evidence)
 
 
+def _build_analysis_progress(run: AnalysisRun) -> AnalysisProgress:
+    stored = run.progress or {}
+    pdf_data = dict(stored.get("pdf") or {})
+    index_data = dict(stored.get("index") or {})
+    if not pdf_data or pdf_data.get("status") == "pending":
+        parsed_pages = max((item.page_number for item in run.document_blocks), default=0)
+        if parsed_pages:
+            pdf_data = {
+                "status": "completed",
+                "parsed_pages": parsed_pages,
+                "total_pages": parsed_pages,
+                "parsed_blocks": len(run.document_blocks),
+            }
+            index_data = {
+                "status": "completed" if run.status == "completed" else "pending",
+                "indexed_blocks": len(run.document_blocks) if run.status == "completed" else 0,
+                "total_blocks": len(run.document_blocks),
+            }
+    pdf = PdfProgress.model_validate(pdf_data)
+    index = IndexProgress.model_validate(index_data)
+    assignments = run.strategy_plan.get("assignments") or []
+    team_state = {
+        str(item.get("agent_name") or ""): str(item.get("status") or "")
+        for item in run.team_state
+    }
+    agents = []
+    for assignment in assignments:
+        agent_name = str(assignment.get("agent_name") or "")
+        if not agent_name:
+            continue
+        events = [event for event in run.events if event.get("actor_name") == agent_name]
+        latest = events[-1] if events else {}
+        agents.append(
+            AgentCollaborationProgress(
+                agent_name=agent_name,
+                module_id=str(assignment.get("module_id") or ""),
+                module=str(assignment.get("module") or ""),
+                status=_agent_progress_status(
+                    run.status,
+                    team_state.get(agent_name, ""),
+                    str(latest.get("event_type") or ""),
+                ),
+                latest_action=str(latest.get("action_label") or latest.get("title") or "待编排"),
+                latest_summary=str(latest.get("summary") or "等待战略层分配任务。"),
+            )
+        )
+    return AnalysisProgress(
+        run_id=run.run_id,
+        phase=str(stored.get("phase") or run.current_stage),
+        updated_at=str(stored.get("updated_at") or run.created_at),
+        status=run.status,
+        current_stage=run.current_stage,
+        error_summary=run.error_summary,
+        pdf=pdf,
+        index=index,
+        agents=agents,
+    )
+
+
+def _agent_progress_status(run_status: str, team_status: str, event_type: str) -> str:
+    state = team_status.lower()
+    event = event_type.lower()
+    if "failed" in state or "failed" in event:
+        return "failed"
+    if "completed" in state or "finished" in state or "completed" in event:
+        return "completed"
+    if "debate" in event or "revised" in event or "revision" in event:
+        return "debating"
+    if "retriev" in event or "evidence" in event:
+        return "retrieving_evidence"
+    if "started" in event or "running" in state or "work" in state or "llm" in event:
+        return "analyzing"
+    if run_status in {"expert_orchestration", "awaiting_expert_selection"}:
+        return "initializing"
+    return "queued"
+
+
 def _stage_status(run: AnalysisRun, key: str) -> str:
     order = [item[0] for item in PIPELINE_STAGES]
     if run.current_stage == key and run.status not in {"completed", "failed"}:
@@ -2812,6 +3064,7 @@ def _event(
     **extra: Any,
 ) -> dict[str, Any]:
     event = {
+        "event_id": f"evt_{uuid.uuid4().hex}",
         "event_type": event_type,
         "actor_name": actor_name,
         "title": title,
@@ -2829,7 +3082,7 @@ def _merge_events(
     merged = list(existing)
     seen = {
         (
-            item.get("created_at"),
+            item.get("event_id") or item.get("created_at"),
             item.get("event_type"),
             item.get("actor_name"),
             item.get("title"),
@@ -2838,7 +3091,7 @@ def _merge_events(
     }
     for item in incoming:
         key = (
-            item.get("created_at"),
+            item.get("event_id") or item.get("created_at"),
             item.get("event_type"),
             item.get("actor_name"),
             item.get("title"),

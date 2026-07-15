@@ -7,6 +7,7 @@ import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 
 import fitz
@@ -122,14 +123,14 @@ class DocumentRepository:
             content_type="application/pdf" if is_pdf else content_type,
         )
 
-        blocks = parse_document_bytes(
+        page_count = _document_page_count(content, is_pdf=is_pdf)
+        blocks = [] if is_pdf else parse_document_bytes(
             document_id=document_id,
             filename=filename,
             content=content,
-            content_type="application/pdf" if is_pdf else content_type,
+            content_type=content_type,
         )
         text_chars = sum(len(block.text) for block in blocks)
-        page_count = max((block.page_number for block in blocks), default=0)
         asset = DocumentAsset(
             document_id=document_id,
             filename=filename,
@@ -146,6 +147,36 @@ class DocumentRepository:
         )
         self._save_asset(asset)
         return asset
+
+    def ensure_parsed(
+        self,
+        document_id: str,
+        *,
+        on_progress: Callable[[int, int, int], None] | None = None,
+    ) -> list[DocumentBlock]:
+        """Parse an uploaded document on demand and retain the extracted blocks."""
+        asset = self.get(document_id)
+        if asset.block_count:
+            if on_progress is not None:
+                on_progress(asset.page_count, asset.page_count, asset.block_count)
+            return self.get_blocks(document_id)
+        content, content_type, filename = self.get_file(document_id)
+        blocks = parse_document_bytes(
+            document_id=document_id,
+            filename=filename,
+            content=content,
+            content_type=content_type,
+            on_progress=on_progress,
+        )
+        parsed = asset.model_copy(
+            update={
+                "text_chars": sum(len(block.text) for block in blocks),
+                "block_count": len(blocks),
+                "blocks": blocks,
+            }
+        )
+        self._save_asset(parsed)
+        return blocks
 
     def get(self, document_id: str) -> DocumentAsset:
         if self.use_database:
@@ -242,17 +273,34 @@ def parse_document_bytes(
     filename: str,
     content: bytes,
     content_type: str,
+    on_progress: Callable[[int, int, int], None] | None = None,
 ) -> list[DocumentBlock]:
     if content_type == "application/pdf" or filename.lower().endswith(".pdf"):
-        return _parse_pdf(document_id, content)
+        return _parse_pdf(document_id, content, on_progress=on_progress)
     text = content.decode("utf-8", errors="replace")
-    return _parse_text(document_id, text)
+    blocks = _parse_text(document_id, text)
+    if on_progress is not None:
+        on_progress(1, 1, len(blocks))
+    return blocks
 
 
-def _parse_pdf(document_id: str, content: bytes) -> list[DocumentBlock]:
+def _document_page_count(content: bytes, *, is_pdf: bool) -> int:
+    if not is_pdf:
+        return 1
+    with fitz.open(stream=content, filetype="pdf") as pdf:
+        return pdf.page_count
+
+
+def _parse_pdf(
+    document_id: str,
+    content: bytes,
+    *,
+    on_progress: Callable[[int, int, int], None] | None = None,
+) -> list[DocumentBlock]:
     blocks: list[DocumentBlock] = []
     char_cursor = 0
     with fitz.open(stream=content, filetype="pdf") as pdf:
+        total_pages = pdf.page_count
         for page_index, page in enumerate(pdf, start=1):
             text_page = page.get_text("dict")
             section_path = "招股书正文"
@@ -282,6 +330,8 @@ def _parse_pdf(document_id: str, content: bytes) -> list[DocumentBlock]:
                         source_hash=source_hash,
                     )
                 )
+            if on_progress is not None:
+                on_progress(page_index, total_pages, len(blocks))
     if not blocks:
         raise ValueError("PDF contains no extractable text blocks.")
     return blocks

@@ -19,6 +19,7 @@ import os
 from collections import deque
 from threading import Lock
 from time import monotonic
+from collections.abc import Callable
 from typing import Any
 
 from tenacity import (
@@ -195,6 +196,8 @@ async def call_llm_with_resilience(
     context: dict[str, Any] | None = None,
     breaker: CircuitBreaker | None = None,
     client: Any = None,
+    on_delta: Callable[[str], None] | None = None,
+    on_response: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Retry transient LLM failures and apply circuit-breaker protection.
 
@@ -231,6 +234,15 @@ async def call_llm_with_resilience(
 
     async def _do_call() -> dict[str, Any]:
         resolved = client if client is not None else get_default_llm_client()
+        if on_delta or on_response:
+            raw, response = await resolved.chat_json_stream(
+                messages,
+                temperature=temperature,
+                on_delta=on_delta,
+            )
+            if on_response:
+                on_response(response)
+            return raw
         return await resolved.chat_json(messages, temperature=temperature)
 
     attempt_count = 0

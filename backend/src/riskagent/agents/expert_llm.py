@@ -1,6 +1,7 @@
 """LLM second-pass analyzer for rule-prefiltered risk candidates."""
 from __future__ import annotations
 import json
+from collections.abc import Callable
 from typing import Any
 
 from riskagent.providers.llm import get_default_llm_client
@@ -26,6 +27,8 @@ async def analyze_findings_with_llm(
     candidates: list[RuleEvaluation],
     evidence_snippets: list[str],
     system_prompt: str | None = None,
+    on_delta: Callable[[str], None] | None = None,
+    on_response: Callable[[str], None] | None = None,
 ) -> list[dict[str, Any]]:
     """LLM second-pass on rule-prefiltered candidates; mutates candidates in-place."""
     if not candidates:
@@ -40,10 +43,20 @@ async def analyze_findings_with_llm(
         },
         ensure_ascii=False,
     )
-    raw = await get_default_llm_client().chat_json(
-        [{"role": "system", "content": system}, {"role": "user", "content": user_payload}],
-        temperature=0.2,
-    )
+    client = get_default_llm_client()
+    if on_delta or on_response:
+        raw, raw_response = await client.chat_json_stream(
+            [{"role": "system", "content": system}, {"role": "user", "content": user_payload}],
+            temperature=0.2,
+            on_delta=on_delta,
+        )
+        if on_response:
+            on_response(raw_response)
+    else:
+        raw = await client.chat_json(
+            [{"role": "system", "content": system}, {"role": "user", "content": user_payload}],
+            temperature=0.2,
+        )
     items = raw.get("items", []) if isinstance(raw, dict) else (raw if isinstance(raw, list) else [])
     by_rule = {str(item.get("rule_id")): item for item in items if item.get("rule_id")}
     for cand in candidates:

@@ -21,6 +21,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
+from collections.abc import Callable
 from typing import Any
 
 from riskagent.agents.exceptions import DebateLLMError
@@ -104,6 +105,7 @@ async def _generate_critique(
     critic_agent: str,
     target_agent: str,
     target_findings: list[dict[str, Any]],
+    live_call: Any = None,
 ) -> dict[str, Any]:
     system = CRITIQUE_SYSTEM_PROMPT.format(critic_agent=critic_agent)
     user_payload = json.dumps(
@@ -114,14 +116,18 @@ async def _generate_critique(
         },
         ensure_ascii=False,
     )
-    raw = await call_llm_with_resilience(
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user_payload},
-        ],
-        temperature=0.2,
-        context={"phase": "critique", "critic": critic_agent, "target": target_agent},
-    )
+    try:
+        raw = await call_llm_with_resilience(
+            messages=[{"role": "system", "content": system}, {"role": "user", "content": user_payload}],
+            temperature=0.2,
+            context={"phase": "critique", "critic": critic_agent, "target": target_agent},
+            on_delta=live_call.delta if live_call else None,
+            on_response=live_call.complete if live_call else None,
+        )
+    except Exception as exc:
+        if live_call:
+            live_call.fail(exc)
+        raise
     raw.setdefault("critic_agent", critic_agent)
     raw.setdefault("target_agent", target_agent)
     raw.setdefault("finding_ids", [str(f.get("finding_id")) for f in target_findings if f.get("finding_id")])
@@ -133,6 +139,7 @@ async def _generate_revision(
     agent_name: str,
     original_findings: list[dict[str, Any]],
     critiques_received: list[dict[str, Any]],
+    live_call: Any = None,
 ) -> dict[str, Any]:
     system = REVISION_SYSTEM_PROMPT.format(agent_name=agent_name)
     user_payload = json.dumps(
@@ -143,14 +150,18 @@ async def _generate_revision(
         },
         ensure_ascii=False,
     )
-    raw = await call_llm_with_resilience(
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user_payload},
-        ],
-        temperature=0.2,
-        context={"phase": "revision", "agent_name": agent_name},
-    )
+    try:
+        raw = await call_llm_with_resilience(
+            messages=[{"role": "system", "content": system}, {"role": "user", "content": user_payload}],
+            temperature=0.2,
+            context={"phase": "revision", "agent_name": agent_name},
+            on_delta=live_call.delta if live_call else None,
+            on_response=live_call.complete if live_call else None,
+        )
+    except Exception as exc:
+        if live_call:
+            live_call.fail(exc)
+        raise
     raw.setdefault("agent_name", agent_name)
     raw.setdefault("original_finding_ids", [str(f.get("finding_id")) for f in original_findings if f.get("finding_id")])
     return FindingRevision.model_validate(raw).model_dump()
@@ -194,6 +205,7 @@ async def run_debate_phase(
     findings: list[dict[str, Any]],
     module_results: list[dict[str, Any]] | None = None,
     arbiter_agent_name: str = "zhou_shenyan_redteam_agent",
+    live_call_factory: Callable[[str], Any] | None = None,
 ) -> DebatePhaseResult:
     """Run the 2-round peer debate and arbiter ruling.
 
@@ -230,10 +242,11 @@ async def run_debate_phase(
             if critic == target:
                 continue
             round1_tasks.append(
-                _generate_critique(
+            _generate_critique(
                     critic_agent=critic,
                     target_agent=target,
-                    target_findings=findings_by_agent[target],
+                target_findings=findings_by_agent[target],
+                live_call=live_call_factory(critic) if live_call_factory else None,
                 )
             )
             pairs.append((critic, target))
@@ -263,6 +276,7 @@ async def run_debate_phase(
                 agent_name=agent,
                 original_findings=findings_by_agent[agent],
                 critiques_received=critiques_by_target.get(agent, []),
+                live_call=live_call_factory(agent) if live_call_factory else None,
             )
         )
         round2_pairs.append((agent, None))
@@ -306,6 +320,7 @@ async def run_debate_phase(
             company_name=company_name,
             findings_with_critiques=findings_with_critiques,
             arbiter_agent_name=arbiter_agent_name,
+            live_call=live_call_factory(arbiter_agent_name) if live_call_factory else None,
         )
     except (LLMError, CircuitBreakerOpen) as exc:
         logger.warning(
@@ -343,6 +358,7 @@ def run_debate_phase_sync(
     findings: list[dict[str, Any]],
     module_results: list[dict[str, Any]] | None = None,
     arbiter_agent_name: str = "zhou_shenyan_redteam_agent",
+    live_call_factory: Callable[[str], Any] | None = None,
 ) -> DebatePhaseResult:
     """Synchronous wrapper around :func:`run_debate_phase` for non-async callers."""
 
@@ -352,5 +368,6 @@ def run_debate_phase_sync(
             findings=findings,
             module_results=module_results,
             arbiter_agent_name=arbiter_agent_name,
+            live_call_factory=live_call_factory,
         )
     )

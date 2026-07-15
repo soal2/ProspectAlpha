@@ -13,6 +13,7 @@ from riskagent.analysis_runs import (
     AnalysisRun,
     AnalysisRunCreate,
     AnalysisRunInputPatch,
+    AnalysisProgress,
     AnalysisTrace,
     AnalysisRunRepository,
     ExpertSelectionRequest,
@@ -21,7 +22,7 @@ from riskagent.analysis_runs import (
     _build_report_streaming,
     get_default_analysis_repository,
 )
-from riskagent.runtime_events import get_event_broker
+from riskagent.runtime_events import get_event_broker, subscribe_redis_events
 
 
 router = APIRouter(prefix="/analysis-runs", tags=["analysis-runs"])
@@ -54,6 +55,14 @@ def list_analysis_runs() -> list[AnalysisRun]:
 def get_analysis_run(run_id: str) -> AnalysisRun:
     try:
         return _repo().get(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found") from exc
+
+
+@router.get("/{run_id}/progress", response_model=AnalysisProgress)
+def get_analysis_progress(run_id: str) -> AnalysisProgress:
+    try:
+        return _repo().progress(run_id)
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found") from exc
 
@@ -101,7 +110,7 @@ def get_analysis_events(run_id: str, after: int = 0) -> dict[str, object]:
 
 
 @router.get("/{run_id}/stream")
-async def stream_analysis_run(run_id: str) -> StreamingResponse:
+async def stream_analysis_run(run_id: str, after: int = 0) -> StreamingResponse:
     try:
         run = _repo().get(run_id)
         if _should_resume(run):
@@ -112,46 +121,57 @@ async def stream_analysis_run(run_id: str) -> StreamingResponse:
     async def event_source():
         broker = get_event_broker()
         queue = await broker.subscribe(run_id)
+        redis_subscription = await subscribe_redis_events(run_id)
         seen_events: set[tuple[object, object, object, object]] = set()
+        seen_deltas: set[tuple[object, object]] = set()
+        cursor = max(0, after)
+        last_durable_sync = 0.0
         try:
-            for event in _repo().events(run_id, 0):
-                seen_events.add(_event_signature(event))
-                yield _sse_data(event)
-            run = _repo().get(run_id)
-            if run.status == "awaiting_expert_selection":
-                yield _sse_data({"type": "paused", "run": run.model_dump()})
-                return
-            if run.status in {"completed", "failed"}:
-                yield _sse_data({"type": "done", "run": run.model_dump()})
-                return
-
             while True:
-                try:
-                    event = await asyncio.wait_for(queue.get(), timeout=15)
-                except asyncio.TimeoutError:
-                    yield ": ping\n\n"
-                    continue
-                signature = _event_signature(event)
-                if signature in seen_events:
-                    continue
-                seen_events.add(signature)
-                yield _sse_data(event)
-                if _is_terminal_event(event):
-                    final_run = _repo().get(run_id)
-                    yield _sse_data({"type": "done", "run": final_run.model_dump()})
-                    return
+                loop = asyncio.get_running_loop().time()
+                if loop - last_durable_sync >= 0.25:
+                    durable_events = _repo().events(run_id, cursor)
+                    cursor += len(durable_events)
+                    last_durable_sync = loop
+                    for event in durable_events:
+                        signature = _event_signature(event)
+                        if signature in seen_events:
+                            continue
+                        seen_events.add(signature)
+                        yield _sse_data(event)
                 run = _repo().get(run_id)
                 if run.status == "awaiting_expert_selection":
                     yield _sse_data({"type": "paused", "run": run.model_dump()})
                     return
                 if run.status in {"completed", "failed"}:
-                    yield _sse_data({"type": "done", "run": run.model_dump()})
-                    return
+                    if not _repo().events(run_id, cursor):
+                        yield _sse_data({"type": "done", "run": run.model_dump()})
+                        return
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=0.05)
+                except asyncio.TimeoutError:
+                    event = None
+                if event:
+                    signature = _event_signature(event)
+                    if signature not in seen_events:
+                        seen_events.add(signature)
+                        yield _sse_data(event)
+                if redis_subscription:
+                    event = await redis_subscription.get()
+                    if event:
+                        delta_key = (event.get("call_id"), event.get("sequence"))
+                        if event.get("event_type") != "llm_response_delta" or delta_key not in seen_deltas:
+                            seen_deltas.add(delta_key)
+                            yield _sse_data(event)
+                if event is None:
+                    await asyncio.sleep(0.05)
         except KeyError:
             yield _sse_data({"type": "error", "message": "Run not found"})
             return
         finally:
             await broker.unsubscribe(run_id, queue)
+            if redis_subscription:
+                await redis_subscription.close()
 
     return StreamingResponse(
         event_source(),
@@ -177,7 +197,7 @@ def _is_terminal_event(event: dict[str, object]) -> bool:
 
 def _event_signature(event: dict[str, object]) -> tuple[object, object, object, object]:
     return (
-        event.get("created_at"),
+        event.get("event_id") or event.get("call_id") or event.get("created_at"),
         event.get("event_type") or event.get("type"),
         event.get("actor_name"),
         event.get("title"),

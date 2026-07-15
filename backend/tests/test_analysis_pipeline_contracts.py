@@ -210,7 +210,7 @@ def test_pdf_upload_drives_analysis_with_page_and_bbox_evidence(
     assert document["content_type"] == "application/pdf"
     assert document["storage_uri"].startswith("local://")
     assert document["page_count"] == 1
-    assert document["block_count"] >= 1
+    assert document["block_count"] == 0
     stored_pdf = tmp_path / "object-store" / "test-bucket" / f"documents/{document['document_id']}.pdf"
     assert stored_pdf.exists()
 
@@ -236,6 +236,19 @@ def test_pdf_upload_drives_analysis_with_page_and_bbox_evidence(
     assert evidence[0]["page_number"] == 1
     assert evidence[0]["bbox"]
     assert evidence[0]["source_hash"]
+    progress = client.get(f"/analysis-runs/{run_id}/progress").json()
+    assert progress["pdf"]["status"] == "completed"
+    assert progress["pdf"]["parsed_pages"] == 1
+    assert progress["pdf"]["total_pages"] == 1
+    assert progress["pdf"]["parsed_blocks"] >= 1
+    assert progress["index"]["status"] == "completed"
+
+    legacy_run = repo.get(run_id)
+    legacy_run.progress = {}
+    repo._save_run(legacy_run)
+    legacy_progress = client.get(f"/analysis-runs/{run_id}/progress").json()
+    assert legacy_progress["pdf"]["status"] == "completed"
+    assert legacy_progress["pdf"]["parsed_pages"] == 1
 
 
 def test_database_persistence_covers_document_run_and_evidence(

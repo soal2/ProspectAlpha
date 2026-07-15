@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import sys
 from types import SimpleNamespace
 
 from sqlalchemy.orm import sessionmaker
@@ -130,3 +131,47 @@ def test_qdrant_vector_store_uses_query_points_api():
             payload={"point_id": "block_1", "run_id": "run_test"},
         )
     ]
+
+
+def test_qdrant_vector_store_upserts_large_runs_in_bounded_batches():
+    batches = []
+
+    class FakeClient:
+        def get_collections(self):
+            return SimpleNamespace(collections=[SimpleNamespace(name="test_collection")])
+
+        def upsert(self, **kwargs):
+            batches.append(kwargs)
+
+    store = QdrantVectorStore.__new__(QdrantVectorStore)
+    store.client = FakeClient()
+    store.vector_size = 8
+    points = [
+        VectorPoint(
+            point_id=f"block_{index}",
+            vector=[0.1] * 8,
+            payload={"run_id": "run_test"},
+        )
+        for index in range(257)
+    ]
+
+    store.upsert(collection="test_collection", points=points)
+
+    assert [len(call["points"]) for call in batches] == [128, 128, 1]
+    assert {call["collection_name"] for call in batches} == {"test_collection"}
+
+
+def test_qdrant_vector_store_bypasses_environment_proxy_for_loopback(monkeypatch):
+    calls = []
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+    monkeypatch.setitem(sys.modules, "qdrant_client", SimpleNamespace(QdrantClient=FakeClient))
+
+    QdrantVectorStore(url="http://127.0.0.1:6333", vector_size=8)
+    QdrantVectorStore(url="https://qdrant.example.com", vector_size=8)
+
+    assert calls[0]["trust_env"] is False
+    assert "trust_env" not in calls[1]

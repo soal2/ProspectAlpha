@@ -11,6 +11,7 @@ from pathlib import Path
 
 from riskagent.analysis_runs import RunEvidence
 from riskagent.api.main import create_app
+from riskagent.documents import DocumentRepository
 from riskagent.providers.object_store import LocalObjectStore
 from riskagent.risk_rules import RiskRuleRepository
 
@@ -69,6 +70,38 @@ def test_list_documents_returns_uploaded_assets(client) -> None:
     listed = client.get("/documents").json()
     assert [item["document_id"] for item in listed] == [document_id]
     assert listed[0]["filename"] == "prospectus.pdf"
+
+
+def test_pdf_upload_defers_blocks_until_page_progress_is_reported(tmp_path) -> None:
+    pdf = fitz.open()
+    for page_number in range(2):
+        page = pdf.new_page()
+        page.insert_text((72, 72), f"Risk Factors page {page_number + 1}", fontsize=11)
+    content = pdf.tobytes()
+    pdf.close()
+    repository = DocumentRepository(
+        path=tmp_path / "documents.yaml",
+        use_database=False,
+        object_store=LocalObjectStore(tmp_path / "object-store", bucket="test-bucket"),
+    )
+    asset = repository.create_from_bytes(
+        filename="prospectus.pdf",
+        content=content,
+        content_type="application/pdf",
+    )
+
+    assert asset.page_count == 2
+    assert asset.block_count == 0
+    progress: list[tuple[int, int, int]] = []
+    blocks = repository.ensure_parsed(
+        asset.document_id,
+        on_progress=lambda done, total, count: progress.append((done, total, count)),
+    )
+
+    assert [item[0] for item in progress] == [1, 2]
+    assert all(item[1] == 2 for item in progress)
+    assert progress[-1][2] == len(blocks)
+    assert repository.get(asset.document_id).block_count == len(blocks)
 
 
 def test_local_object_store_get_bytes(tmp_path) -> None:

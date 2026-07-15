@@ -20,7 +20,10 @@ const kindMeta: Record<string, { label: string; cls: string }> = {
   assign: { label: "指派", cls: "bg-[color:var(--gold)]/15 text-[color:var(--navy)]" },
   critique: { label: "质证", cls: "bg-[color:var(--gold)]/20 text-[color:var(--navy)]" },
   revision: { label: "修订", cls: "bg-sky-500/15 text-sky-700" },
-  arbitration: { label: "仲裁", cls: "bg-[color:var(--risk-high)]/20 text-[color:var(--risk-high)]" },
+  arbitration: {
+    label: "仲裁",
+    cls: "bg-[color:var(--risk-high)]/20 text-[color:var(--risk-high)]",
+  },
 };
 
 function TracePage() {

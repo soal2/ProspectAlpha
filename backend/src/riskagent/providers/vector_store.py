@@ -6,6 +6,7 @@ import os
 import uuid
 from dataclasses import dataclass
 from typing import Protocol
+from urllib.parse import urlparse
 
 
 @dataclass(frozen=True)
@@ -56,7 +57,10 @@ class QdrantVectorStore:
     def __init__(self, *, url: str, vector_size: int, api_key: str | None = None) -> None:
         from qdrant_client import QdrantClient
 
-        self.client = QdrantClient(url=url, api_key=api_key)
+        client_kwargs = {}
+        if _is_loopback_url(url):
+            client_kwargs["trust_env"] = False
+        self.client = QdrantClient(url=url, api_key=api_key, **client_kwargs)
         self.vector_size = vector_size
 
     def upsert(self, *, collection: str, points: list[VectorPoint]) -> None:
@@ -65,17 +69,18 @@ class QdrantVectorStore:
         self._ensure_collection(collection)
         from qdrant_client.models import PointStruct
 
-        self.client.upsert(
-            collection_name=collection,
-            points=[
-                PointStruct(
-                    id=_point_uuid(point.point_id),
-                    vector=point.vector,
-                    payload={**point.payload, "point_id": point.point_id},
-                )
-                for point in points
-            ],
-        )
+        for start in range(0, len(points), 128):
+            self.client.upsert(
+                collection_name=collection,
+                points=[
+                    PointStruct(
+                        id=_point_uuid(point.point_id),
+                        vector=point.vector,
+                        payload={**point.payload, "point_id": point.point_id},
+                    )
+                    for point in points[start : start + 128]
+                ],
+            )
 
     def search(
         self,
@@ -131,3 +136,7 @@ def get_default_vector_store(vector_size: int) -> VectorStore:
 
 def _point_uuid(value: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, value))
+
+
+def _is_loopback_url(url: str) -> bool:
+    return urlparse(url).hostname in {"localhost", "127.0.0.1", "::1"}
