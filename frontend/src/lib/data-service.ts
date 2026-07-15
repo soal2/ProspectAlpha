@@ -88,9 +88,11 @@ export interface ReplacementHistoryEntry {
 
 export interface AskCitation {
   block_id: string;
+  document_id: string;
   page_number: number;
   section_path: string;
   snippet: string;
+  bbox_regions: { page_number: number; bbox: number[] }[];
 }
 
 export interface AskResult {
@@ -527,8 +529,7 @@ async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
     },
   });
   if (!response.ok) {
-    const text = await response.text();
-    throw new Error(text || `Request failed: ${response.status}`);
+    throw new Error(await responseError(response));
   }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
@@ -689,8 +690,7 @@ export async function askDocument(
     signal: options.signal,
   });
   if (!response.ok || !response.body) {
-    const text = await response.text().catch(() => "");
-    throw new Error(text || `Request failed: ${response.status}`);
+    throw new Error(await responseError(response));
   }
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -725,6 +725,17 @@ export async function askDocument(
     }
   }
   return { answer, citations };
+}
+
+async function responseError(response: Response) {
+  const text = await response.text().catch(() => "");
+  if (!text) return `Request failed: ${response.status}`;
+  try {
+    const parsed = JSON.parse(text) as { detail?: string };
+    return parsed.detail || text;
+  } catch {
+    return text;
+  }
 }
 
 // General LLM chat — SSE stream from POST /chat (no document required)

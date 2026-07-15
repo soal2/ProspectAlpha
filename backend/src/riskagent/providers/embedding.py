@@ -7,7 +7,8 @@ import logging
 import math
 import os
 import re
-from typing import Protocol
+from http import HTTPStatus
+from typing import Any, Protocol
 
 from tenacity import (
     retry,
@@ -21,6 +22,7 @@ logger = logging.getLogger(__name__)
 # DashScope text-embedding-v3/v4 accept up to 8192 tokens per input; keep a
 # conservative character budget so CJK-heavy blocks never exceed the limit.
 MAX_TEXT_CHARS = 6000
+_UNSET = object()
 
 
 class EmbeddingConfigError(RuntimeError):
@@ -39,6 +41,9 @@ class EmbeddingClient(Protocol):
         ...
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        ...
+
+    def encode(self, texts: list[str]) -> list[list[float]]:
         ...
 
 
@@ -63,6 +68,9 @@ class HashingEmbeddingClient:
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
         return [self.embed(text) for text in texts]
 
+    def encode(self, texts: list[str]) -> list[list[float]]:
+        return self.embed_batch(texts)
+
 
 def _is_transient(exc: BaseException) -> bool:
     import openai
@@ -79,7 +87,7 @@ def _is_transient(exc: BaseException) -> bool:
 
 
 class DashScopeEmbeddingClient:
-    """OpenAI-compatible embedding client (Aliyun DashScope by default).
+    """DashScope native or OpenAI-compatible embedding client.
 
     Hard-fails with :class:`EmbeddingError` after retries — a run must never
     silently continue on degraded vectors.
@@ -88,19 +96,34 @@ class DashScopeEmbeddingClient:
     def __init__(
         self,
         *,
-        base_url: str,
-        api_key: str,
+        base_url: str | object = _UNSET,
+        api_key: str | None = None,
         model: str,
         dimensions: int | None = None,
         batch_size: int = 10,
     ) -> None:
-        if not base_url or not api_key or not model:
-            raise EmbeddingConfigError(
-                "Embedding provider requires EMBEDDING_BASE_URL, EMBEDDING_API_KEY and EMBEDDING_MODEL."
-            )
-        from openai import OpenAI
+        self._native = base_url is _UNSET
+        if not model:
+            raise EmbeddingConfigError("Embedding model is required.")
+        if self._native:
+            try:
+                import dashscope
+            except ImportError as exc:
+                raise EmbeddingConfigError(
+                    "dashscope package is required for native DashScope embeddings."
+                ) from exc
+            self.dashscope = dashscope
+            if api_key:
+                self.dashscope.api_key = api_key
+            self._client = None
+        else:
+            if not base_url or not api_key:
+                raise EmbeddingConfigError(
+                    "Embedding provider requires EMBEDDING_BASE_URL and EMBEDDING_API_KEY."
+                )
+            from openai import OpenAI
 
-        self._client = OpenAI(base_url=base_url, api_key=api_key)
+            self._client = OpenAI(base_url=str(base_url), api_key=api_key)
         self.model = model
         self.dimensions = int(dimensions) if dimensions else 1024
         self._request_dimensions = int(dimensions) if dimensions else None
@@ -114,6 +137,21 @@ class DashScopeEmbeddingClient:
         if not texts:
             return []
         prepared = [_prepare_text(text) for text in texts]
+        if self._native:
+            response = self.dashscope.TextEmbedding.call(model=self.model, input=prepared)
+            status_code = _get_field(response, "status_code")
+            if status_code != HTTPStatus.OK:
+                raise EmbeddingConfigError(
+                    "DashScope embedding call failed: "
+                    f"status={status_code}, code={_get_field(response, 'code', '')}, "
+                    f"message={_get_field(response, 'message', '')}"
+                )
+            vectors = _extract_dashscope_embeddings(response)
+            if len(vectors) != len(texts):
+                raise EmbeddingConfigError(
+                    f"DashScope returned {len(vectors)} embeddings for {len(texts)} input texts."
+                )
+            return vectors
         vectors: list[list[float]] = []
         for start in range(0, len(prepared), self.batch_size):
             chunk = prepared[start : start + self.batch_size]
@@ -123,6 +161,9 @@ class DashScopeEmbeddingClient:
                 f"Embedding provider returned {len(vectors)} vectors for {len(texts)} inputs."
             )
         return vectors
+
+    def encode(self, texts: list[str]) -> list[list[float]]:
+        return self.embed_batch(texts)
 
     @retry(
         retry=retry_if_exception(_is_transient),
@@ -158,6 +199,25 @@ def _prepare_text(text: str) -> str:
     return cleaned[:MAX_TEXT_CHARS]
 
 
+def create_embedding_client(
+    *,
+    provider: str,
+    model: str,
+    api_key: str | None = None,
+    base_url: str | None = None,
+) -> EmbeddingClient:
+    normalized = provider.strip().lower()
+    if normalized == "dashscope":
+        return DashScopeEmbeddingClient(model=model, api_key=api_key)
+    if normalized == "openai":
+        return DashScopeEmbeddingClient(
+            base_url=base_url or "https://api.openai.com/v1",
+            api_key=api_key,
+            model=model,
+        )
+    raise EmbeddingConfigError(f"Unsupported embedding provider: {provider}")
+
+
 _default_client: EmbeddingClient | None = None
 
 
@@ -165,7 +225,10 @@ def get_default_embedding_client() -> EmbeddingClient:
     global _default_client
     if _default_client is not None:
         return _default_client
-    api_key = os.getenv("EMBEDDING_API_KEY", "").strip()
+    api_key = (
+        os.getenv("EMBEDDING_API_KEY", "").strip()
+        or os.getenv("DASHSCOPE_API_KEY", "").strip()
+    )
     if api_key:
         _default_client = DashScopeEmbeddingClient(
             base_url=os.getenv(
@@ -182,7 +245,9 @@ def get_default_embedding_client() -> EmbeddingClient:
             "EMBEDDING_API_KEY is not set; falling back to the deterministic hashing "
             "embedder. Retrieval quality will be poor — configure a real provider."
         )
-        _default_client = HashingEmbeddingClient()
+        _default_client = HashingEmbeddingClient(
+            dimensions=int(os.getenv("EMBEDDING_DIMENSIONS", "1024")),
+        )
     return _default_client
 
 
@@ -203,3 +268,20 @@ def cosine_similarity(left: list[float], right: list[float]) -> float:
         return 0.0
     size = min(len(left), len(right))
     return sum(left[idx] * right[idx] for idx in range(size))
+
+
+def _extract_dashscope_embeddings(response: Any) -> list[list[float]]:
+    output = _get_field(response, "output")
+    if not isinstance(output, dict):
+        raise EmbeddingConfigError("DashScope embedding response is missing output.")
+    raw_embeddings = _get_field(output, "embeddings")
+    if not isinstance(raw_embeddings, list):
+        raise EmbeddingConfigError("DashScope embedding response is missing output.embeddings.")
+    ordered = sorted(raw_embeddings, key=lambda item: _get_field(item, "text_index", 0))
+    return [[float(value) for value in _get_field(item, "embedding", [])] for item in ordered]
+
+
+def _get_field(source: Any, field: str, default: Any = None) -> Any:
+    if isinstance(source, dict):
+        return source.get(field, default)
+    return getattr(source, field, default)

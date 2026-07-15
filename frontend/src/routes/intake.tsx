@@ -81,7 +81,10 @@ function IntakePage() {
     page_count: number;
     file_size_bytes: number;
     created_at: string;
+    block_count?: number;
   } | null>(null);
+  const [pdfUploading, setPdfUploading] = useState(false);
+  const [pdfDragging, setPdfDragging] = useState(false);
   const [pdfQuestion, setPdfQuestion] = useState("");
   const [pdfAnswer, setPdfAnswer] = useState("");
   const [pdfCitations, setPdfCitations] = useState<AskCitation[]>([]);
@@ -242,7 +245,23 @@ function IntakePage() {
           </div>
 
           {/* Upload card */}
-          <div className="rounded-2xl border border-dashed border-primary/30 bg-gradient-to-br from-[color:var(--sage-soft)]/40 to-[color:var(--paper)] p-8">
+          <div
+            className={`rounded-2xl border border-dashed bg-gradient-to-br from-[color:var(--sage-soft)]/40 to-[color:var(--paper)] p-8 transition-colors ${
+              pdfDragging ? "border-primary bg-primary/5" : "border-primary/30"
+            }`}
+            onDragEnter={(event) => {
+              event.preventDefault();
+              setPdfDragging(true);
+            }}
+            onDragOver={(event) => event.preventDefault()}
+            onDragLeave={() => setPdfDragging(false)}
+            onDrop={(event) => {
+              event.preventDefault();
+              setPdfDragging(false);
+              const file = event.dataTransfer.files[0];
+              if (file) void handlePdfUpload(file);
+            }}
+          >
             <div className="grid size-12 place-items-center rounded-xl bg-primary/10 text-primary">
               <UploadCloud className="size-6" />
             </div>
@@ -262,10 +281,23 @@ function IntakePage() {
                 }}
               />
               <button
-                onClick={() => fileInputRef.current?.click()}
-                className="inline-flex items-center justify-center gap-2 rounded-full bg-primary px-5 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+                disabled={pdfUploading}
+                onClick={() => {
+                  if (fileInputRef.current) fileInputRef.current.value = "";
+                  fileInputRef.current?.click();
+                }}
+                className="inline-flex items-center justify-center gap-2 rounded-full bg-primary px-5 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-60"
               >
-                <UploadCloud className="size-4" /> {uploadedDocument ? "重新选择 PDF" : "选择文件"}
+                {pdfUploading ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <UploadCloud className="size-4" />
+                )}
+                {pdfUploading
+                  ? "上传、解析并建立索引中"
+                  : uploadedDocument
+                    ? "重新选择 PDF"
+                    : "选择文件"}
               </button>
               <span className="text-xs text-muted-foreground">或拖拽 PDF 到此处</span>
             </div>
@@ -280,7 +312,7 @@ function IntakePage() {
                     </div>
                     <div className="text-xs text-muted-foreground">
                       {uploadedDocument
-                        ? `${uploadedDocument.page_count} 页 · ${formatBytes(uploadedDocument.file_size_bytes)} · 已解析`
+                        ? `${uploadedDocument.page_count} 页 · ${formatBytes(uploadedDocument.file_size_bytes)} · ${uploadedDocument.block_count ?? 0} 个检索块已入库`
                         : `${data?.uploadedFile.pages} 页 · ${data?.uploadedFile.size} · 上传于 ${data?.uploadedFile.uploadedAt}`}
                     </div>
                   </div>
@@ -900,6 +932,12 @@ function IntakePage() {
   }
 
   async function handlePdfUpload(file: File) {
+    if (pdfUploading) return;
+    if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) {
+      setAnalysisError("请选择 PDF 文件");
+      return;
+    }
+    setPdfUploading(true);
     setAnalysisError(null);
     try {
       const document = await uploadDocument(file);
@@ -910,6 +948,8 @@ function IntakePage() {
       setPdfError(null);
     } catch (err) {
       setAnalysisError(err instanceof Error ? err.message : "PDF 上传失败");
+    } finally {
+      setPdfUploading(false);
     }
   }
 

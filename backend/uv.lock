@@ -2958,6 +2958,7 @@ dependencies = [
     { name = "redis" },
     { name = "rq" },
     { name = "sqlalchemy" },
+    { name = "tenacity" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -3005,6 +3006,7 @@ requires-dist = [
     { name = "rq", specifier = ">=1.16.0" },
     { name = "shapely", marker = "extra == 'pipeline'", specifier = ">=2.1.0" },
     { name = "sqlalchemy", specifier = ">=2.0.0" },
+    { name = "tenacity", specifier = ">=8.2.0" },
     { name = "torch", marker = "extra == 'pipeline'", specifier = ">=2.13.0" },
     { name = "torchvision", marker = "extra == 'pipeline'", specifier = ">=0.28.0" },
     { name = "transformers", marker = "extra == 'pipeline'", specifier = ">=4.57.3,<5.0.0" },

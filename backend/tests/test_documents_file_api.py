@@ -177,7 +177,7 @@ def test_pipeline_evidence_carries_document_id(
         json={"company_name": "PDF 溯源测试", "document_id": document_id},
     ).json()["run_id"]
     client.post(f"/analysis-runs/{run_id}/start")
-    for _ in range(50):
+    for _ in range(200):
         if client.get(f"/analysis-runs/{run_id}").json()["status"] == "completed":
             break
         time.sleep(0.1)

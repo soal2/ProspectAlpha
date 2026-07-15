@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from collections.abc import Callable
@@ -17,8 +18,27 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from riskagent.database import Base, SessionLocal, init_db
+from riskagent.ingestion import (
+    ProspectusIngestionRepository,
+    ProspectusRegisterRequest,
+    ProspectusRegistration,
+)
 from riskagent.models import DocumentAssetRow, DocumentBlockRow
+from riskagent.parsing import (
+    ChunkResult,
+    ChunkerFactory,
+    DocumentChunk,
+    ImageDescriber,
+    PdfProcessResult,
+    PdfProcessorFactory,
+    build_chunk_request,
+    build_pdf_process_request,
+    load_rag_pipeline_settings,
+)
+from riskagent.parsing.chunker import BBoxRef, MergedBBox
 from riskagent.providers.object_store import ObjectStore, get_default_object_store
+from riskagent.providers.vllm import VLLMImageDescriber
+from riskagent.retrieval import ChunkIndexer, PostgresChunkIndexer, create_chunk_indexer
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 DATA_ROOT = BACKEND_ROOT / "data"
@@ -26,6 +46,34 @@ DEFAULT_DOCUMENTS_PATH = DATA_ROOT / "processed" / "documents.yaml"
 DEFAULT_DOCUMENT_STORAGE_DIR = DATA_ROOT / "raw" / "documents"
 MAX_DOCUMENT_BYTES = 50 * 1024 * 1024
 PARSER_VERSION = "pymupdf-v1"
+
+
+@dataclass(frozen=True)
+class ProspectusPipelineRequest:
+    source_path: Path | str | None = None
+    content: bytes | None = None
+    original_filename: str | None = None
+    doc_key: str | None = None
+    source_url: str | None = None
+    config_path: Path | str | None = None
+    processed_root: Path | str = DATA_ROOT / "processed"
+    chunk_output_dir: Path | str | None = None
+    enable_image_vlm: bool = True
+    index_chunks: bool = True
+    index_backend: str = "postgres"
+    index_schema: str = "rag"
+
+
+@dataclass(frozen=True)
+class ProspectusPipelineResult:
+    registration: ProspectusRegistration
+    parsed: PdfProcessResult
+    chunked: ChunkResult
+    indexed_chunk_count: int | None
+
+    @property
+    def chunks_path(self) -> Path | None:
+        return self.chunked.output_path
 
 
 class DocumentCreate(BaseModel):
@@ -177,6 +225,37 @@ class DocumentRepository:
         )
         self._save_asset(parsed)
         return blocks
+
+    def prepare_for_retrieval(
+        self,
+        document_id: str,
+        *,
+        chunk_indexer: PostgresChunkIndexer | None = None,
+        on_progress: Callable[[int, int, int], None] | None = None,
+    ) -> DocumentAsset:
+        """Parse one asset and persist its searchable chunks in PostgreSQL."""
+        blocks = self.ensure_parsed(document_id, on_progress=on_progress)
+        asset = self.get(document_id)
+        if not self.use_database and chunk_indexer is None:
+            return asset
+        indexer = chunk_indexer or PostgresChunkIndexer()
+        try:
+            if indexer.indexed_chunk_count(document_id) != len(blocks):
+                indexed_count = indexer.index_chunks(
+                    registration=_prospectus_registration(asset),
+                    chunks=_document_chunks(asset, blocks),
+                    processed_path=f"document-assets/{document_id}",
+                )
+            else:
+                indexed_count = len(blocks)
+        finally:
+            if chunk_indexer is None:
+                indexer.close()
+        if indexed_count != len(blocks):
+            raise RuntimeError(
+                f"PostgreSQL indexed {indexed_count} chunks for {len(blocks)} document blocks."
+            )
+        return asset
 
     def get(self, document_id: str) -> DocumentAsset:
         if self.use_database:
@@ -382,8 +461,142 @@ def _detect_section(text: str, current: str) -> str:
     return current
 
 
+def process_prospectus_document(
+    request: ProspectusPipelineRequest,
+    *,
+    ingestion_repository: ProspectusIngestionRepository | None = None,
+    chunk_indexer: ChunkIndexer | None = None,
+    image_describer: ImageDescriber | None = None,
+) -> ProspectusPipelineResult:
+    """Run the canonical MinerU prospectus pipeline into PostgreSQL."""
+    settings = load_rag_pipeline_settings(request.config_path)
+    ingestion = ingestion_repository or ProspectusIngestionRepository()
+    registration = ingestion.register(
+        ProspectusRegisterRequest(
+            source_path=request.source_path,
+            content=request.content,
+            original_filename=request.original_filename,
+            doc_key=request.doc_key,
+            source_url=request.source_url,
+        )
+    )
+
+    processed_root = Path(request.processed_root).expanduser().resolve()
+    parsed = PdfProcessorFactory().create(settings.pdf_processor.name).process(
+        build_pdf_process_request(
+            doc_key=registration.doc_key,
+            document_id=registration.document_id,
+            pdf_path=registration.raw_pdf_path,
+            processed_root=processed_root,
+            settings=settings.pdf_processor,
+        )
+    )
+    chunk_output_dir = (
+        Path(request.chunk_output_dir).expanduser().resolve()
+        if request.chunk_output_dir is not None
+        else processed_root / registration.document_id / "chunks" / settings.chunker.name
+    )
+    active_image_describer = (
+        image_describer
+        if image_describer is not None
+        else VLLMImageDescriber()
+        if request.enable_image_vlm
+        else None
+    )
+    chunked = ChunkerFactory(image_describer=active_image_describer).create(
+        settings.chunker.name
+    ).chunk(
+        build_chunk_request(
+            doc_key=registration.doc_key,
+            document_id=registration.document_id,
+            content_list_path=parsed.content_list_path,
+            output_dir=chunk_output_dir,
+            settings=settings.chunker,
+        )
+    )
+
+    indexed_count: int | None = None
+    if request.index_chunks:
+        indexer = chunk_indexer or create_chunk_indexer(
+            request.index_backend,
+            schema=request.index_schema,
+        )
+        try:
+            indexed_count = indexer.index_chunks(
+                registration=registration,
+                chunks=chunked.chunks,
+                processed_path=_project_relative_path(parsed.output_dir),
+            )
+        finally:
+            if chunk_indexer is None and hasattr(indexer, "close"):
+                indexer.close()  # type: ignore[attr-defined]
+
+    return ProspectusPipelineResult(
+        registration=registration,
+        parsed=parsed,
+        chunked=chunked,
+        indexed_chunk_count=indexed_count,
+    )
+
+
 def get_default_document_repository() -> DocumentRepository:
     return DocumentRepository()
+
+
+def _project_relative_path(path: Path | str) -> str:
+    resolved = Path(path).expanduser().resolve()
+    try:
+        return str(resolved.relative_to(BACKEND_ROOT.parent))
+    except ValueError:
+        return str(resolved)
+
+
+def _prospectus_registration(asset: DocumentAsset) -> ProspectusRegistration:
+    return ProspectusRegistration(
+        document_id=asset.document_id,
+        doc_key=asset.document_id,
+        original_filename=asset.filename,
+        raw_pdf_path=Path(asset.storage_uri),
+        content_type=asset.content_type,
+        file_sha256=asset.file_sha256,
+        file_size_bytes=asset.file_size_bytes,
+        source_url=asset.source_url,
+        status="indexed",
+    )
+
+
+def _document_chunks(
+    asset: DocumentAsset,
+    blocks: list[DocumentBlock],
+) -> list[DocumentChunk]:
+    return [
+        DocumentChunk(
+            chunk_id=block.block_id,
+            document_id=block.document_id,
+            doc_key=asset.document_id,
+            chunk_type=block.block_type,
+            text=block.text,
+            page_idx=block.page_number,
+            source_file=asset.filename,
+            source_item_indices=[index],
+            bbox_refs=[
+                BBoxRef(
+                    page_idx=block.page_number,
+                    bbox=block.bbox,
+                    source_item_index=index,
+                )
+            ],
+            merged_bboxes=[MergedBBox(page_idx=block.page_number, bbox=block.bbox)],
+            metadata={
+                "section_path": block.section_path,
+                "char_start": block.char_start,
+                "char_end": block.char_end,
+                "source_hash": block.source_hash,
+                "parser_version": block.parser_version,
+            },
+        )
+        for index, block in enumerate(blocks)
+    ]
 
 
 def _upsert_asset(session: Session, asset: DocumentAsset) -> None:

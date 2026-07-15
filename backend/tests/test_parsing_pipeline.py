@@ -184,9 +184,9 @@ def test_block_chunker_splits_large_tables_and_attaches_continuation_bboxes(tmp_
     assert all(chunk.chunk_type == "table" for chunk in result.chunks)
     assert all(chunk.text.strip() for chunk in result.chunks)
     assert all(chunk.metadata["table_split"] for chunk in result.chunks)
-    assert {chunk.page_idx for chunk in result.chunks} == {42, 43}
+    assert {chunk.page_idx for chunk in result.chunks} == {43, 44}
     assert all(len(chunk.merged_bboxes) == 1 for chunk in result.chunks)
-    assert {box.page_idx for chunk in result.chunks for box in chunk.merged_bboxes} == {42, 43}
+    assert {box.page_idx for chunk in result.chunks for box in chunk.merged_bboxes} == {43, 44}
     assert all(chunk.metadata["table_group_source_item_indices"] == [0, 1] for chunk in result.chunks)
     assert all(chunk.metadata["continuation_source_item_indices"] == [1] for chunk in result.chunks)
 

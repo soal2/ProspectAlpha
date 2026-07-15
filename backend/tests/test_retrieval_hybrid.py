@@ -2,11 +2,8 @@ from dataclasses import dataclass
 import sys
 from types import SimpleNamespace
 
-from sqlalchemy.orm import sessionmaker
-
-from riskagent.database import Base, make_engine
-from riskagent.models import RetrievalIndexRow
 from riskagent.providers.vector_store import QdrantVectorStore, VectorMatch, VectorPoint
+from riskagent.retrieval import ChunkSearchResult
 from riskagent.retrieval.hybrid import HybridSearchIndex
 
 
@@ -25,57 +22,37 @@ class Block:
     parser_version: str = "test"
 
 
-class FakeVectorStore:
-    def __init__(self) -> None:
-        self.points: list[VectorPoint] = []
-        self.search_calls: list[dict] = []
+def test_hybrid_index_compatibility_facade_uses_document_scoped_postgres(monkeypatch):
+    calls: list[dict] = []
 
-    def upsert(self, *, collection: str, points: list[VectorPoint]) -> None:
-        self.points.extend(points)
-
-    def search(
-        self,
-        *,
-        collection: str,
-        vector: list[float],
-        run_id: str,
-        limit: int,
-    ) -> list[VectorMatch]:
-        self.search_calls.append({"collection": collection, "run_id": run_id, "limit": limit})
+    def fake_postgres_search(**kwargs):
+        calls.append(kwargs)
         return [
-            VectorMatch(
-                point_id=self.points[-1].point_id,
+            ChunkSearchResult(
+                chunk_id="block_2",
+                document_id="doc_1",
+                doc_key="doc_1",
+                chunk_type="text",
+                text="Related party transactions and redemption obligations are disclosed.",
+                page_idx=2,
+                source_file="prospectus.pdf",
+                source_item_indices=[2],
+                bbox_refs=[],
+                merged_bboxes=[{"page_idx": 2, "bbox": [1, 1, 20, 20]}],
+                image_path=None,
+                mineru_img_path=None,
+                table_html=None,
+                metadata={"section_path": "关联交易"},
                 score=0.95,
-                payload=self.points[-1].payload,
+                vector_score=0.9,
+                text_score=0.8,
             )
         ]
 
-
-class FakeEmbeddingClient:
-    def encode(self, texts: list[str]) -> list[list[float]]:
-        return [self.embed(text) for text in texts]
-
-    def embed(self, text: str) -> list[float]:
-        vector = [0.0] * 8
-        lowered = text.lower()
-        if "redemption" in lowered or "obligations" in lowered:
-            vector[0] = 1.0
-        if "customer" in lowered or "concentration" in lowered:
-            vector[1] = 1.0
-        return vector
-
-
-def test_hybrid_index_persists_rows_and_uses_vector_store(tmp_path):
-    engine = make_engine(f"sqlite:///{tmp_path / 'retrieval.db'}")
-    Base.metadata.create_all(bind=engine)
-    session_factory = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
-    vector_store = FakeVectorStore()
-    index = HybridSearchIndex(
-        session_factory=session_factory,
-        embedding_client=FakeEmbeddingClient(),
-        vector_store=vector_store,
-        collection_name="test_collection",
+    monkeypatch.setattr(
+        "riskagent.retrieval.hybrid.prospectus_hybrid_search", fake_postgres_search
     )
+    index = HybridSearchIndex()
 
     blocks = [
         Block(
@@ -97,14 +74,12 @@ def test_hybrid_index_persists_rows_and_uses_vector_store(tmp_path):
     ]
 
     assert index.index_blocks(run_id="run_test", blocks=blocks) == 2
-    assert len(vector_store.points) == 2
-    with session_factory() as session:
-        assert session.query(RetrievalIndexRow).count() == 2
-
     results = index.search(run_id="run_test", query="redemption obligations", limit=1)
-    assert vector_store.search_calls
+    assert calls == [
+        {"query": "redemption obligations", "document_id": "doc_1", "limit": 1}
+    ]
     assert results[0].block_id == "block_2"
-    assert results[0].vector_score >= 0.95
+    assert results[0].document_id == "doc_1"
 
 
 def test_qdrant_vector_store_uses_query_points_api():

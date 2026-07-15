@@ -289,8 +289,23 @@ class PostgresChunkIndexer:
         vectors: list[list[float]] = []
         batch_size = max(1, self.embedding_batch_size)
         for start in range(0, len(texts), batch_size):
-            vectors.extend(self.embedding_client.encode(texts[start : start + batch_size]))
+            batch = texts[start : start + batch_size]
+            encode = getattr(self.embedding_client, "encode", None)
+            if callable(encode):
+                vectors.extend(encode(batch))
+            else:
+                vectors.extend(self.embedding_client.embed_batch(batch))
         return vectors
+
+    def indexed_chunk_count(self, document_id: str) -> int:
+        schema_sql = _quote_ident(self.schema)
+        with self.conn.cursor() as cur:
+            cur.execute(
+                f"SELECT COUNT(*) FROM {schema_sql}.prospectus_chunks WHERE document_id = %s",
+                (document_id,),
+            )
+            row = cur.fetchone()
+        return int(row[0]) if row else 0
 
     def index_chunks_jsonl(
         self,

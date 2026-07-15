@@ -50,11 +50,11 @@ def _test_chunk_retriever(*, document_id: str, **_kwargs: Any) -> list[ChunkSear
                 "风险因素：公司存在关联交易、对赌和赎回安排，经营活动现金流持续为负，"
                 "并存在供应商集中度风险。"
             ),
-            page_idx=0,
+            page_idx=1,
             source_file="test.pdf",
             source_item_indices=[0],
-            bbox_refs=[{"page_idx": 0, "bbox": [1, 2, 3, 4], "source_item_index": 0}],
-            merged_bboxes=[{"page_idx": 0, "bbox": [1, 2, 3, 4]}],
+            bbox_refs=[{"page_idx": 1, "bbox": [1, 2, 3, 4], "source_item_index": 0}],
+            merged_bboxes=[{"page_idx": 1, "bbox": [1, 2, 3, 4]}],
             image_path=None,
             mineru_img_path=None,
             table_html=None,

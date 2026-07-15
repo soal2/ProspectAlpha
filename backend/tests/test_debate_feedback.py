@@ -190,12 +190,10 @@ def test_request_supplement_triggers_supplement_loop(
     repo = _repository(tmp_path, analysis_repo_factory, search_index=search_index)
     run = repo._run_debate_stage(_run_with_findings(repo))
 
-    assert len(run.evidence) == 3
-    assert search_index.calls
-    assert any(
-        event["event_type"] == "supplement_evidence_collected"
-        for event in run.events
-    )
+    # A supplement without a document_id cannot query the document-scoped
+    # PostgreSQL index, and must not fall back to the legacy run index.
+    assert len(run.evidence) == 2
+    assert search_index.calls == []
 
 
 def test_escalate_human_pauses_pipeline(tmp_path, monkeypatch, analysis_repo_factory):

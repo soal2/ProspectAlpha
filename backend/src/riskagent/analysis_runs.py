@@ -46,6 +46,7 @@ from riskagent.seed_data import AGENT_SPECS
 from riskagent.seed_data import AGENT_EXPERTS
 from riskagent.models import AnalysisRunRow, EvidenceLibraryRow, ReportLibraryRow
 from riskagent.providers.llm import get_default_llm_client
+from riskagent.retrieval import ChunkSearchResult, prospectus_hybrid_search
 from riskagent.retrieval.hybrid import HybridSearchIndex
 from riskagent.workers.analysis import dispatch_analysis_job
 
@@ -326,6 +327,7 @@ class AnalysisRunRepository:
         session_factory=SessionLocal,
         use_database: bool | None = None,
         search_index: HybridSearchIndex | None = None,
+        chunk_retriever: Callable[..., list[ChunkSearchResult]] | None = None,
         agent_supervisor: AgentTeamSupervisor | None = None,
         report_provider: Callable[..., Any] | None = None,
     ) -> None:
@@ -359,6 +361,7 @@ class AnalysisRunRepository:
             )
         self.search_cache: TTLCache[list[dict[str, Any]]] = TTLCache(ttl_seconds=30, max_items=256)
         self.search_index = search_index or HybridSearchIndex(session_factory=self.session_factory)
+        self.chunk_retriever = chunk_retriever or prospectus_hybrid_search
         self.agent_supervisor = agent_supervisor or AgentTeamSupervisor(
             repository=self.rule_repository,
             agent_specs=None if self.use_database else _seed_agent_specs(),
@@ -673,7 +676,11 @@ class AnalysisRunRepository:
             )
             total_pages = 0
             if payload.document_id:
-                total_pages = self.document_repository.get(payload.document_id).page_count
+                try:
+                    total_pages = self.document_repository.get(payload.document_id).page_count
+                except KeyError:
+                    if not payload.document_text.strip():
+                        raise
             run.progress = {
                 **run.progress,
                 "phase": "pdf_parsing",
@@ -739,8 +746,8 @@ class AnalysisRunRepository:
                 _event(
                     "tool_started",
                     "hybrid_search",
-                    "建立材料检索索引",
-                    "将 document_blocks 写入轻量全文和语义检索索引，后续 Agent 不重复读取原始 PDF。",
+                    "校验 PostgreSQL 材料索引",
+                    "复用上传阶段按 document_id 写入的 PostgreSQL 全文与向量索引。",
                     stage_key="pdf_parsing",
                     action_label="建立索引",
                     metrics={"tool_calls": 1},
@@ -771,8 +778,8 @@ class AnalysisRunRepository:
                     _event(
                         "tool_progress",
                         "hybrid_search",
-                        "向量化进行中",
-                        f"已向量化 {done}/{total} 个原文块。",
+                        "索引校验中",
+                        f"已确认 {done}/{total} 个原文块的文档映射。",
                         stage_key="pdf_parsing",
                         action_label="向量化",
                         metrics={"embedded_blocks": done, "total_blocks": total},
@@ -804,8 +811,8 @@ class AnalysisRunRepository:
                 _event(
                     "stage_completed",
                     "hybrid_search",
-                    "PDF 解析与材料索引已就绪",
-                    f"已索引 {indexed_count} 个 document_blocks，索引以原文块为事实源。",
+                    "PDF 解析与 PostgreSQL 材料索引已就绪",
+                    f"已确认 {indexed_count} 个 document_blocks，检索按 document_id 隔离。",
                     stage_key="pdf_parsing",
                     stage_status="completed",
                     action_label="材料库就绪",
@@ -862,6 +869,7 @@ class AnalysisRunRepository:
                     or "对招股书进行风险分析",
                     document_summary=doc_summary,
                     text=text,
+                    document_id=payload_for_orchestra.document_id or "",
                     max_findings=_effective_max_findings(payload),
                     rule_snapshot=run.frozen_rule_snapshot,
                     event_sink=_persist_team_event,
@@ -1388,11 +1396,17 @@ class AnalysisRunRepository:
         on_progress: Callable[[int, int, int], None] | None = None,
     ) -> list[ParsedDocumentBlock]:
         if payload.document_id:
-            return self.document_repository.ensure_parsed(
-                payload.document_id,
-                on_progress=on_progress,
-            )
-        document_id = f"doc_{hashlib.sha256(payload.document_text.encode('utf-8')).hexdigest()[:12]}"
+            try:
+                return self.document_repository.ensure_parsed(
+                    payload.document_id,
+                    on_progress=on_progress,
+                )
+            except KeyError:
+                if not payload.document_text.strip():
+                    raise
+        document_id = payload.document_id or (
+            f"doc_{hashlib.sha256(payload.document_text.encode('utf-8')).hexdigest()[:12]}"
+        )
         return [
             ParsedDocumentBlock(
                 block_id=block.block_id,
@@ -1507,22 +1521,21 @@ class AnalysisRunRepository:
         cached = self.search_cache.get(cache_key)
         if cached is not None:
             return cached
+        payload = _payload_from_run(self.get(run_id))
+        document_id = payload.document_id
+        if not document_id:
+            return []
+        try:
+            self.document_repository.get(document_id)
+        except KeyError:
+            if payload.document_text.strip():
+                return []
+            raise
         candidates = [
-            {
-                "block_id": item.block_id,
-                "document_id": item.document_id,
-                "page_number": item.page_number,
-                "section_path": item.section_path,
-                "text": item.text,
-                "bbox": item.bbox,
-                "char_start": item.char_start,
-                "char_end": item.char_end,
-                "source_hash": item.source_hash,
-                "score": item.score,
-            }
-            for item in self.search_index.search(
-                run_id=run_id,
+            _chunk_evidence_candidate(item)
+            for item in self.chunk_retriever(
                 query=" ".join(query_terms),
+                document_id=document_id,
                 limit=5,
             )
         ]
@@ -1566,7 +1579,24 @@ class AnalysisRunRepository:
         if not search_query:
             search_query = eid or target_finding.title
 
-        candidates = self.search_index.search(run_id=run.run_id, query=search_query, limit=2)
+        payload = _payload_from_run(run)
+        document_id = payload.document_id
+        if not document_id:
+            return []
+        try:
+            self.document_repository.get(document_id)
+        except KeyError:
+            if payload.document_text.strip():
+                return []
+            raise
+        candidates = [
+            _chunk_evidence_candidate(item)
+            for item in self.chunk_retriever(
+                query=search_query,
+                document_id=document_id,
+                limit=2,
+            )
+        ]
         evidence: list[RunEvidence] = []
         for index, candidate in enumerate(candidates):
             evidence_id = str(eid) if eid and index == 0 else f"ev_{uuid.uuid4().hex[:10]}"
@@ -1574,16 +1604,16 @@ class AnalysisRunRepository:
                 RunEvidence(
                     evidence_id=evidence_id,
                     finding_id=target_finding.finding_id,
-                    document_block_id=candidate.block_id,
-                    document_id=candidate.document_id,
-                    page_number=candidate.page_number,
-                    section_path=candidate.section_path,
-                    text=candidate.text[:300],
-                    bbox=candidate.bbox,
-                    char_start=candidate.char_start,
-                    char_end=candidate.char_end,
-                    source_hash=candidate.source_hash,
-                    confidence=candidate.score,
+                    document_block_id=candidate["block_id"],
+                    document_id=candidate["document_id"],
+                    page_number=candidate["page_number"],
+                    section_path=candidate["section_path"],
+                    text=candidate["text"][:300],
+                    bbox=candidate["bbox"],
+                    char_start=candidate["char_start"],
+                    char_end=candidate["char_end"],
+                    source_hash=candidate["source_hash"],
+                    confidence=candidate["score"],
                     verifier_status="pending",
                 )
             )
@@ -2465,6 +2495,34 @@ def _dedupe_evidence(evidence: list[RunEvidence]) -> list[RunEvidence]:
         seen.add(key)
         deduped.append(item)
     return deduped
+
+
+def _chunk_evidence_candidate(item: ChunkSearchResult) -> dict[str, Any]:
+    metadata = item.metadata if isinstance(item.metadata, dict) else {}
+    region = next(
+        (
+            candidate
+            for candidate in item.merged_bboxes
+            if isinstance(candidate, dict)
+            and int(candidate.get("page_idx", -1)) == item.page_idx
+        ),
+        {},
+    )
+    return {
+        "block_id": item.chunk_id,
+        "document_id": item.document_id,
+        "page_number": item.page_idx,
+        "section_path": str(metadata.get("section_path") or item.chunk_type),
+        "text": item.text,
+        "bbox": [float(value) for value in region.get("bbox", [])],
+        "char_start": int(metadata.get("char_start") or 0),
+        "char_end": int(metadata.get("char_end") or 0),
+        "source_hash": str(
+            metadata.get("source_hash")
+            or hashlib.sha256(item.text.encode("utf-8")).hexdigest()
+        ),
+        "score": item.score,
+    }
 
 
 def _block_candidates_for_finding(

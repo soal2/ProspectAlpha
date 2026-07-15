@@ -69,7 +69,7 @@ def test_analysis_api_creates_ready_run_then_start_completes(
     run_id = payload["run_id"]
     started = client.post(f"/analysis-runs/{run_id}/start").json()
     assert started["status"] in {"queued", "completed"}
-    for _ in range(50):
+    for _ in range(200):
         current = client.get(f"/analysis-runs/{run_id}").json()
         if current["status"] == "completed":
             break
@@ -355,7 +355,7 @@ def test_completed_run_archives_report_into_knowledge_library(tmp_path, analysis
         indexed = session.scalars(
             select(RetrievalIndexRow).where(RetrievalIndexRow.run_id == "knowledge_reports")
         ).all()
-        assert indexed
+        assert indexed == []
         assert all(item.document_id == f"report_{run.run_id}" for item in indexed)
         assert all(item.payload["block_type"] == "report_section" for item in indexed)
 

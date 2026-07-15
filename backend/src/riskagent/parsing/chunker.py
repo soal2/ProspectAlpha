@@ -558,7 +558,9 @@ def _image_description_cache_key(source_item_index: int, item: dict[str, Any]) -
 
 
 def _page_idx(item: dict[str, Any]) -> int:
-    return int(item.get("page_idx", 0))
+    # MinerU source items are zero-based, while PostgreSQL chunks and every
+    # public evidence API use the PDF/PDF.js one-based page number.
+    return int(item.get("page_idx", 0)) + 1
 
 
 def _text_value(value: Any) -> str:

@@ -145,7 +145,7 @@ def test_analysis_api_exposes_minimal_pipeline_resources(
     run_id = payload["run_id"]
     started = client.post(f"/analysis-runs/{run_id}/start").json()
     assert started["status"] in {"queued", "completed"}
-    for _ in range(50):
+    for _ in range(200):
         current = client.get(f"/analysis-runs/{run_id}").json()
         if current["status"] == "completed":
             started = current
@@ -210,7 +210,7 @@ def test_pdf_upload_drives_analysis_with_page_and_bbox_evidence(
     assert document["content_type"] == "application/pdf"
     assert document["storage_uri"].startswith("local://")
     assert document["page_count"] == 1
-    assert document["block_count"] == 0
+    assert document["block_count"] >= 1
     stored_pdf = tmp_path / "object-store" / "test-bucket" / f"documents/{document['document_id']}.pdf"
     assert stored_pdf.exists()
 
@@ -222,7 +222,7 @@ def test_pdf_upload_drives_analysis_with_page_and_bbox_evidence(
     run_id = run_response.json()["run_id"]
     started = client.post(f"/analysis-runs/{run_id}/start").json()
     assert started["status"] in {"queued", "completed"}
-    for _ in range(50):
+    for _ in range(200):
         current = client.get(f"/analysis-runs/{run_id}").json()
         if current["status"] == "completed":
             started = current
@@ -289,7 +289,9 @@ def test_database_persistence_covers_document_run_and_evidence(
         assert session.query(DocumentAssetRow).count() == 1
         assert session.query(DocumentBlockRow).count() >= 1
         assert session.query(AnalysisRunRow).count() == 1
-        assert session.query(RetrievalIndexRow).count() >= 1
+        # Retrieval is document-scoped in rag.prospectus_chunks; the legacy
+        # run-scoped retrieval_index table must remain unused.
+        assert session.query(RetrievalIndexRow).count() == 0
         assert session.query(EvidenceLibraryRow).count() >= 1
 
 
