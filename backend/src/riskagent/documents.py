@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from riskagent.database import Base, SessionLocal, init_db
+from riskagent.database import SessionLocal, ensure_database_schema, init_db
 from riskagent.ingestion import (
     ProspectusIngestionRepository,
     ProspectusRegisterRequest,
@@ -114,6 +114,9 @@ class DocumentAsset(BaseModel):
     text_chars: int
     block_count: int
     processing_status: Literal["uploaded", "queued", "processing", "ready", "failed"] = "ready"
+    processing_error_code: str | None = None
+    processing_error_message: str | None = None
+    processing_attempts: int = 0
     source_url: str | None = None
     created_at: str
     blocks: list[DocumentBlock] = Field(default_factory=list, exclude=True)
@@ -142,7 +145,7 @@ class DocumentRepository:
             if bind is None:
                 init_db()
             else:
-                Base.metadata.create_all(bind=bind)
+                ensure_database_schema(bind)
 
     def create(self, payload: DocumentCreate) -> DocumentAsset:
         raw = payload.content_text.encode("utf-8")
@@ -387,15 +390,20 @@ class DocumentRepository:
         return None
 
     def _indexed_chunk_count(self, document_id: str) -> int:
-        indexer = self.chunk_indexer or PostgresChunkIndexer()
+        indexer = self.chunk_indexer or PostgresChunkIndexer(ensure=False)
         try:
-            return indexer.indexed_chunk_count(document_id)
+            try:
+                return indexer.indexed_chunk_count(document_id)
+            except Exception as exc:
+                if "does not exist" in str(exc).lower() or "undefinedtable" in type(exc).__name__.lower():
+                    return 0
+                raise
         finally:
             if self.chunk_indexer is None:
                 indexer.close()
 
     def _indexed_document_blocks(self, document_id: str) -> list[DocumentBlock]:
-        indexer = self.chunk_indexer or PostgresChunkIndexer()
+        indexer = self.chunk_indexer or PostgresChunkIndexer(ensure=False)
         try:
             chunks = indexer.list_document_chunks(document_id)
         finally:
@@ -573,7 +581,7 @@ def process_prospectus_document(
     chunk_output_dir = (
         Path(request.chunk_output_dir).expanduser().resolve()
         if request.chunk_output_dir is not None
-        else processed_root / registration.document_id / "chunks" / settings.chunker.name
+        else parsed.output_dir.parent / "chunks" / settings.chunker.name
     )
     active_image_describer = (
         image_describer
@@ -649,7 +657,7 @@ def process_registered_prospectus(document_id: str) -> None:
     ingestion = ProspectusIngestionRepository()
     try:
         registration = ingestion.get(document_id)
-        _set_prospectus_status(document_id, "processing")
+        _set_prospectus_status(document_id, "processing", clear_error=True, increment_attempt=True)
         process_prospectus_document(
             ProspectusPipelineRequest(
                 source_path=registration.raw_pdf_path,
@@ -659,21 +667,81 @@ def process_registered_prospectus(document_id: str) -> None:
             ),
             ingestion_repository=ingestion,
         )
-        _set_prospectus_status(document_id, "indexed")
-    except Exception:
-        _set_prospectus_status(document_id, "failed")
+        _set_prospectus_status(document_id, "indexed", clear_error=True)
+    except Exception as exc:
+        error_code, error_message = _classify_processing_error(exc)
+        _set_prospectus_status(
+            document_id,
+            "failed",
+            error_code=error_code,
+            error_message=error_message,
+        )
         logger.exception("Asynchronous MinerU pipeline failed for %s", document_id)
     finally:
         with _ACTIVE_PROSPECTUS_PIPELINES_LOCK:
             _ACTIVE_PROSPECTUS_PIPELINES.discard(document_id)
 
 
-def _set_prospectus_status(document_id: str, status: str) -> None:
+def queue_registered_prospectus(document_id: str) -> None:
+    """Reset a failed/unprocessed document so the API can enqueue a new attempt."""
+
+    with SessionLocal() as session:
+        row = session.get(ProspectusDocumentRow, document_id)
+        if row is None:
+            raise KeyError(document_id)
+        if row.status == "processing":
+            raise ValueError("Document parsing is already in progress.")
+        row.status = "queued"
+        row.processing_error_code = None
+        row.processing_error_message = None
+        session.commit()
+
+
+def _set_prospectus_status(
+    document_id: str,
+    status: str,
+    *,
+    error_code: str | None = None,
+    error_message: str | None = None,
+    clear_error: bool = False,
+    increment_attempt: bool = False,
+) -> None:
     with SessionLocal() as session:
         row = session.get(ProspectusDocumentRow, document_id)
         if row is not None:
             row.status = status
+            if clear_error:
+                row.processing_error_code = None
+                row.processing_error_message = None
+            elif error_code or error_message:
+                row.processing_error_code = error_code
+                row.processing_error_message = error_message
+            if increment_attempt:
+                row.processing_attempts = int(row.processing_attempts or 0) + 1
             session.commit()
+
+
+def _classify_processing_error(exc: Exception) -> tuple[str, str]:
+    """Map internal parser failures to stable, user-safe API diagnostics."""
+
+    name = type(exc).__name__
+    detail = str(exc).lower()
+    if name == "LocalEntryNotFoundError" or "huggingface" in detail or "modelscope" in detail:
+        return (
+            "model_download_failed",
+            "MinerU 模型不可用或下载失败，请检查模型源和网络后重新解析。",
+        )
+    if "mineru is not installed" in detail or name == "ModuleNotFoundError":
+        return "mineru_not_installed", "MinerU 未安装，后端无法启动 PDF 解析。"
+    if "content list not found" in detail:
+        return "parser_output_missing", "MinerU 未生成内容清单，请检查解析输出和磁盘空间。"
+    if "pdf" in detail and any(token in detail for token in ("invalid", "broken", "damaged", "cannot open")):
+        return "invalid_pdf", "PDF 文件损坏、加密或格式不受支持。"
+    if "chunk" in detail:
+        return "chunking_failed", "PDF 已解析，但文档分块失败。"
+    if "index" in detail or "embedding" in detail or "vector" in detail:
+        return "indexing_failed", "文档分块已生成，但写入检索索引失败。"
+    return "parser_failed", f"MinerU 解析失败（{name}）。"
 
 
 def get_default_document_repository() -> DocumentRepository:
@@ -822,6 +890,9 @@ def _asset_from_registered_row(
             if row.status == "processing"
             else "queued"
         ),
+        processing_error_code=row.processing_error_code,
+        processing_error_message=row.processing_error_message,
+        processing_attempts=int(row.processing_attempts or 0),
         source_url=row.source_url,
         created_at=row.created_at.isoformat()
         if hasattr(row.created_at, "isoformat")

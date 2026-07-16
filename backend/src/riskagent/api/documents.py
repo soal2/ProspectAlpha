@@ -22,9 +22,11 @@ from riskagent.documents import (
     DocumentRepository,
     get_default_document_repository,
     process_registered_prospectus,
+    queue_registered_prospectus,
     register_uploaded_prospectus,
 )
 from riskagent.ingestion import ProspectusRegistration
+from riskagent.parsing import mineru_runtime_health
 
 
 router = APIRouter(prefix="/documents", tags=["documents"])
@@ -70,7 +72,7 @@ async def upload_document(
                 source_url=source_url,
             )
             asset = await asyncio.to_thread(repo.get, registration.document_id)
-            if asset.block_count <= 0 and asset.processing_status != "processing":
+            if asset.block_count <= 0 and asset.processing_status in {"uploaded", "queued"}:
                 background_tasks.add_task(
                     process_registered_prospectus,
                     registration.document_id,
@@ -91,6 +93,33 @@ async def upload_document(
 @router.get("", response_model=list[DocumentAsset])
 def list_documents() -> list[DocumentAsset]:
     return _repo().list_assets()
+
+
+@router.get("/parser-health")
+def parser_health() -> dict[str, object]:
+    return mineru_runtime_health()
+
+
+@router.post("/{document_id}/reparse", response_model=DocumentAsset, status_code=status.HTTP_202_ACCEPTED)
+async def reparse_document(
+    document_id: str,
+    background_tasks: BackgroundTasks,
+) -> DocumentAsset:
+    repo = _repo()
+    try:
+        asset = await asyncio.to_thread(repo.get, document_id)
+        if asset.block_count > 0 or asset.processing_status == "ready":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Document is already parsed and indexed.",
+            )
+        await asyncio.to_thread(queue_registered_prospectus, document_id)
+        background_tasks.add_task(process_registered_prospectus, document_id)
+        return await asyncio.to_thread(repo.get, document_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 
 @router.get("/{document_id}/file")

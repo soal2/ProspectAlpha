@@ -61,6 +61,7 @@ def test_analyze_findings_with_llm_enriches_candidate_fields(monkeypatch):
             "items": [
                 {
                     "rule_id": "R1",
+                    "evaluation_result": "triggered",
                     "severity": "high",
                     "confidence": 0.9,
                     "reasoning_summary": "第 12 页第 3 节显示现金流压力，证据片段已覆盖。",
@@ -86,6 +87,37 @@ def test_analyze_findings_with_llm_enriches_candidate_fields(monkeypatch):
     assert candidate.severity == "high"
     assert candidate.confidence == 0.9
     assert candidate.evaluation_result == "triggered"
+
+
+def test_analyze_findings_with_llm_preserves_confirmed_non_trigger(monkeypatch):
+    llm = _ScriptedLLM(
+        {
+            "items": [
+                {
+                    "rule_id": "R1",
+                    "evaluation_result": "not_triggered",
+                    "severity": "low",
+                    "confidence": 0.92,
+                    "reasoning_summary": "第 12 页明确披露不存在该安排，触发条件不成立。",
+                    "needs_more_evidence": False,
+                }
+            ]
+        }
+    )
+    monkeypatch.setattr(expert_llm_module, "get_default_llm_client", lambda: llm)
+    candidate = _candidate("R1")
+
+    asyncio.run(
+        expert_llm_module.analyze_findings_with_llm(
+            agent_name="agent_name",
+            agent_title="agent_title",
+            candidates=[candidate],
+            evidence_snippets=["snippet"],
+        )
+    )
+
+    assert candidate.evaluation_result == "not_triggered"
+    assert candidate.confidence == 0.92
 
 
 def test_analyze_findings_with_llm_propagates_llm_errors(monkeypatch):

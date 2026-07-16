@@ -5,7 +5,11 @@ from pathlib import Path
 from sqlalchemy.orm import sessionmaker
 
 from riskagent.database import make_engine
-from riskagent.documents import ProspectusPipelineRequest, process_prospectus_document
+from riskagent.documents import (
+    ProspectusPipelineRequest,
+    _classify_processing_error,
+    process_prospectus_document,
+)
 from riskagent.ingestion import ProspectusIngestionRepository
 
 
@@ -22,6 +26,20 @@ class FakeChunkIndexer:
             }
         )
         return len([chunk for chunk in chunks if chunk.text.strip()])
+
+
+def test_processing_errors_are_classified_for_frontend_recovery():
+    code, message = _classify_processing_error(
+        FileNotFoundError("MinerU content list not found after parsing")
+    )
+    assert code == "parser_output_missing"
+    assert "内容清单" in message
+
+    code, message = _classify_processing_error(
+        RuntimeError("huggingface model download failed")
+    )
+    assert code == "model_download_failed"
+    assert "模型" in message
 
 
 def test_process_prospectus_document_orchestrates_register_parse_chunk_and_index(tmp_path, monkeypatch):

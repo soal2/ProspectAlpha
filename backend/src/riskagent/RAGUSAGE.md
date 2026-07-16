@@ -124,6 +124,8 @@ https://llm-brsq0ce4o43nxul5.cn-beijing.maas.aliyuncs.com/api/v1
   - `hybrid`：向量 + 全文组合。
 
 检索必须传 `document_id`，避免跨招股书混搜。
+三种只读检索入口都以 `ensure=False` 打开索引器，禁止在 Agent 并发查询期间
+重复创建 schema、函数或 trigger；DDL 仅由入库/初始化路径执行。
 
 ## 配置文件
 
@@ -297,6 +299,15 @@ uv run python scripts/run_ysyy_pipeline.py
 5. 对所有非空 chunk 生成 embedding。
 6. 写入 PostgreSQL `rag` schema。
 7. 分别跑 `vector`、`full_text`、`hybrid` 检索 smoke test。
+
+MinerU 的 `pdf_file_name` 是逻辑输出键，不要求扩展名。本项目固定传入
+`document_id`，因此标准路径是
+`data/processed/{document_id}/ocr/{document_id}_content_list.json`。不要传入
+`{document_id}.pdf`，否则 MinerU 会原样生成带 `.pdf` 的目录和文件前缀。
+
+解析失败后先查看 `GET /documents/{document_id}` 返回的错误码，再调用
+`POST /documents/{document_id}/reparse`。启动前可用
+`GET /documents/parser-health` 检查 MinerU、模型源和缓存状态。
 
 ## 直接检索
 

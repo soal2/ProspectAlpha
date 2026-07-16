@@ -49,7 +49,9 @@ def evaluate_text_against_rules(
 ) -> list[RuleEvaluation]:
     repo = repository or get_default_repository()
     rule_set = rule_set_snapshot or repo.load().model_dump()
-    active_rules = rules or repo.select_rules()
+    # An explicit empty list is a real role boundary (for example evidence or
+    # quality agents), not a request to silently evaluate all 143 rules.
+    active_rules = repo.select_rules() if rules is None else rules
     normalized_text = text.lower()
     findings: list[RuleEvaluation] = []
     for rule in active_rules:

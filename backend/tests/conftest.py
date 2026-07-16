@@ -153,6 +153,7 @@ def analysis_repo_factory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             items.append(
                 {
                     "rule_id": candidate.rule_id,
+                    "evaluation_result": "triggered",
                     "severity": candidate.severity,
                     "confidence": 0.8,
                     "reasoning_summary": candidate.reasoning_summary,

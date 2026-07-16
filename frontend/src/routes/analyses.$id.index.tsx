@@ -190,7 +190,10 @@ function RealtimeStream() {
           id,
           (event) => {
             if (cancelled) return;
-            if (event.event_id && !liveEventsRef.current.some((item) => item.event_id === event.event_id)) {
+            if (
+              event.event_id &&
+              !liveEventsRef.current.some((item) => item.event_id === event.event_id)
+            ) {
               durableCursorRef.current += 1;
             }
             queueLiveEvent(event);
@@ -578,7 +581,11 @@ function RealtimeStream() {
             {!filteredLiveEvidence.length ? (
               <div className="mt-16 text-center text-xs text-muted-foreground">
                 <FileText className="mx-auto mb-2 size-8 opacity-40" />
-                证据采集中，稍候片刻……
+                {filter
+                  ? "没有匹配当前筛选条件的证据。"
+                  : terminalStatuses.has(run.status)
+                    ? "本次分析未形成通过证据门禁的证据，请查看报告局限与检索事件。"
+                    : "证据采集中，稍候片刻……"}
               </div>
             ) : null}
           </div>
@@ -911,7 +918,9 @@ function eventToBubble(event: AnalysisRunEvent, runCreatedAt: string, index: num
   return {
     who: event.actor_name || "analysis_run",
     kind: eventKind(event.event_type),
-    text: event.summary ? `${event.title}${modelMeta}：${event.raw_response || event.summary}` : event.title,
+    text: event.summary
+      ? `${event.title}${modelMeta}：${event.raw_response || event.summary}`
+      : event.title,
     t: relativeTime(runCreatedAt, event.created_at, index),
   };
 }

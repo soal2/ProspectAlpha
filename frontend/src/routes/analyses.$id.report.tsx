@@ -88,7 +88,11 @@ function ReportPage() {
             </div>
           </div>
           <div className="mt-5 grid gap-3 sm:grid-cols-4">
-            <HeroStat icon={ShieldAlert} label="风险评分" value={analysis.riskScore} />
+            <HeroStat
+              icon={ShieldAlert}
+              label="风险评分"
+              value={analysis.riskLevel === "unrated" ? "未评级" : analysis.riskScore}
+            />
             <HeroStat icon={FileBadge} label="证据" value={analysis.evidenceCount} />
             <HeroStat icon={Network} label="专家" value={analysis.experts} />
             <HeroStat icon={Database} label="报告状态" value={report?.reviewStatus ?? "等待"} />

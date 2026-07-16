@@ -128,6 +128,15 @@ http://127.0.0.1:5173/intake
 6. 回答会流式输出；回答下方显示检索到的证据页码。
 7. 点击某条 `P.N · 章节` 引用，PDF 查看器应打开对应页，并用黄色框高亮 bbox 原文。
 
+解析状态只有一个权威来源：`GET /documents/{document_id}`。`ready` 且
+`block_count > 0` 才表示可启动分析；`failed` 会同时返回
+`processing_error_code`、面向用户的 `processing_error_message` 和
+`processing_attempts`。失败文档无需重新上传，可点击前端“重新解析”或调用：
+
+```text
+POST /documents/{document_id}/reparse
+```
+
 一次问答只检索当前页面绑定的一个 `document_id`：
 
 ```text
@@ -176,6 +185,18 @@ OK document=doc_xxx blocks=123 PostgreSQL RAG answer completed
 curl -F file=@/绝对路径/招股书.pdf \
   http://127.0.0.1:8000/documents/upload
 ```
+
+启动前可检查 MinerU 安装、模型源和本地模型缓存：
+
+```bash
+curl http://127.0.0.1:8000/documents/parser-health
+```
+
+返回 `model_download_required` 表示 MinerU 已安装，但首次解析仍需下载模型。
+国内网络可在 `backend/.env` 中设置 `MINERU_MODEL_SOURCE=modelscope`。MinerU
+输出使用不带扩展名的稳定 `document_id`，例如
+`data/processed/doc_xxx/ocr/doc_xxx_content_list.json`；调用方不得把 `.pdf`
+拼入 MinerU 的逻辑文件名，否则会改变输出目录和文件前缀。
 
 ## 五、Docker 后端全栈（可选）
 
@@ -269,17 +290,29 @@ curl http://127.0.0.1:8000/health
 
 ### 上传后 block_count 为 0
 
-- 确认 PDF 有可提取的文字层；纯扫描图片 PDF 的快速上传路径可能无法提取文本；
-- 查看后端终端报错；
+- 查看 `processing_status`；`queued/processing` 表示仍在运行，`failed` 表示已结束且失败；
+- 优先查看接口返回的 `processing_error_code` 和 `processing_error_message`；
+- `model_download_failed` 时检查 `/documents/parser-health` 和模型源；
+- `parser_output_missing` 时检查 MinerU 输出是否严格位于不带 `.pdf` 的 `document_id` 目录；
 - 确认 PostgreSQL 健康且 `DATABASE_URL` 不是 SQLite；
-- 对扫描件或复杂版面使用 MinerU pipeline 解析流程。
+- 修复环境后调用 `POST /documents/{document_id}/reparse`，不要重复上传同一文件。
 
 ### 问答失败或无引用
 
 - 确认页面已经显示具体 `document_id` 和大于 0 的检索块数；
 - 确认 `OPENAI_API_KEY`、模型和 base URL 有效；
-- 确认 embedding key 已配置。未配置时会降级为 hashing vectors，检索质量会显著下降；
+- 确认 embedding key 已配置。应用检索不再降级为 hashing vectors，缺少 key 会显式启动失败；
 - 检查 `rag.prospectus_chunks` 是否存在该 `document_id` 的记录。
+
+### 分析完成但证据和报告均为 0
+
+- 查看运行事件或 `replacement_history` 是否出现 PostgreSQL `DeadlockDetected`；
+- 只读 RAG 检索不得执行 schema/trigger DDL。当前实现已在 vector、full-text、hybrid
+  三个入口固定使用 `ensure=False`，旧进程必须重启后才会加载修复；
+- 检查各模块的 `rule_ids`：若模块存在 triggered 规则但最终 findings 为 0，说明规则
+  合并链路异常；当前实现会按 `triggered/not_triggered/insufficient_evidence` 的结论质量合并；
+- 已完成的空报告不会自动重算。重启后端后应创建一次新分析；旧 run 仍保留，作为当时
+  失败链路的审计记录。
 
 ### PostgreSQL collation version warning
 

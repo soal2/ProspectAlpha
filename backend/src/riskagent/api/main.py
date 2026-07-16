@@ -53,6 +53,17 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     def _probe_embedding_provider() -> None:
         load_dotenv()
+        from riskagent.parsing import mineru_runtime_health
+
+        parser_health = mineru_runtime_health()
+        log_method = logger.info if parser_health["status"] == "ready" else logger.warning
+        log_method(
+            "MinerU runtime status=%s source=%s cache_present=%s: %s",
+            parser_health["status"],
+            parser_health["model_source"],
+            parser_health["model_cache_present"],
+            parser_health["message"],
+        )
         embedding_key = (
             os.getenv("EMBEDDING_API_KEY", "").strip()
             or os.getenv("DASHSCOPE_API_KEY", "").strip()

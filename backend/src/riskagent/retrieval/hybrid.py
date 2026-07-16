@@ -14,7 +14,10 @@ def prospectus_hybrid_search(
     indexer: PostgresChunkIndexer | None = None,
 ) -> list[ChunkSearchResult]:
     """Search one prospectus in PostgreSQL; cross-document search is forbidden."""
-    active_indexer = indexer or PostgresChunkIndexer()
+    # Query paths must never run schema DDL. Multiple experts search in
+    # parallel, and repeating trigger/function creation here can deadlock the
+    # entire agent team. Schema creation belongs to ingestion/startup.
+    active_indexer = indexer or PostgresChunkIndexer(ensure=False)
     try:
         return active_indexer.hybrid_search(
             query=query,

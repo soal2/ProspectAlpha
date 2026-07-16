@@ -36,6 +36,7 @@ export interface AnalysisFinding {
   evidence_snippets: string[];
   matched_terms: string[];
   requires_human_review: boolean;
+  verification_status?: string;
 }
 
 export interface OrchestraStage {
@@ -225,6 +226,9 @@ export type UploadedDocument = {
   text_chars: number;
   block_count: number;
   processing_status: "uploaded" | "queued" | "processing" | "ready" | "failed";
+  processing_error_code: string | null;
+  processing_error_message: string | null;
+  processing_attempts: number;
   source_url: string | null;
   created_at: string;
 };
@@ -713,6 +717,22 @@ export async function getDocument(documentId: string) {
   return apiRequest<UploadedDocument>(`/documents/${documentId}`);
 }
 
+export async function reparseDocument(documentId: string) {
+  return apiRequest<UploadedDocument>(`/documents/${documentId}/reparse`, {
+    method: "POST",
+  });
+}
+
+export async function getDocumentParserHealth() {
+  return apiRequest<{
+    status: "ready" | "model_download_required" | "unavailable";
+    installed: boolean;
+    model_source: string;
+    model_cache_present: boolean;
+    message: string;
+  }>("/documents/parser-health");
+}
+
 export async function waitForDocumentReady(
   documentId: string,
   onProgress?: (document: UploadedDocument) => void,
@@ -723,7 +743,9 @@ export async function waitForDocumentReady(
     onProgress?.(document);
     if (document.block_count > 0 || document.processing_status === "ready") return document;
     if (document.processing_status === "failed") {
-      throw new Error("MinerU 解析失败，请检查后端日志后重新上传。");
+      throw new Error(
+        document.processing_error_message ?? "MinerU 解析失败，可点击“重新解析”再次尝试。",
+      );
     }
     await new Promise((resolve) => setTimeout(resolve, 3000));
   }
@@ -981,6 +1003,9 @@ function toAnalysisSummary(run: AnalysisRun, evidenceCountOverride?: number): An
     run.findings.reduce((total, finding) => total + finding.evidence_snippets.length, 0);
   const highConfidence = run.findings.filter((finding) => finding.confidence >= 0.75).length;
   const riskScore = scoreRun(run);
+  const hasAdmittedFinding = run.findings.some((finding) =>
+    ["supported", "weakly_supported"].includes(finding.verification_status ?? ""),
+  );
   return {
     id: run.run_id,
     code: String(structured.code ?? structured.ticker ?? "IPO"),
@@ -989,7 +1014,14 @@ function toAnalysisSummary(run: AnalysisRun, evidenceCountOverride?: number): An
     listingDate: String(structured.listing_date ?? run.data_cutoff_date),
     offerPrice: Number(structured.offer_price ?? 0),
     offerSize: String(structured.offer_size ?? "待确认"),
-    riskLevel: riskScore >= 70 ? "high" : riskScore >= 40 ? "mid" : "low",
+    riskLevel:
+      run.status === "completed" && !hasAdmittedFinding
+        ? "unrated"
+        : riskScore >= 70
+          ? "high"
+          : riskScore >= 40
+            ? "mid"
+            : "low",
     riskScore,
     evidenceCount,
     highConfidence,

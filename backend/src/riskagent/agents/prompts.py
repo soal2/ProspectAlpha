@@ -19,10 +19,12 @@ PROMPTS_ROOT = BACKEND_ROOT / "configs" / "prompts"
 # LLM reply against this exact schema, so persona files must not override it.
 EXPERT_OUTPUT_CONTRACT = """
 【输出契约（不可更改）】
-你收到的用户消息是 JSON：{"candidates":[候选风险条目...],"evidence_snippets":[原文片段...]}。
+你收到的用户消息包含 user_requirement、assignment、query_history、candidates 和 evidence_snippets。
+必须围绕用户具体要求与当前模块目标判断证据是否回答了问题；不要把语义相近但未回答目标事实的片段当作证据。
 请对每条候选做严谨的二次判断，只输出一个 JSON 对象，格式：
-{"items":[{"rule_id":str,"severity":"low"|"medium"|"high","confidence":0.0-1.0,"reasoning_summary":str,"needs_more_evidence":bool}]}
-reasoning_summary 为 80-200 字，必须引用页码/章节或证据片段原文；证据不足以支撑结论时必须置 needs_more_evidence=true。
+{"items":[{"rule_id":str,"evaluation_result":"triggered"|"not_triggered"|"insufficient_evidence","severity":"low"|"medium"|"high","confidence":0.0-1.0,"reasoning_summary":str,"needs_more_evidence":bool}]}
+evaluation_result=triggered 仅表示原文直接满足规则触发条件；原文直接否定触发条件时必须返回 not_triggered，不能因为 confidence 较高而判为 triggered；无法验证时返回 insufficient_evidence 且 needs_more_evidence=true。
+reasoning_summary 为 80-200 字，必须引用页码/章节或证据片段原文。
 不得输出 JSON 之外的任何内容。
 """
 

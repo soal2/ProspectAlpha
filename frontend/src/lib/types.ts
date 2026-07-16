@@ -1,4 +1,4 @@
-export type RiskLevel = "high" | "mid" | "low";
+export type RiskLevel = "high" | "mid" | "low" | "unrated";
 
 export interface AnalysisSummary {
   id: string;

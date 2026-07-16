@@ -20,6 +20,7 @@ import {
   getAnalyses,
   getAnalysisOptions,
   listDocuments,
+  reparseDocument,
   uploadDocument,
   waitForDocumentReady,
   type AnalysisOptions,
@@ -94,6 +95,17 @@ function createSessionId() {
   const id = `#${prefix}-${num}`;
   window.sessionStorage.setItem(storageKey, id);
   return id;
+}
+
+function documentStatusText(document: UploadedDocument) {
+  if (document.processing_status === "ready" || document.block_count > 0) {
+    return `${document.block_count} 个检索块已入库`;
+  }
+  if (document.processing_status === "failed") {
+    return document.processing_error_message ?? "MinerU 解析失败";
+  }
+  if (document.processing_status === "processing") return "MinerU 正在解析";
+  return "等待 MinerU 解析";
 }
 
 function WorkspacePage() {
@@ -267,10 +279,17 @@ function WorkspacePage() {
                     </div>
                     <div className="mt-0.5 text-[10.5px] text-muted-foreground">
                       {uploadedDocument.page_count || "--"} 页 ·{" "}
-                      {formatBytes(uploadedDocument.file_size_bytes)} · 已接入
+                      {formatBytes(uploadedDocument.file_size_bytes)} ·{" "}
+                      {documentStatusText(uploadedDocument)}
                     </div>
                   </div>
-                  <CheckCircle2 className="size-4 shrink-0 text-[color:var(--risk-low)]" />
+                  {uploadedDocument.processing_status === "failed" ? (
+                    <AlertCircle className="size-4 shrink-0 text-destructive" />
+                  ) : uploadedDocument.block_count > 0 ? (
+                    <CheckCircle2 className="size-4 shrink-0 text-[color:var(--risk-low)]" />
+                  ) : (
+                    <Loader2 className="size-4 shrink-0 animate-spin text-[color:var(--gold)]" />
+                  )}
                 </div>
               ) : null}
 
@@ -288,14 +307,23 @@ function WorkspacePage() {
                       );
                       setUploadedDocument(selected ?? null);
                       processingDocumentIdRef.current =
-                        selected && selected.block_count <= 0 ? selected.document_id : null;
-                      setDocumentProcessing(Boolean(selected && selected.block_count <= 0));
+                        selected && ["queued", "processing"].includes(selected.processing_status)
+                          ? selected.document_id
+                          : null;
+                      setDocumentProcessing(
+                        Boolean(
+                          selected && ["queued", "processing"].includes(selected.processing_status),
+                        ),
+                      );
                       setFlowError(
                         selected?.processing_status === "failed"
-                          ? "该文档的 MinerU 解析失败，请检查后端日志后重新上传。"
+                          ? (selected.processing_error_message ?? "该文档的 MinerU 解析失败。")
                           : null,
                       );
-                      if (selected && selected.block_count <= 0) {
+                      if (
+                        selected &&
+                        ["queued", "processing"].includes(selected.processing_status)
+                      ) {
                         void monitorDocumentProcessing(selected.document_id);
                       }
                     }}
@@ -337,6 +365,20 @@ function WorkspacePage() {
                     )}
                     {uploadedDocument ? "上传其他 PDF" : "上传 PDF"}
                   </button>
+                  {uploadedDocument?.processing_status === "failed" ? (
+                    <button
+                      onClick={() => void handleReparseDocument(uploadedDocument.document_id)}
+                      disabled={uploading}
+                      className="inline-flex h-9 items-center gap-2 rounded-sm border border-destructive/30 bg-destructive/5 px-3 text-[12px] font-medium text-destructive hover:bg-destructive/10 disabled:opacity-60"
+                    >
+                      {uploading ? (
+                        <Loader2 className="size-3.5 animate-spin" />
+                      ) : (
+                        <ArrowRight className="size-3.5" />
+                      )}
+                      重新解析
+                    </button>
+                  ) : null}
                   <button
                     onClick={() => {
                       setFlowError(null);
@@ -565,13 +607,34 @@ function WorkspacePage() {
         document,
         ...current.filter((item) => item.document_id !== document.document_id),
       ]);
-      if (document.block_count <= 0) {
+      if (["queued", "processing", "uploaded"].includes(document.processing_status)) {
         void monitorDocumentProcessing(document.document_id);
+      } else if (document.processing_status === "failed") {
+        setDocumentProcessing(false);
+        setFlowError(document.processing_error_message ?? "MinerU 解析失败，可点击“重新解析”。");
       } else {
         setDocumentProcessing(false);
       }
     } catch (err) {
       setFlowError(err instanceof Error ? err.message : "PDF 上传失败");
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  async function handleReparseDocument(documentId: string) {
+    setUploading(true);
+    setFlowError(null);
+    try {
+      const queued = await reparseDocument(documentId);
+      setUploadedDocument(queued);
+      setAvailableDocuments((current) => [
+        queued,
+        ...current.filter((item) => item.document_id !== documentId),
+      ]);
+      void monitorDocumentProcessing(documentId);
+    } catch (err) {
+      setFlowError(err instanceof Error ? err.message : "重新解析失败");
     } finally {
       setUploading(false);
     }

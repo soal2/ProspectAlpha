@@ -656,7 +656,7 @@ class AnalysisRunRepository:
         } - {""}
         if not document_ids:
             return []
-        indexer = PostgresChunkIndexer()
+        indexer = PostgresChunkIndexer(ensure=False)
         try:
             chunks_by_document = {
                 document_id: indexer.list_document_chunks(document_id)

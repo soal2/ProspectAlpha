@@ -106,6 +106,15 @@ PERSONA_SKILL_MAP: dict[str, str] = {
     "bai_shice_market_agent": "market_agent",
 }
 
+CATEGORY_ALIASES: dict[str, tuple[str, ...]] = {
+    "客户集中": ("客户/供应商依赖",),
+    "供应商集中": ("客户/供应商依赖",),
+    "研发": ("核心技术/知识产权",),
+    "存货": ("营运能力",),
+    "应收账款": ("营运能力",),
+    "市场空间": ("行业竞争",),
+}
+
 
 def skills_for_agents(agent_names: list[str] | None = None) -> list[DomainSkill]:
     selected: set[str] = set()
@@ -194,7 +203,12 @@ def skill_payload(skill: DomainSkill, rule_count: int, rules: list[RiskRule]) ->
 def _matches_skill(skill: DomainSkill, rule: RiskRule) -> bool:
     if skill.rule_types and rule.rule_type in skill.rule_types:
         return True
-    if skill.categories and rule.category in skill.categories:
+    expanded_categories = {
+        category
+        for configured in skill.categories
+        for category in (configured, *CATEGORY_ALIASES.get(configured, ()))
+    }
+    if expanded_categories and rule.category in expanded_categories:
         return True
     return False
 

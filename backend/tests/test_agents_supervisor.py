@@ -11,6 +11,7 @@ from riskagent.agents.orchestrator import (
 from riskagent.agents.supervisor import AgentTeamSupervisor
 from riskagent.database import Base, make_engine
 from riskagent.risk_rules import RiskRuleRepository
+from riskagent.skills.risk_extract import RuleEvaluation
 from sqlalchemy.orm import sessionmaker
 
 
@@ -51,6 +52,50 @@ def _legacy_agent_specs() -> list[AgentSpec]:
         AgentSpec(name="market_agent", title="Market and industry specialist"),
         AgentSpec(name="business_agent", title="Business and disclosure specialist"),
     ]
+
+
+def _evaluation(*, result: str, confidence: float, source: str) -> RuleEvaluation:
+    return RuleEvaluation(
+        rule_set_id="rules",
+        rule_version="v1",
+        rule_id="R1",
+        dimension_code="D1",
+        rule_type="qualitative",
+        category="测试",
+        title="测试规则",
+        trigger_condition="测试条件",
+        evaluation_result=result,
+        reasoning_summary="测试结论",
+        matched_terms=["测试"],
+        evidence_snippets=["第 1 页测试证据"],
+        source_type=source,
+        confidence=confidence,
+    )
+
+
+def test_dedupe_evaluations_keeps_stronger_later_conclusion():
+    deduped = supervisor_module._dedupe_evaluations(
+        [
+            _evaluation(result="insufficient_evidence", confidence=0.4, source="first"),
+            _evaluation(result="triggered", confidence=0.8, source="replacement"),
+        ]
+    )
+
+    assert len(deduped) == 1
+    assert deduped[0].evaluation_result == "triggered"
+    assert deduped[0].source_type == "replacement"
+
+
+def test_dedupe_evaluations_does_not_bias_conflicts_toward_risk():
+    deduped = supervisor_module._dedupe_evaluations(
+        [
+            _evaluation(result="triggered", confidence=0.6, source="first"),
+            _evaluation(result="not_triggered", confidence=0.9, source="reviewer"),
+        ]
+    )
+
+    assert deduped[0].evaluation_result == "not_triggered"
+    assert deduped[0].source_type == "reviewer"
 
 
 def test_agent_supervisor_runs_only_strategy_selected_threads(tmp_path):
@@ -470,6 +515,8 @@ def test_needs_more_evidence_requests_strategy_guidance(tmp_path, monkeypatch):
         assert guidance.get("kind") == "needs_more_evidence"
         assert guidance.get("responder") == "strategic_agent"
         assert "保留已命中的规则判断" in guidance.get("guidance", "")
+        assert guidance.get("attempted_query_count", 0) >= 0
+        assert isinstance(guidance.get("suggested_queries"), list)
     guidance_requests = [
         event
         for event in result.events

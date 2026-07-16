@@ -11,6 +11,8 @@ import re
 from collections.abc import Iterable
 from typing import Any
 
+from pydantic import BaseModel, Field
+
 from riskagent.risk_rules import RiskRule
 
 
@@ -47,6 +49,30 @@ _WEAK_ANCHORS = frozenset(
         "营业收入", "營業收入",
     }
 )
+_USER_CONCEPT_QUERIES: dict[str, tuple[str, ...]] = {
+    "股票代号": ("股份代號", "股份代号", "stock code"),
+    "股份代号": ("股份代號", "股份代号", "stock code"),
+    "发行价": ("發售價", "发售价", "offer price"),
+    "发售价": ("發售價", "发售价", "offer price"),
+    "发行定价": ("發售價", "发行定价", "offer price"),
+    "估值": ("估值", "市盈率", "市销率", "valuation"),
+    "破发": ("發售價", "发行定价", "市场风险"),
+    "现金流": ("經營活動所得現金淨額", "经营活动现金流净额", "cash flow"),
+    "客户集中": ("五大客戶", "主要客戶", "customer concentration"),
+    "供应商集中": ("五大供應商", "主要供應商", "supplier concentration"),
+    "关联交易": ("關連交易", "關聯方交易", "related party transactions"),
+    "诉讼": ("訴訟", "法律程序", "litigation"),
+}
+
+
+class RetrievalIntent(BaseModel):
+    """One atomic evidence question and its complementary short searches."""
+
+    question: str
+    queries: list[str] = Field(min_length=1)
+    section_hints: list[str] = Field(default_factory=list)
+    required_facts: list[str] = Field(default_factory=list)
+    source: str = "assignment"
 
 
 def rule_anchor_terms(rule: RiskRule) -> list[str]:
@@ -106,28 +132,119 @@ def build_module_search_queries(
     goal: str,
     rules: Iterable[RiskRule],
     user_requirement: str = "",
+    expected_outputs: Iterable[str] = (),
     limit: int = 14,
 ) -> list[str]:
-    """Create category-scoped queries instead of one broad module query."""
+    """Flatten atomic retrieval intents into short hybrid-search queries."""
 
-    grouped: dict[str, list[RiskRule]] = {}
-    for rule in rules:
-        grouped.setdefault(rule.category, []).append(rule)
-    queries: list[str] = []
+    intents = build_module_search_intents(
+        module=module,
+        goal=goal,
+        rules=rules,
+        user_requirement=user_requirement,
+        expected_outputs=expected_outputs,
+        limit=limit,
+    )
+    queries = _round_robin_queries(intents)
+    return list(dict.fromkeys(query.strip() for query in queries if query.strip()))[: max(1, limit)]
+
+
+def build_module_search_intents(
+    *,
+    module: str,
+    goal: str,
+    rules: Iterable[RiskRule],
+    user_requirement: str = "",
+    expected_outputs: Iterable[str] = (),
+    limit: int = 14,
+) -> list[RetrievalIntent]:
+    """Translate user/assignment/rules into auditable, atomic evidence needs."""
+
+    active_rules = list(rules)
+    intents: list[RetrievalIntent] = []
     focus = _specific_user_focus(user_requirement)
-    for category, category_rules in grouped.items():
-        items = "；".join(rule.risk_item for rule in category_rules[:5])
-        conditions = "；".join(rule.trigger_condition for rule in category_rules[:3])
-        sections = "；".join(
-            dict.fromkeys(rule.source_sections for rule in category_rules[:5] if rule.source_sections)
+    if focus:
+        concept_queries = _concept_queries(focus)
+        intents.append(
+            RetrievalIntent(
+                question=focus,
+                queries=concept_queries or [focus[:120]],
+                required_facts=_matched_concepts(focus),
+                source="user_requirement",
+            )
         )
-        queries.append(
-            f"{module}。核查{category}：{items}。判断条件：{conditions}。"
-            f"目标章节：{sections}。查找报告期原文、数值及反向证据。"
+
+    assignment_text = " ".join([goal, *[str(item) for item in expected_outputs]])
+    for concept in _matched_concepts(assignment_text):
+        variants = list(_USER_CONCEPT_QUERIES[concept])
+        intents.append(
+            RetrievalIntent(
+                question=f"{module}需要核查：{concept}",
+                queries=variants,
+                required_facts=[concept],
+                source="assignment",
+            )
         )
-    if not queries:
-        queries.append(f"{module} {goal} {focus}".strip())
-    return queries[: max(1, limit)]
+
+    for rule in _interleave_rules_by_category(active_rules):
+        section_hints = [
+            item.strip() for item in _SPLIT_RE.split(rule.source_sections) if item.strip()
+        ][:4]
+        compact = _compact_query_variants(rule)
+        queries = [rule.risk_item, *compact]
+        if section_hints:
+            queries.append(f"{rule.risk_item} {section_hints[0]}")
+        numeric_tokens = _NUMBER_RE.findall(rule.trigger_condition)
+        if numeric_tokens:
+            queries.append(f"{rule.risk_item} {' '.join(numeric_tokens[:2])}")
+        intents.append(
+            RetrievalIntent(
+                question=f"核查{rule.risk_item}是否达到条件：{rule.trigger_condition}",
+                queries=list(dict.fromkeys(query for query in queries if query)),
+                section_hints=section_hints,
+                required_facts=[rule.risk_item, *numeric_tokens[:2]],
+                source=f"rule:{rule.rule_id}",
+            )
+        )
+
+    if not intents:
+        fallback = " ".join(part for part in (module, goal) if part).strip()
+        intents.append(
+            RetrievalIntent(
+                question=fallback,
+                queries=[fallback[:120]],
+                source="fallback",
+            )
+        )
+    deduped: list[RetrievalIntent] = []
+    seen: set[str] = set()
+    for intent in intents:
+        key = "|".join(intent.queries)
+        if key not in seen:
+            seen.add(key)
+            deduped.append(intent)
+    return deduped[: max(1, limit)]
+
+
+def build_evidence_gap_queries(
+    rule: RiskRule,
+    *,
+    missing_reason: str = "",
+    user_requirement: str = "",
+    module_goal: str = "",
+    limit: int = 6,
+) -> list[str]:
+    """Rewrite a failed evidence need into narrower exact/fact/counter searches."""
+
+    queries = [
+        *_compact_query_variants(rule),
+        rule.risk_item,
+        f"{rule.risk_item} 原因 改善措施",
+    ]
+    queries.extend(_concept_queries(f"{user_requirement} {module_goal} {missing_reason}"))
+    for section in [item.strip() for item in _SPLIT_RE.split(rule.source_sections) if item.strip()][:3]:
+        queries.append(f"{rule.risk_item} {section}")
+    return list(dict.fromkeys(query.strip() for query in queries if query.strip()))[:limit]
 
 
 def rerank_rule_candidates(
@@ -201,6 +318,40 @@ def _query_aliases(rule: RiskRule) -> str:
         if token in descriptor:
             values.extend(aliases)
     return " ".join(dict.fromkeys(values))
+
+
+def _matched_concepts(text: str) -> list[str]:
+    return [concept for concept in _USER_CONCEPT_QUERIES if concept in text]
+
+
+def _concept_queries(text: str) -> list[str]:
+    queries: list[str] = []
+    for concept in _matched_concepts(text):
+        queries.extend(_USER_CONCEPT_QUERIES[concept])
+    return list(dict.fromkeys(queries))
+
+
+def _round_robin_queries(intents: list[RetrievalIntent]) -> list[str]:
+    queries: list[str] = []
+    width = max((len(intent.queries) for intent in intents), default=0)
+    for index in range(width):
+        for intent in intents:
+            if index < len(intent.queries):
+                queries.append(intent.queries[index])
+    return queries
+
+
+def _interleave_rules_by_category(rules: list[RiskRule]) -> list[RiskRule]:
+    grouped: dict[str, list[RiskRule]] = {}
+    for rule in rules:
+        grouped.setdefault(rule.category, []).append(rule)
+    ordered: list[RiskRule] = []
+    width = max((len(items) for items in grouped.values()), default=0)
+    for index in range(width):
+        for items in grouped.values():
+            if index < len(items):
+                ordered.append(items[index])
+    return ordered
 
 
 def _specific_rule_anchors(rule: RiskRule) -> list[str]:

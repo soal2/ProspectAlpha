@@ -12,7 +12,13 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
-from riskagent.database import BACKEND_ROOT, Base, SessionLocal, init_db, session_scope
+from riskagent.database import (
+    BACKEND_ROOT,
+    SessionLocal,
+    ensure_database_schema,
+    init_db,
+    session_scope,
+)
 from riskagent.models import ProspectusDocumentRow
 
 
@@ -58,7 +64,7 @@ class ProspectusIngestionRepository:
             if bind is None:
                 init_db()
             else:
-                Base.metadata.create_all(bind=bind)
+                ensure_database_schema(bind)
 
     def register(self, request: ProspectusRegisterRequest) -> ProspectusRegistration:
         raw_bytes, original_filename, source_path = self._read_request_content(request)

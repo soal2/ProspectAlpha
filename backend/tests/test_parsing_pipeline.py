@@ -67,6 +67,35 @@ def test_mineru_processor_reuses_existing_content_list(tmp_path):
     assert result.output_dir == (tmp_path / "processed" / "doc_ysyy" / "ocr").resolve()
 
 
+def test_mineru_processor_passes_extensionless_document_id(tmp_path, monkeypatch):
+    pdf = tmp_path / "raw" / "sample.pdf"
+    pdf.parent.mkdir(parents=True)
+    pdf.write_bytes(b"%PDF sample")
+    captured = {}
+
+    def fake_run_mineru(*, request, pdf_path, processed_root, mineru_file_name):
+        captured["mineru_file_name"] = mineru_file_name
+        output = processed_root / mineru_file_name / request.method
+        output.mkdir(parents=True, exist_ok=True)
+        (output / f"{mineru_file_name}_content_list.json").write_text("[]", encoding="utf-8")
+
+    monkeypatch.setattr("riskagent.parsing.pdf_parser._run_mineru", fake_run_mineru)
+    result = PdfProcessorFactory().create().process(
+        PdfProcessRequest(
+            doc_key="sample",
+            document_id="doc_sample",
+            pdf_path=pdf,
+            processed_root=tmp_path / "processed",
+            reuse_existing=False,
+        )
+    )
+
+    assert captured["mineru_file_name"] == "doc_sample"
+    assert result.output_dir.name == "ocr"
+    assert result.output_dir.parent.name == "doc_sample"
+    assert result.content_list_path.name == "doc_sample_content_list.json"
+
+
 def test_block_chunker_outputs_unified_text_table_image_chunks(tmp_path):
     content_list = tmp_path / "processed" / "ysyy" / "ocr" / "ysyy_content_list.json"
     _write_content_list(content_list)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from importlib.util import find_spec
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
@@ -70,8 +71,9 @@ class MinerUPdfProcessor:
 
         processed_root = Path(request.processed_root).expanduser().resolve()
         document_id = request.document_id or request.doc_key
-        output_dir = processed_root / document_id / request.method
-        content_list_path = output_dir / f"{document_id}_content_list.json"
+        mineru_file_name = document_id
+        output_dir = processed_root / mineru_file_name / request.method
+        content_list_path = output_dir / f"{mineru_file_name}_content_list.json"
 
         if not (request.reuse_existing and content_list_path.exists()):
             output_dir.mkdir(parents=True, exist_ok=True)
@@ -80,7 +82,7 @@ class MinerUPdfProcessor:
                 request=request,
                 pdf_path=pdf_path,
                 processed_root=processed_root,
-                mineru_file_name=f"{document_id}.pdf",
+                mineru_file_name=mineru_file_name,
             )
 
         if not content_list_path.exists():
@@ -116,6 +118,39 @@ class PdfProcessorFactory:
             known = ", ".join(sorted(self._processors))
             raise ValueError(f"Unknown PDF processor '{name}'. Known processors: {known}") from exc
         return processor()
+
+
+def mineru_runtime_health() -> dict[str, object]:
+    """Return a non-networking readiness check for the local MinerU runtime."""
+
+    installed = find_spec("mineru") is not None
+    model_source = os.getenv("MINERU_MODEL_SOURCE", "auto").strip().lower() or "auto"
+    cache_roots = [
+        Path(os.getenv("MODELSCOPE_CACHE", "~/.cache/modelscope/hub")).expanduser(),
+        Path(os.getenv("HF_HOME", "~/.cache/huggingface/hub")).expanduser(),
+    ]
+    cache_patterns = ("**/*PDF-Extract-Kit*", "**/*pdf-extract-kit*")
+    cache_present = any(
+        root.exists()
+        and any(any(root.glob(pattern)) for pattern in cache_patterns)
+        for root in cache_roots
+    )
+    if not installed:
+        status = "unavailable"
+        message = "MinerU 未安装。"
+    elif cache_present:
+        status = "ready"
+        message = "MinerU 已安装且检测到本地模型缓存。"
+    else:
+        status = "model_download_required"
+        message = "MinerU 已安装，但首次解析前仍需从配置的模型源下载模型。"
+    return {
+        "status": status,
+        "installed": installed,
+        "model_source": model_source,
+        "model_cache_present": cache_present,
+        "message": message,
+    }
 
 
 def process_pdf_with_mineru(
