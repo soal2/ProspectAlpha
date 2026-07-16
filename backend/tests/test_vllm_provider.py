@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from riskagent.providers.vllm import (
+    DEFAULT_DASHSCOPE_BASE_URL,
     DashScopeVLLMClient,
     VLLMConfigError,
     VLLMImageDescriber,
@@ -11,6 +12,10 @@ from riskagent.providers.vllm import (
     create_vllm_client,
     get_default_vllm_client,
 )
+
+
+def test_default_dashscope_endpoint_uses_native_api():
+    assert DEFAULT_DASHSCOPE_BASE_URL == "https://dashscope.aliyuncs.com/api/v1"
 
 
 def test_dashscope_vllm_client_generates_text(monkeypatch):
@@ -105,7 +110,7 @@ def test_dashscope_vllm_client_describe_image_builds_dashscope_message(monkeypat
         {
             "role": "user",
             "content": [
-                {"image": str(image_path.resolve())},
+                {"image": "data:image/jpeg;base64,aW1hZ2U="},
                 {"text": "图中描绘的是什么景象?"},
             ],
         }

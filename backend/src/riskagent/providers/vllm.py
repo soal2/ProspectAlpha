@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import mimetypes
 import os
 from http import HTTPStatus
 from pathlib import Path
@@ -13,7 +15,7 @@ from riskagent.providers.config import (
     load_model_provider_config,
 )
 
-DEFAULT_DASHSCOPE_BASE_URL = "https://llm-brsq0ce4o43nxul5.cn-beijing.maas.aliyuncs.com/api/v1"
+DEFAULT_DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/api/v1"
 
 
 class VLLMConfigError(RuntimeError):
@@ -128,7 +130,8 @@ class DashScopeVLLMClient:
         max_tokens: int | None = None,
         timeout: int | None = None,
     ) -> str:
-        image_value = str(Path(image).expanduser().resolve()) if isinstance(image, Path) else image
+        image_path = Path(image).expanduser().resolve()
+        image_value = _encode_image_to_data_url(image_path)
         messages = [
             {
                 "role": "user",
@@ -139,6 +142,15 @@ class DashScopeVLLMClient:
             }
         ]
         return self.generate(messages, temperature=temperature, max_tokens=max_tokens, timeout=timeout)
+
+
+def _encode_image_to_data_url(image_path: Path) -> str:
+    mime_type, _ = mimetypes.guess_type(str(image_path))
+    if not mime_type or not mime_type.startswith("image/"):
+        mime_type = "image/png"
+    data = image_path.read_bytes()
+    encoded = base64.b64encode(data).decode("utf-8")
+    return f"data:{mime_type};base64,{encoded}"
 
 
 class VLLMImageDescriber:

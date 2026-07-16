@@ -364,6 +364,41 @@ def test_block_chunker_passes_absolute_image_path_to_describer(tmp_path):
     assert image_chunk.metadata["image_context"]["nearby_text_before"][0]["text"] == "图片前文本"
 
 
+def test_block_chunker_falls_back_to_mineru_caption_when_image_description_fails(tmp_path):
+    class FailingImageDescriber:
+        def describe(self, image_path, source_item, context=None):
+            raise RuntimeError("DashScope unavailable")
+
+    content_list = tmp_path / "processed" / "ysyy" / "ocr" / "ysyy_content_list.json"
+    content_list.parent.mkdir(parents=True)
+    (content_list.parent / "images").mkdir()
+    (content_list.parent / "images" / "image.jpg").write_bytes(b"image")
+    content_list.write_text(
+        json.dumps(
+            [
+                {
+                    "type": "image",
+                    "img_path": "images/image.jpg",
+                    "image_caption": ["MinerU 图片标题"],
+                    "image_footnote": [],
+                    "bbox": [5, 6, 7, 8],
+                    "page_idx": 2,
+                }
+            ],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    result = ChunkerFactory(image_describer=FailingImageDescriber()).create().chunk(
+        ChunkRequest(doc_key="ysyy", content_list_path=content_list)
+    )
+
+    image_chunk = result.chunks[0]
+    assert image_chunk.text == "MinerU 图片标题"
+    assert image_chunk.metadata["description_source"] == "mineru_caption"
+
+
 def test_chunker_uses_external_config_for_text_size_and_strategy(tmp_path):
     content_list = tmp_path / "processed" / "ysyy" / "ocr" / "ysyy_content_list.json"
     _write_content_list(content_list)

@@ -17,9 +17,9 @@ providers:
     models:
       dashscope_qwen37_plus:
         provider: dashscope
-        model: qwen3.7-plus
+        model: qwen-vl-plus
         api_key_env: DASHSCOPE_API_KEY
-        base_url: https://llm-brsq0ce4o43nxul5.cn-beijing.maas.aliyuncs.com/api/v1
+        base_url: https://dashscope.aliyuncs.com/api/v1
       openai_gpt_4o:
         provider: openai
         model: gpt-4o

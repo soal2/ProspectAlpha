@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import asdict, dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
@@ -16,6 +17,8 @@ DEFAULT_MAX_CHARS = 1200
 DEFAULT_INCLUDE_TYPES = ("text", "table", "image")
 DEFAULT_SKIP_TYPES = ("header", "footer", "page_number")
 DEFAULT_IMAGE_CONTEXT_WINDOW_BLOCKS = 3
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -406,15 +409,28 @@ class BlockChunker:
     ) -> DocumentChunk | None:
         image_path = _resolve_mineru_image_path(content_list_path, item.get("img_path"))
         description = ""
+        description_source = "mineru_caption"
         if self.image_describer is not None and image_path:
             cache_key = _image_description_cache_key(source_item_index, item)
             description = description_cache.get(cache_key) if description_cache is not None else ""
+            if description:
+                description_source = "vlm"
             if not description:
-                description = self.image_describer.describe(
-                    _resolve_mineru_image_absolute_path(content_list_path, item.get("img_path")),
-                    item,
-                    context,
-                ).strip()
+                try:
+                    description = self.image_describer.describe(
+                        _resolve_mineru_image_absolute_path(content_list_path, item.get("img_path")),
+                        item,
+                        context,
+                    ).strip()
+                except Exception:
+                    logger.warning(
+                        "Image description failed; falling back to MinerU caption for document %s item %s.",
+                        document_id,
+                        source_item_index,
+                        exc_info=True,
+                    )
+                if description:
+                    description_source = "vlm"
                 if description and description_cache is not None:
                     description_cache.set(cache_key, description)
         if not description:
@@ -444,7 +460,7 @@ class BlockChunker:
             image_path=image_path,
             mineru_img_path=_text_value(item.get("img_path")) or None,
             metadata={
-                "description_source": "vlm" if self.image_describer is not None else "mineru_caption",
+                "description_source": description_source,
                 "image_caption": item.get("image_caption") or [],
                 "image_footnote": item.get("image_footnote") or [],
                 "image_context": context,
