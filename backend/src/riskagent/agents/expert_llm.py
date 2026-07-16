@@ -20,6 +20,15 @@ EXPERT_SYSTEM_PROMPT = """\\
 只输出 JSON 对象，格式：{{"items":[{{"rule_id":str,"evaluation_result":str,"severity":str,"confidence":float,"reasoning_summary":str,"needs_more_evidence":bool}}]}}
 """
 
+_ZERO_PRODUCT_REVENUE_TERMS = (
+    "并无自产品销售产生的收益",
+    "並無自產品銷售產生的收益",
+    "尚无产品销售收入",
+    "尚無產品銷售收入",
+    "未自产品销售产生任何收益",
+    "未自產品銷售產生任何收益",
+)
+
 
 async def analyze_findings_with_llm(
     *,
@@ -96,5 +105,22 @@ async def analyze_findings_with_llm(
             outcome = "insufficient_evidence"
         if needs_more or (outcome == "triggered" and cand.confidence < 0.55):
             outcome = "insufficient_evidence"
+        if outcome == "triggered" and _invalid_zero_revenue_share(cand):
+            outcome = "insufficient_evidence"
+            cand.confidence = min(cand.confidence, 0.49)
+            cand.reasoning_summary = (
+                f"{cand.reasoning_summary.rstrip()} 原文明确尚无产品销售收入，"
+                "无法计算要求非零收入分母的产品收入占比，因此不得判定该阈值已触发。"
+            )
         cand.evaluation_result = outcome
     return items
+
+
+def _invalid_zero_revenue_share(candidate: RuleEvaluation) -> bool:
+    """Reject the invalid inference that dependence means 100% of zero revenue."""
+
+    trigger = candidate.trigger_condition
+    if "收入占比" not in trigger or ">" not in trigger:
+        return False
+    evidence = " ".join([candidate.reasoning_summary, *candidate.evidence_snippets])
+    return any(term in evidence for term in _ZERO_PRODUCT_REVENUE_TERMS)

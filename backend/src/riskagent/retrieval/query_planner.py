@@ -36,11 +36,45 @@ _DOMAIN_ALIASES: dict[str, tuple[str, ...]] = {
     "收入": ("收益", "營業收入", "revenue"),
     "占比": ("佔比", "百分比", "percentage"),
     "金额": ("金額", "amount"),
-    "诉讼": ("訴訟", "litigation"),
+    "诉讼": ("訴訟", "法律訴訟", "法律程序", "訴訟及申索", "litigation"),
+    "未决诉讼": (
+        "未決訴訟",
+        "未決或威脅",
+        "概無重大訴訟",
+        "並無面臨任何法律訴訟",
+    ),
     "监管": ("監管", "regulatory"),
+    "专利": ("專利", "patent"),
+    "到期": ("屆滿", "届满", "預計到期", "有效期", "期限", "expiry"),
+    "剩余保护期": ("剩餘保護期", "預計到期", "到期日", "屆滿"),
+    "临床": ("臨床", "clinical"),
+    "核心产品": ("核心產品", "候選產品", "候選藥物"),
+    "候选产品": ("候選產品", "候選藥物", "candidate product"),
+    "未获批": ("未獲批", "未取得監管批准", "尚未獲准", "unapproved"),
+    "商业化": ("商業化", "商品化", "commercialization"),
+    "竞争": ("競爭", "競爭對手", "competitor"),
+    "估值": ("估值", "發售價", "valuation"),
+    "外部授权": ("外部授權", "獨家許可", "引進授權", "license-in"),
+    "许可协议": ("許可協議", "獨家許可", "專利費", "里程碑付款", "分許可"),
+    "关键人员": ("關鍵人員", "核心技術團隊", "創始人"),
+    "研发人员": ("研發人員", "研發團隊", "research and development personnel"),
     "毛利率": ("gross margin",),
     "净利率": ("淨利率", "net margin"),
 }
+_COUNTER_EVIDENCE_TERMS = (
+    "概无",
+    "概無",
+    "并无",
+    "並無",
+    "不存在",
+    "未发生",
+    "未發生",
+    "不知悉",
+    "无重大",
+    "無重大",
+    "not aware",
+    "no material",
+)
 _WEAK_ANCHORS = frozenset(
     {
         "收入", "收益", "revenue", "金额", "金額", "amount", "占比", "佔比",
@@ -173,7 +207,14 @@ def build_rule_search_queries(
         ),
     ])
     if focus:
-        queries.insert(0, f"{focus}；重点核查{rule.risk_item}，条件为{rule.trigger_condition}")
+        # Keep exact Traditional-Chinese and domain variants first. Coverage
+        # rounds take one Query per rule; putting the full user sentence first
+        # would spend that budget on long semantic Queries and bury the terms
+        # most likely to match the prospectus verbatim.
+        queries.insert(
+            min(len(_compact_query_variants(rule)), len(queries)),
+            f"{focus}；重点核查{rule.risk_item}，条件为{rule.trigger_condition}",
+        )
     return list(dict.fromkeys(query.strip() for query in queries if query.strip()))[:6]
 
 
@@ -330,7 +371,16 @@ def rerank_rule_candidates(
         # Vector ranking scores around 0.2-0.4 are normal. Admission therefore
         # requires a rule/section anchor, not an arbitrary probability cutoff.
         strong_phrase = any(len(anchor) >= 3 for anchor in specific_matches)
-        if not strong_phrase and len(set(specific_matches)) < 2:
+        counter_evidence = bool(specific_matches) and any(
+            term in text for term in _COUNTER_EVIDENCE_TERMS
+        )
+        section_supported = section_match and bool(specific_matches)
+        if (
+            not strong_phrase
+            and len(set(specific_matches)) < 2
+            and not counter_evidence
+            and not section_supported
+        ):
             continue
         semantic_component = min(0.35, max(0.0, raw_score) * 1.5)
         lexical = min(0.45, 0.35 + 0.08 * max(0, len(set(specific_matches)) - 1))
@@ -342,6 +392,7 @@ def rerank_rule_candidates(
         enriched["relevance_score"] = relevance
         enriched["matched_anchors"] = matched_anchors
         enriched["section_match"] = section_match
+        enriched["counter_evidence"] = counter_evidence
         enriched["score"] = relevance
         ranked.append(enriched)
     ranked.sort(
@@ -456,6 +507,54 @@ def _specific_rule_anchors(rule: RiskRule) -> list[str]:
 
 def _compact_query_variants(rule: RiskRule) -> list[str]:
     descriptor = f"{rule.risk_item} {rule.category} {rule.trigger_condition}"
+    if "专利" in descriptor and any(token in descriptor for token in ("到期", "保护期", "届满")):
+        return [
+            "專利 預計到期",
+            "核心專利 到期日 屆滿",
+            "專利 有效期 期限",
+        ]
+    if "诉讼" in descriptor or "法律程序" in descriptor:
+        return [
+            "概無重大訴訟 法律程序",
+            "並無面臨任何法律訴訟",
+            "未決或威脅 訴訟 仲裁 行政訴訟",
+        ]
+    if "许可" in descriptor or "外部授权" in descriptor or "授权技术" in descriptor:
+        return [
+            "候選產品 獨家許可 引進授權",
+            "許可協議 專利費 分許可 里程碑付款",
+            "license-in royalty termination",
+        ]
+    if "竞争" in descriptor or "竞品" in descriptor:
+        return [
+            "核心候選產品 競爭對手 已上市 臨床III期",
+            "同一適應症 競品 監管批准",
+            "candidate product competitors commercialized",
+        ]
+    if "估值" in descriptor or "未来价值" in descriptor:
+        return [
+            "尚未產生產品銷售收入 候選產品 商業化",
+            "業務高度依賴 核心候選產品 獲批",
+            "估值 發售價 管線 商業化",
+        ]
+    if "产品销售收入" in descriptor or "尚无产品销售收入" in descriptor:
+        return [
+            "目前並無自產品銷售產生的收益",
+            "概無候選藥物獲准",
+            "候選產品 未取得監管批准 產品銷售收入",
+        ]
+    if "核心产品" in descriptor or "候选产品" in descriptor or "管线" in descriptor or "临床" in descriptor:
+        return [
+            "候選產品 臨床進度 里程碑 延遲",
+            "候選藥物 臨床終點 未達到",
+            "核心產品 監管批准 商品化",
+        ]
+    if "关键人员" in descriptor or "核心技术团队" in descriptor:
+        return [
+            "依賴 創始人 核心技術團隊",
+            "關鍵人員 離職 業務中斷",
+            "核心研發人員 流失",
+        ]
     if "持续经营" in descriptor:
         return [
             "持續經營",

@@ -155,6 +155,8 @@ analysis_runs 状态机（analysis_runs.py）
 | `CORS_ALLOW_ORIGINS` | 逗号分隔的允许跨域来源 |
 | `OPENAI_BASE_URL` / `OPENAI_API_KEY` / `OPENAI_MODEL` | OpenAI-compatible 模型地址、密钥与模型名（Agent 推理使用） |
 | `AGENT_RUNTIME_DATA_DIR` | 每个 run 的 `team.json`、`inboxes/`、`cursors/`、`tasks/` 与 `dead-letter/` 根目录；默认 `./data/agent_runtime` |
+| `AGENT_RETRIEVAL_INITIAL_INTENT_LIMIT` / `AGENT_RETRIEVAL_INITIAL_QUERY_LIMIT` | 每个专家首轮保留的原子检索意图和 Query 上限，默认 `10` / `20` |
+| `AGENT_RETRIEVAL_RULE_COVERAGE_LIMIT` / `AGENT_RETRIEVAL_RULE_COVERAGE_QUERY_LIMIT` | 每个专家对未预筛规则执行专属 Query 的规则数和 Query 上限，默认 `32` / `36` |
 | `LANGGRAPH_CHECKPOINT_BACKEND` | `sqlite` 或 `postgres`；未设置时根据 `DATABASE_URL` 自动选择。SQLite 文件位于 `AGENT_RUNTIME_DATA_DIR/langgraph_checkpoints.sqlite` |
 | `A2A_PUBLIC_BASE_URL` | Agent Card 中声明的公开基地址；默认 `http://localhost:8000` |
 | `A2A_SEND_TIMEOUT_SECONDS` | A2A `SendMessage` 等待邮箱专家结果的上限；默认 `300` 秒 |
@@ -179,6 +181,10 @@ python -m pip install -e ".[pipeline,dev]"
 # Inline 模式（开发推荐）
 ANALYSIS_EXECUTION_MODE=inline uvicorn riskagent.api.main:app --host 127.0.0.1 --port 8000
 ```
+
+直接通过 Uvicorn 启动时，API 会在数据库模块初始化前读取 `backend/.env`；因此
+`DATABASE_URL` 不会因导入顺序而静默回退到 SQLite。测试进程使用
+`PROSPECTALPHA_SKIP_DOTENV=1` 隔离开发者本地数据库配置。
 
 需要 RQ 异步执行时，另起一个终端：
 

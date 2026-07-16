@@ -21,7 +21,7 @@ def test_risk_rules_api_crud(tmp_path, monkeypatch):
     response = client.get("/risk-rules")
     assert response.status_code == 200
     payload = response.json()
-    assert payload["totals"]["rule_count"] == 143
+    assert payload["totals"]["rule_count"] == 147
 
     response = client.post(
         "/risk-rules",
@@ -46,7 +46,7 @@ def test_risk_rules_api_crud(tmp_path, monkeypatch):
 
     response = client.delete(f"/risk-rules/{rule_id}")
     assert response.status_code == 204
-    assert client.get("/risk-rules").json()["totals"]["rule_count"] == 143
+    assert client.get("/risk-rules").json()["totals"]["rule_count"] == 147
 
 
 def test_risk_rules_repository_seeds_empty_database(tmp_path):
@@ -57,7 +57,7 @@ def test_risk_rules_repository_seeds_empty_database(tmp_path):
     rule_set = repo.load()
 
     assert rule_set.rule_set_id == "hk_ipo_prospectus_risk_framework_v1"
-    assert rule_set.totals == {"dimension_count": 3, "category_count": 26, "rule_count": 143}
+    assert rule_set.totals == {"dimension_count": 3, "category_count": 28, "rule_count": 147}
 
 
 def test_risk_rules_api_missing_rule_returns_404(tmp_path, monkeypatch):

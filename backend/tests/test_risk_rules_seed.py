@@ -39,7 +39,7 @@ def test_seed_loads_full_rule_catalog(tmp_path):
     seed_reference_data(session_factory)
 
     rules, dims = _counts(session_factory)
-    assert rules == len(SEED_DATA["rules"]) == 143
+    assert rules == len(SEED_DATA["rules"]) == 147
     assert dims == len(SEED_DATA["dimensions"]) == 3
     with session_factory() as session:
         categories = set(
@@ -48,7 +48,7 @@ def test_seed_loads_full_rule_catalog(tmp_path):
             ).all()
         )
     assert categories == {rule["category"] for rule in SEED_DATA["rules"]}
-    assert len(categories) == 26
+    assert len(categories) == 28
 
 
 def test_verify_reseeds_partial_rule_set(tmp_path):
@@ -63,7 +63,7 @@ def test_verify_reseeds_partial_rule_set(tmp_path):
 
     seed_reference_data(session_factory)
     rules, dims = _counts(session_factory)
-    assert rules == 143
+    assert rules == 147
     assert dims == 3
 
 
@@ -84,11 +84,11 @@ def test_verify_keeps_user_crud_changes(tmp_path):
             source_sections="章节",
         )
     )
-    assert _counts(session_factory)[0] == 144
+    assert _counts(session_factory)[0] == 148
 
     # Re-running the seed must not clobber the user's extra rule.
     seed_reference_data(session_factory)
-    assert _counts(session_factory)[0] == 144
+    assert _counts(session_factory)[0] == 148
 
 
 def test_verify_reseeds_on_version_bump(tmp_path):
@@ -105,8 +105,8 @@ def test_verify_reseeds_on_version_bump(tmp_path):
 
     with session_factory() as session:
         row = session.get(RiskRuleSetRow, RULE_SET_ID)
-        assert row.version == SEED_DATA.get("version", "v1.0")
-    assert _counts(session_factory)[0] == 143
+        assert row.version == SEED_DATA.get("version", "v1.1")
+    assert _counts(session_factory)[0] == 147
 
 
 def test_concurrent_create_yields_unique_rule_ids(tmp_path):
@@ -147,4 +147,4 @@ def test_concurrent_create_yields_unique_rule_ids(tmp_path):
 
     assert not errors
     assert len(created) == len(set(created)) == 6
-    assert _counts(session_factory)[0] == 149
+    assert _counts(session_factory)[0] == 153

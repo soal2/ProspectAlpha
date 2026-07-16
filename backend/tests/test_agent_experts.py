@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from pathlib import Path
 from sqlalchemy.orm import sessionmaker
@@ -7,7 +9,12 @@ from riskagent.agents.supervisor import AgentTeamSupervisor
 from riskagent.database import Base, make_engine
 from riskagent.models import AgentExpertRow
 from riskagent.risk_rules import RiskRuleRepository
-from riskagent.skills.risk_skill_registry import skills_for_agents
+from riskagent.risk_rules import RiskRule
+from riskagent.skills.risk_skill_registry import (
+    rules_for_skill,
+    skill_for_agent,
+    skills_for_agents,
+)
 
 
 def test_agent_experts_empty_table_has_no_fallback(tmp_path):
@@ -22,6 +29,41 @@ def test_agent_experts_empty_table_has_no_fallback(tmp_path):
 
 def test_unknown_dynamic_expert_does_not_expand_to_fixed_default_team():
     assert skills_for_agents(["new_dynamic_expert"]) == []
+
+
+def test_persona_skills_split_business_technology_quality_and_new_market_rules():
+    seed = json.loads(
+        (Path(__file__).parents[1] / "configs" / "hk_ipo_risk_rules_v1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    rules = [RiskRule.model_validate(item) for item in seed["rules"]]
+    operations = skill_for_agent("su_zhiji_business_agent")
+    technology = skill_for_agent("ye_zhiyuan_business_agent")
+    quality = skill_for_agent("xiao_zeming_quality_agent")
+    valuation = skill_for_agent("jiang_hengzhi_market_agent")
+    competition = skill_for_agent("lu_guanlan_market_agent")
+    legal = skill_for_agent("wen_shouzheng_legal_agent")
+
+    assert operations and technology and quality and valuation and competition and legal
+    operation_ids = {rule.rule_id for rule in rules_for_skill(operations, rules)}
+    technology_ids = {rule.rule_id for rule in rules_for_skill(technology, rules)}
+    quality_rules = rules_for_skill(quality, rules)
+    valuation_ids = {rule.rule_id for rule in rules_for_skill(valuation, rules)}
+    competition_ids = {rule.rule_id for rule in rules_for_skill(competition, rules)}
+    legal_ids = {rule.rule_id for rule in rules_for_skill(legal, rules)}
+
+    assert "HKIPO-049" in operation_ids
+    assert "HKIPO-144" not in operation_ids
+    assert "HKIPO-144" in technology_ids
+    assert "HKIPO-049" not in technology_ids
+    assert len(quality_rules) == 39
+    assert {rule.rule_type for rule in quality_rules} == {"textual_nlp"}
+    assert "HKIPO-146" in valuation_ids
+    assert "HKIPO-145" not in valuation_ids
+    assert "HKIPO-145" in competition_ids
+    assert "HKIPO-146" not in competition_ids
+    assert "HKIPO-147" in legal_ids
 
 
 def test_dynamic_agent_without_bundled_skill_still_has_complete_capability_contract():

@@ -205,7 +205,7 @@ POST /a2a/{agent_name}
 
 每个可执行专家暴露 A2A 1.0 Agent Card，战略 Agent 是图内编排与邮箱协调者，不对外声明专家卡。`POST /a2a/{agent_name}` 使用 JSON-RPC 绑定，提供 `SendMessage`、`GetTask` 和 `ListTasks`；`CancelTask` 返回任务不可取消错误，streaming、subscription 与 push notification 未启用。当前 Agent Card 明确声明 `streaming = false`。所有请求携带 `A2A-Version: 1.0`。A2A 的公开数据模型保持为 `AgentCard`、`Task`、`Message`、`Artifact` 与 `Part`，Claude Code 风格的控制消息只放入 `metadata` 扩展，不新增私有顶层字段。
 
-默认 active 规则集来自 `backend/configs/hk_ipo_risk_rules_v1.json`，规则集标识为 `hk_ipo_prospectus_risk_framework_v1`，覆盖港股 IPO 招股书的 3 个维度、26 个一级分类、143 个二级风险项：
+默认 active 规则集来自 `backend/configs/hk_ipo_risk_rules_v1.json`，规则集标识为 `hk_ipo_prospectus_risk_framework_v1`，覆盖港股 IPO 招股书的 3 个维度、28 个一级分类、147 个二级风险项：
 
 | 维度 | 类型 | 一级分类数 | 规则数 | 使用方式 |
 |---|---:|---:|---:|---|

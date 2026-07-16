@@ -1,6 +1,6 @@
 {
   "rule_set_id": "hk_ipo_prospectus_risk_framework_v1",
-  "version": "v1.0",
+  "version": "v1.1",
   "name": "港股IPO招股书风险识别框架",
   "source_workbook": "港股IPO招股书风险识别框架_7.3.xlsx",
   "source_main_sheet": "港股IPO招股书风险识别框架",
@@ -10,12 +10,13 @@
     "应用时需根据具体公司招股书逐项核验。",
     "待确认表示需根据公司实际情况核验。",
     "阈值和计算方式基于行业通用基准，个别行业需调整。",
-    "三大维度覆盖标准化财务指标、非标隐性风险和文本粉饰度风险。"
+    "三大维度覆盖标准化财务指标、非标隐性风险和文本粉饰度风险。",
+    "v1.1 补充未商业化生物科技企业的管线、竞品、估值依赖及第三方许可条款规则。"
   ],
   "totals": {
     "dimension_count": 3,
-    "category_count": 26,
-    "rule_count": 143
+    "category_count": 28,
+    "rule_count": 147
   },
   "dimensions": [
     {
@@ -60,8 +61,8 @@
       "dimension_code": "D2",
       "dimension": "维度2：非标隐性风险",
       "rule_type": "qualitative_disclosure",
-      "category_count": 11,
-      "rule_count": 56,
+      "category_count": 13,
+      "rule_count": 60,
       "description": "从业务描述、关联交易、法律合规、公司治理等定性披露中挖掘隐蔽风险。该类风险不易从纯财务数据中发现，但往往是IPO'爆雷'的根本原因。覆盖客户/供应商、关联交易、对赌、政策、诉讼、担保、持续经营、知识产权、治理、行业竞争、税务等11大类别。",
       "categories": [
         {
@@ -94,7 +95,7 @@
         },
         {
           "name": "核心技术/知识产权",
-          "rule_count": 5
+          "rule_count": 6
         },
         {
           "name": "管理层与公司治理",
@@ -102,7 +103,15 @@
         },
         {
           "name": "行业竞争",
-          "rule_count": 4
+          "rule_count": 5
+        },
+        {
+          "name": "估值与发行定价",
+          "rule_count": 1
+        },
+        {
+          "name": "许可条款",
+          "rule_count": 1
         },
         {
           "name": "税务风险",
@@ -1869,6 +1878,54 @@
       "trigger_condition": "关键信息披露后有 ≥ 50%的概率紧跟规避性陈述",
       "calculation_or_method": "分析关键信息披露位置后的衔接句的语言特征",
       "source_sections": "全文跨章节分析"
+    },
+    {
+      "rule_id": "HKIPO-144",
+      "dimension_code": "D2",
+      "dimension": "维度2：非标隐性风险",
+      "rule_type": "qualitative_disclosure",
+      "category": "核心技术/知识产权",
+      "risk_item": "核心候选产品尚未获批且尚无产品销售收入",
+      "description": "未商业化生物科技企业的持续经营和未来收入高度依赖候选产品获批及商业化。",
+      "trigger_condition": "全部或核心候选产品尚未获得监管批准 且 公司尚未产生产品销售收入",
+      "calculation_or_method": "交叉核对候选产品审批状态、产品销售收入披露及商业化时间表",
+      "source_sections": "概要 / 业务 / 风险因素 / 财务资料"
+    },
+    {
+      "rule_id": "HKIPO-145",
+      "dimension_code": "D2",
+      "dimension": "维度2：非标隐性风险",
+      "rule_type": "qualitative_disclosure",
+      "category": "行业竞争",
+      "risk_item": "核心候选产品面临成熟竞品",
+      "description": "核心候选产品尚未获批时，同一适应症已有上市或临床后期竞品可能压缩商业化空间。",
+      "trigger_condition": "至少一项核心候选产品尚未获批 且 招股书披露同一适应症存在已上市产品或处于临床III期的竞品",
+      "calculation_or_method": "按适应症对照核心候选产品和竞品的审批及临床阶段",
+      "source_sections": "行业概览 / 业务 / 风险因素"
+    },
+    {
+      "rule_id": "HKIPO-146",
+      "dimension_code": "D2",
+      "dimension": "维度2：非标隐性风险",
+      "rule_type": "qualitative_disclosure",
+      "category": "估值与发行定价",
+      "risk_item": "未商业化生物科技公司估值高度依赖管线",
+      "description": "缺乏产品销售收入时，发行估值主要依赖候选产品获批和商业化的远期预期。",
+      "trigger_condition": "尚未产生产品销售收入 且 招股书披露业务或未来价值高度依赖核心候选产品获批及商业化",
+      "calculation_or_method": "交叉核对收入来源、核心管线依赖披露及发行定价依据",
+      "source_sections": "概要 / 风险因素 / 业务 / 全球发售的架构"
+    },
+    {
+      "rule_id": "HKIPO-147",
+      "dimension_code": "D2",
+      "dimension": "维度2：非标隐性风险",
+      "rule_type": "qualitative_disclosure",
+      "category": "许可条款",
+      "risk_item": "核心候选产品受第三方许可持续付款或终止条款约束",
+      "description": "核心候选产品依赖第三方许可并承担持续付款或终止风险，可能影响知识产权稳定性和未来利润。",
+      "trigger_condition": "核心候选产品依赖第三方许可 且 许可协议包含持续销售提成、分许可费、里程碑付款或可终止条款",
+      "calculation_or_method": "逐项核对许可标的、付款义务、期限、终止条件及对核心产品的影响",
+      "source_sections": "业务 / 知识产权 / 重大合约 / 风险因素"
     }
   ]
 }

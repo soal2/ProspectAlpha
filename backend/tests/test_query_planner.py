@@ -162,3 +162,72 @@ def test_assignment_context_prioritizes_matching_rules():
     )
 
     assert ordered[0].rule_id == "PIPELINE"
+
+
+def test_patent_expiry_rewrite_and_reranker_accept_traditional_disclosure():
+    rule = RiskRule(
+        rule_id="HKIPO-088",
+        dimension_code="D2",
+        dimension="非标隐性风险",
+        rule_type="qualitative_disclosure",
+        category="核心技术/知识产权",
+        risk_item="核心技术专利即将到期",
+        description="核心专利保护期即将届满",
+        trigger_condition="核心专利剩余保护期 < 3年",
+        calculation_or_method="审查核心专利的申请日和有效期",
+        source_sections="知识产权 / 风险因素",
+    )
+    queries = build_rule_search_queries(rule, user_requirement="重点核查专利到期风险")
+    candidates = [
+        {
+            "block_id": "patent-expiry-table",
+            "page_number": 302,
+            "section_path": "業務 / 知識產權",
+            "text": "AT-101的相關專利預計於2025年到期，APG-115的相關專利預計於2032年至2035年到期。",
+            "score": 0.406,
+        },
+        {
+            "block_id": "unrelated-finance",
+            "page_number": 590,
+            "section_path": "財務資料",
+            "text": "本集團的現金及現金等價物以及融資活動載於本附註。",
+            "score": 0.91,
+        },
+    ]
+
+    ranked = rerank_rule_candidates(candidates, rule=rule)
+
+    assert "專利 預計到期" in queries
+    assert queries[0] == "專利 預計到期"
+    assert "重点核查专利到期风险" not in queries[0]
+    assert [item["block_id"] for item in ranked] == ["patent-expiry-table"]
+    assert {"專利", "到期"}.issubset(set(ranked[0]["matched_anchors"]))
+
+
+def test_litigation_reranker_preserves_explicit_counter_evidence():
+    rule = RiskRule(
+        rule_id="HKIPO-072",
+        dimension_code="D2",
+        dimension="非标隐性风险",
+        rule_type="qualitative_disclosure",
+        category="诉讼与纠纷",
+        risk_item="重大未决诉讼",
+        description="公司为被告的未决诉讼金额较大",
+        trigger_condition="未决诉讼涉案金额 / 归母净资产 > 10% 或 案件性质严重影响持续经营",
+        calculation_or_method="核对诉讼清单和风险敞口",
+        source_sections="法律诉讼 / 风险因素 / 或有事项",
+    )
+    candidates = [
+        {
+            "block_id": "no-material-litigation",
+            "page_number": 333,
+            "section_path": "業務 / 法律訴訟",
+            "text": "於往績記錄期及直至最後實際可行日期，本集團並無面臨任何法律訴訟，亦無任何未決或威脅的仲裁或行政訴訟可能造成重大不利影響。",
+            "score": 0.453,
+        }
+    ]
+
+    ranked = rerank_rule_candidates(candidates, rule=rule)
+
+    assert [item["block_id"] for item in ranked] == ["no-material-litigation"]
+    assert ranked[0]["counter_evidence"] is True
