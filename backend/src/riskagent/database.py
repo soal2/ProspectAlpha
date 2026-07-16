@@ -7,7 +7,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 
@@ -71,10 +71,45 @@ def init_db(database_url: str | None = None) -> None:
     explicit URL. Returns nothing."""
     from riskagent import models  # noqa: F401
 
-    if database_url is None:
-        Base.metadata.create_all(bind=engine)
-    else:
-        Base.metadata.create_all(bind=make_engine(database_url))
+    active_engine = engine if database_url is None else make_engine(database_url)
+    ensure_database_schema(active_engine)
+
+
+def ensure_database_schema(active_engine) -> None:
+    """Create current ORM tables and apply supported additive evolutions."""
+
+    Base.metadata.create_all(bind=active_engine)
+    _ensure_prospectus_processing_columns(active_engine)
+
+
+def _ensure_prospectus_processing_columns(active_engine) -> None:
+    """Apply the small additive schema evolution used without Alembic today."""
+
+    inspector = inspect(active_engine)
+    if "prospectus_documents" not in inspector.get_table_names():
+        return
+    existing = {column["name"] for column in inspector.get_columns("prospectus_documents")}
+    additions = {
+        "processing_error_code": "VARCHAR(64)",
+        "processing_error_message": "TEXT",
+        "processing_attempts": "INTEGER NOT NULL DEFAULT 0",
+        "processing_started_at": "TIMESTAMP",
+        "processing_heartbeat_at": "TIMESTAMP",
+        "processing_finished_at": "TIMESTAMP",
+    }
+    with active_engine.begin() as connection:
+        for column, definition in additions.items():
+            if column not in existing:
+                if active_engine.dialect.name == "postgresql":
+                    statement = (
+                        f"ALTER TABLE prospectus_documents "
+                        f"ADD COLUMN IF NOT EXISTS {column} {definition}"
+                    )
+                else:
+                    statement = f"ALTER TABLE prospectus_documents ADD COLUMN {column} {definition}"
+                connection.execute(
+                    text(statement)
+                )
 
 
 def init_reference_data(session_factory: sessionmaker = SessionLocal) -> None:

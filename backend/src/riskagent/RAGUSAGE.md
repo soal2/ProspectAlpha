@@ -124,6 +124,11 @@ https://llm-brsq0ce4o43nxul5.cn-beijing.maas.aliyuncs.com/api/v1
   - `hybrid`：向量 + 全文组合。
 
 检索必须传 `document_id`，避免跨招股书混搜。
+三种只读检索入口都以 `ensure=False` 打开索引器，禁止在 Agent 并发查询期间
+重复创建 schema、函数或 trigger；DDL 仅由入库/初始化路径执行。
+专家检索前会先由 LLM 根据 `user_requirement + assignment + expected_outputs + priority_rules`
+自主改写原子 Query，再与确定性的繁体原词、否定性披露和英文别名合并；LLM 失败时
+自动使用确定性 Query，不会中断分析。
 
 ## 配置文件
 
@@ -298,6 +303,21 @@ uv run python scripts/run_ysyy_pipeline.py
 6. 写入 PostgreSQL `rag` schema。
 7. 分别跑 `vector`、`full_text`、`hybrid` 检索 smoke test。
 
+MinerU 的 `pdf_file_name` 是逻辑输出键，不要求扩展名。本项目固定传入
+`document_id`，因此标准路径是
+`data/processed/{document_id}/ocr/{document_id}_content_list.json`。不要传入
+`{document_id}.pdf`，否则 MinerU 会原样生成带 `.pdf` 的目录和文件前缀。
+
+解析失败后先查看 `GET /documents/{document_id}` 返回的错误码，再调用
+`POST /documents/{document_id}/reparse`。启动前可用
+`GET /documents/parser-health` 检查 MinerU、模型源、缓存和推理设备状态。
+Apple Silicon Mac 使用 `MINERU_DEVICE=mps`；Intel Mac 或 MPS 不可用时使用
+`cpu`；NVIDIA 环境使用 `cuda` 并通过 `MINERU_CUDA_DEVICE` 选择设备。
+本地解析默认在独立子进程执行，最大并发由
+`DOCUMENT_PARSING_MAX_CONCURRENCY` 控制。页面关闭不会终止任务；子进程会按
+`DOCUMENT_PARSING_HEARTBEAT_SECONDS` 写心跳，超过
+`DOCUMENT_PARSING_STALE_SECONDS` 才会标记为可重新解析的中断。
+
 ## 直接检索
 
 示例：
@@ -335,9 +355,18 @@ finally:
 
 ## 常见问题
 
-### 为什么没有 `/documents` 上传接口？
+### `/documents/upload` 重复上传同一个 PDF 会怎样？
 
-旧 `/documents` 上传接口和 PyMuPDF 文档块解析已经删除。现在招股书 RAG 的入口是 `process_prospectus_document(...)`，后续 API 应该围绕这个入口新建，而不是恢复旧 asset stack。
+原始 PDF 先按内容哈希注册，因此重复文件会复用稳定的 `document_id`。已完成的
+文档直接返回现有索引；正在解析的文档返回当前状态，不会启动并行重复任务；失败
+或中断的文档会保留原文件并重新排队。也可以不上传文件，直接调用
+`POST /documents/{document_id}/reparse`。
+
+### 为什么报告没有正式结论时证据库仍有内容？
+
+证据接口同时展示 `retrieval_candidate` 检索候选和通过门禁的正式证据。候选只表示
+Agent 找到了可能相关的原文块，前端显示“检索候选分 · 未核验”；它不会进入风险结论
+或改变报告评级。正式证据仍须通过规则相关性、专家二判、交叉验证和证据门禁。
 
 ### 为什么 image chunk 要 VLM？
 

@@ -22,6 +22,7 @@ from riskagent.parsing.pdf_parser import (
     PdfProcessResult,
     PdfProcessorFactory,
     process_pdf_with_mineru,
+    mineru_runtime_health,
 )
 
 __all__ = [
@@ -42,4 +43,5 @@ __all__ = [
     "build_pdf_process_request",
     "load_rag_pipeline_settings",
     "process_pdf_with_mineru",
+    "mineru_runtime_health",
 ]

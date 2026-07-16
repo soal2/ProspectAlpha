@@ -12,7 +12,7 @@ def vector_search(
     limit: int = 5,
     indexer: PostgresChunkIndexer | None = None,
 ) -> list[ChunkSearchResult]:
-    active_indexer = indexer or PostgresChunkIndexer()
+    active_indexer = indexer or PostgresChunkIndexer(ensure=False)
     try:
         return active_indexer.vector_search(
             query=query,

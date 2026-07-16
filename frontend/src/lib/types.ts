@@ -1,4 +1,4 @@
-export type RiskLevel = "high" | "mid" | "low";
+export type RiskLevel = "high" | "mid" | "low" | "unrated";
 
 export interface AnalysisSummary {
   id: string;
@@ -123,6 +123,7 @@ export interface EvidenceFeedItem {
   snippet?: string | null;
   document_id?: string | null;
   bbox?: number[];
+  scoreKind?: "retrieval" | "relevance" | "unavailable";
 }
 
 export interface TraceData {
@@ -137,7 +138,7 @@ export interface EvidenceDetailItem {
   section: string;
   page: number;
   conf: number;
-  scoreKind: "relevance" | "unavailable";
+  scoreKind: "retrieval" | "relevance" | "unavailable";
   snippet: string;
   risk: string;
   documentId?: string;
@@ -170,7 +171,7 @@ export interface KnowledgeEvidence {
   section: string;
   page: number;
   conf: number;
-  scoreKind: "relevance" | "unavailable";
+  scoreKind: "retrieval" | "relevance" | "unavailable";
   snippet: string;
   risk: string;
   documentId?: string;

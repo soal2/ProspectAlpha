@@ -1356,14 +1356,35 @@ this endpoint every three seconds, keeps navigation responsive, and disables
 question submission and analysis creation until PostgreSQL contains searchable
 chunks. A failed background job is visible to the user and remains recorded on
 `prospectus_documents.status`; it is not silently replaced with the legacy
-PyMuPDF retrieval path. Local non-database tests retain the lightweight PyMuPDF
+PyMuPDF retrieval path. Failed rows also persist a stable error code, a safe
+user-facing message, and the number of processing attempts. The frontend shows
+that diagnostic and offers `POST /documents/{document_id}/reparse`; duplicate
+upload is no longer the recovery contract. `GET /documents/parser-health`
+performs a non-networking MinerU/model-cache readiness check, and startup logs a
+warning before the first user upload when model download is still required.
+Local non-database tests retain the lightweight PyMuPDF
 path only as an isolated test-mode boundary.
+
+MinerU receives the extensionless stable `document_id` as `pdf_file_name`.
+MinerU uses that value verbatim for its directory and file prefix, so parsing
+must read `processed/{document_id}/ocr/{document_id}_content_list.json` and must
+not append `.pdf`. Polling metadata and all vector/full-text/hybrid query paths
+are read-only and instantiate the indexer with `ensure=False`; they never run
+PostgreSQL extension/schema DDL. Trigger/function/schema creation belongs to
+ingestion or startup only, avoiding `AccessExclusiveLock` deadlocks when several
+experts search concurrently.
 
 ### Rule-aware Query Rewriting and Evidence Scores
 
 Broad user instructions such as "review this prospectus for IPO risks" are not
-sent directly to PostgreSQL. The strategist first assigns domain modules, each
-module expands its assigned rules into category-scoped searches, and every
+sent directly to PostgreSQL. The strategist first assigns domain modules. Before
+retrieval, each expert asks its LLM to rewrite the original user requirement,
+assignment goal, expected outputs, priority rules, and deterministic seed terms
+into its own atomic Queries. The code planner merges those expert-authored
+Queries with validated Traditional-Chinese exact terms, negative-disclosure
+phrases, English aliases, and a deterministic fallback. Query variants are short
+and complementary instead of concatenating an entire category and several
+trigger conditions into one embedding. Every
 candidate finding is searched again with complementary exact-disclosure,
 simplified/traditional Chinese, English terminology, report-period fact, and
 counter-evidence queries. Short exact queries give PostgreSQL full-text ranking
@@ -1372,9 +1393,31 @@ call remains scoped to one required `document_id`.
 
 Rule keyword matching is recall-only and returns `candidate`, never a risk
 finding. Generic adjectives such as `重大`, `显著`, `可能`, and `模糊` cannot
-trigger a rule by themselves. An expert second pass must evaluate the actual
-trigger condition; missing or failed expert verification is fail-closed as
-`insufficient_evidence`.
+trigger a rule by themselves. An expert second pass must explicitly return
+`triggered`, `not_triggered`, or `insufficient_evidence` after evaluating the
+actual trigger condition. A confident statement that the trigger does not exist
+is `not_triggered`, never a risk finding; missing or malformed expert verification
+is fail-closed as `insufficient_evidence`.
+
+When modules overlap on a frozen rule, the supervisor keeps the strongest
+auditable conclusion instead of whichever result arrived first. A direct
+`triggered` or `not_triggered` conclusion outranks `insufficient_evidence`, then
+evidence presence and confidence break ties. This also preserves a valid
+replacement result when an earlier module could not evaluate the same rule.
+
+When the expert marks `needs_more_evidence`, its A2A request includes evidence
+gaps and attempted queries. The strategist returns actionable suggested queries,
+the expert performs one bounded supplemental retrieval round, and the new chunks
+are evaluated again before the finding is finalized. Cross-module review consumes
+the originating finding summaries and executes rule-specific counter-evidence
+queries; it no longer reports unrelated candidates from the reviewer's own
+module. Every planned query, retrieval round, and retrieved chunk id is emitted
+as a runtime event for audit. Retrieval-completed events also carry the top
+candidate chunks with document/page/bbox/text and raw retrieval score. The live
+UI labels these as candidate source blocks; admitted evidence remains separate
+and uses the rule-aware relevance score. An explicit empty rule list remains
+empty, which keeps evidence-only and quality roles from silently evaluating the
+full rule set.
 
 Evidence stores two distinct values. `retrieval_score` is the raw PostgreSQL
 hybrid ranking signal and is not a probability. `relevance_score` is a separate
@@ -1391,6 +1434,35 @@ gate. Module summaries are regenerated from admitted identifiers so rejected
 candidate counts cannot leak into the report. If no finding is admitted, the
 system emits a deterministic `未评级（无已验证结论）` report and states that absence
 of verified evidence does not prove absence of risk.
+
+Each rule sent to expert second-pass judgment now receives a separate,
+rule-aware evidence pack containing up to four reranked source blocks. Numeric,
+ratio, and trend rules can therefore combine tables and explanatory text across
+pages instead of being decided from the first global snippet. A bounded
+rule-coverage round distributes Queries across previously unevaluated rules;
+duplicate Queries from earlier rounds are not executed again. Unresolved and
+not-evaluated rules are retained as `screening_observations`. They may appear in
+the report only as concrete retrieval coverage, evidence gaps, and manual-review
+directions; they can never be promoted to formal findings.
+
+`GET /analysis-runs/{run_id}/evidence` also reconstructs persisted top retrieval
+chunks as `retrieval_candidate` records. This keeps the evidence browser useful
+when every candidate is rejected by the formal gate. Candidate records retain
+the raw `retrieval_score`, always have zero `relevance_score`, and are labelled
+unverified by the frontend. Internal report synthesis continues to consume only
+`run.evidence`, so exposing retrieval audit records does not weaken evidence
+admission or change a report's risk conclusion.
+
+Local MinerU parsing runs in a dedicated subprocess with a database heartbeat.
+Closing the browser does not cancel parsing, and restarting the API does not
+delete the raw PDF or mistake a live child process for a failed task. A stale
+heartbeat changes `processing` to recoverable `interrupted`; retrying uses the
+saved PDF through `POST /documents/{document_id}/reparse`. Duplicate uploads
+return the existing indexed document, requeue interrupted/failed documents, and
+do not launch a second parser for an already-processing document. Concurrency,
+heartbeat, timeout, CPU threads, and device selection are environment settings.
+Apple Silicon uses `mps` with PyTorch CPU fallback for unsupported operators;
+NVIDIA deployments use `cuda` or `cuda:<index>`.
 
 The existing `ysyy.pdf` PostgreSQL index was used as a no-reparse regression
 fixture. Targeted searches kept the document boundary, rejected customer

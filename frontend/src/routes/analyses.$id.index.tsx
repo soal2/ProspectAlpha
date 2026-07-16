@@ -190,7 +190,10 @@ function RealtimeStream() {
           id,
           (event) => {
             if (cancelled) return;
-            if (event.event_id && !liveEventsRef.current.some((item) => item.event_id === event.event_id)) {
+            if (
+              event.event_id &&
+              !liveEventsRef.current.some((item) => item.event_id === event.event_id)
+            ) {
               durableCursorRef.current += 1;
             }
             queueLiveEvent(event);
@@ -269,10 +272,15 @@ function RealtimeStream() {
     return mergeBubbles(traceFlow, eventFlow);
   }, [liveEvents, run.created_at, trace]);
   const liveEvidenceFeed = useMemo(
-    () =>
-      terminalStatuses.has(run.status) ? evidenceFeed : mergeEvidenceFeed(evidenceFeed, liveEvents),
-    [evidenceFeed, liveEvents, run.status],
+    () => mergeEvidenceFeed(evidenceFeed, liveEvents),
+    [evidenceFeed, liveEvents],
   );
+  const formalEvidenceCount = liveEvidenceFeed.filter(
+    (item) => item.scoreKind === "relevance",
+  ).length;
+  const retrievalCandidateCount = liveEvidenceFeed.filter(
+    (item) => item.scoreKind === "retrieval",
+  ).length;
   const filteredLiveEvidence = liveEvidenceFeed.filter((item) =>
     `${item.source} ${item.title} ${item.id} ${item.snippet ?? ""}`
       .toLowerCase()
@@ -351,7 +359,8 @@ function RealtimeStream() {
             </span>
           )}
           <span className="inline-flex items-center gap-1">
-            <FileText className="size-3.5" /> {liveEvidenceFeed.length} 条证据
+            <FileText className="size-3.5" /> {formalEvidenceCount} 条正式证据 ·{" "}
+            {retrievalCandidateCount} 条检索候选
           </span>
           <span className="inline-flex items-center gap-1">
             <Users className="size-3.5" /> {activeAgentCount || visibleAgents.length} 位专家
@@ -530,7 +539,7 @@ function RealtimeStream() {
         <aside className="overflow-y-auto border-l border-border bg-card/50 px-5 py-6 max-lg:hidden">
           <div className="flex items-center justify-between text-xs font-medium">
             <span className="flex items-center gap-2">
-              <Database className="size-3.5 text-primary" /> 证据库（实时）
+              <Database className="size-3.5 text-primary" /> 原文与证据（实时）
             </span>
             <span className="tabular text-muted-foreground">{filteredLiveEvidence.length}</span>
           </div>
@@ -558,7 +567,10 @@ function RealtimeStream() {
                   </span>
                   <span className="tabular">{item.id}</span>
                   <span>{item.time}</span>
-                  <span className="ml-auto tabular">可信度 {Math.round(item.conf * 100)}</span>
+                  <span className="ml-auto tabular">
+                    {item.scoreKind === "retrieval" ? "检索分" : "相关性"}{" "}
+                    {Number.isFinite(item.conf) ? Math.round(item.conf * 100) : "待计算"}
+                  </span>
                 </div>
                 <div className="mt-1.5 text-xs font-medium leading-snug">{item.title}</div>
                 {item.snippet ? (
@@ -578,7 +590,11 @@ function RealtimeStream() {
             {!filteredLiveEvidence.length ? (
               <div className="mt-16 text-center text-xs text-muted-foreground">
                 <FileText className="mx-auto mb-2 size-8 opacity-40" />
-                证据采集中，稍候片刻……
+                {filter
+                  ? "没有匹配当前筛选条件的证据。"
+                  : terminalStatuses.has(run.status)
+                    ? "本次分析未形成通过证据门禁的证据，请查看报告局限与检索事件。"
+                    : "证据采集中，稍候片刻……"}
               </div>
             ) : null}
           </div>
@@ -772,7 +788,7 @@ function mergeEvidenceFeed(
   seed: EvidenceFeedItem[],
   events: AnalysisRunEvent[],
 ): EvidenceFeedItem[] {
-  const fromEvents = events
+  const admittedFromEvents = events
     .filter((event) => event.event_type === "evidence_found")
     .map((event, index) => {
       const payload = event.payload ?? {};
@@ -780,16 +796,49 @@ function mergeEvidenceFeed(
         id: String(payload.evidence_id ?? `live-${index}`),
         source: event.actor_name,
         title: event.title.replace("发现证据：", ""),
-        conf: Number(payload.confidence ?? 0),
+        conf: Number(payload.relevance_score ?? payload.retrieval_score ?? Number.NaN),
         time: event.created_at ? formatClock(event.created_at) : "近实时",
         page: Number(payload.page_number ?? 0),
         snippet: event.summary,
         document_id: payload.document_id ? String(payload.document_id) : null,
         bbox: Array.isArray(payload.bbox) ? (payload.bbox as number[]) : undefined,
+        scoreKind: "relevance" as const,
       };
     });
+  const candidatesFromEvents = events.flatMap((event) => {
+    if (event.event_type !== "retrieval_query_completed") return [];
+    const chunks = Array.isArray(event.payload?.chunks) ? event.payload.chunks : [];
+    return chunks.flatMap((rawChunk) => {
+      if (!rawChunk || typeof rawChunk !== "object") return [];
+      const chunk = rawChunk as Record<string, unknown>;
+      const chunkId = String(chunk.chunk_id ?? "");
+      if (!chunkId) return [];
+      return [
+        {
+          id: `candidate-${chunkId}`,
+          source: event.actor_name,
+          title: `候选原文：${String(chunk.section_path ?? "招股书")}`,
+          conf: Number(chunk.retrieval_score ?? Number.NaN),
+          time: event.created_at ? formatClock(event.created_at) : "近实时",
+          page: Number(chunk.page_number ?? 0),
+          snippet: String(chunk.text ?? ""),
+          document_id: chunk.document_id ? String(chunk.document_id) : null,
+          bbox: Array.isArray(chunk.bbox) ? (chunk.bbox as number[]) : undefined,
+          scoreKind: "retrieval" as const,
+        },
+      ];
+    });
+  });
   const byId = new Map<string, EvidenceFeedItem>();
-  [...seed, ...fromEvents].forEach((item) => byId.set(item.id, item));
+  [...candidatesFromEvents, ...seed, ...admittedFromEvents].forEach((item) => {
+    const locationKey = [item.document_id ?? "", item.page ?? "", item.bbox?.join(",") ?? ""].join(
+      ":",
+    );
+    byId.set(locationKey || item.id, {
+      ...item,
+      scoreKind: item.scoreKind ?? "relevance",
+    });
+  });
   return [...byId.values()];
 }
 
@@ -911,7 +960,9 @@ function eventToBubble(event: AnalysisRunEvent, runCreatedAt: string, index: num
   return {
     who: event.actor_name || "analysis_run",
     kind: eventKind(event.event_type),
-    text: event.summary ? `${event.title}${modelMeta}：${event.raw_response || event.summary}` : event.title,
+    text: event.summary
+      ? `${event.title}${modelMeta}：${event.raw_response || event.summary}`
+      : event.title,
     t: relativeTime(runCreatedAt, event.created_at, index),
   };
 }

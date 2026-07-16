@@ -138,6 +138,17 @@ analysis_runs 状态机（analysis_runs.py）
 | `REDIS_URL` | RQ 队列依赖的 Redis 连接 |
 | `ANALYSIS_EXECUTION_MODE` | `inline`（开发默认）或 `rq`（生产） |
 | `ANALYSIS_QUEUE_NAME` | RQ 队列名，默认 `analysis` |
+| `DOCUMENT_PARSING_EXECUTION_MODE` | PDF 解析执行方式：本地默认 `subprocess`（与 API 隔离），生产可设为 `rq` |
+| `DOCUMENT_PARSING_MAX_CONCURRENCY` | 本地独立 MinerU 解析进程最大并发，默认 `1`，避免模型挤占数据库资源 |
+| `DOCUMENT_PARSING_STALE_SECONDS` | 最近心跳超过该时长的 `processing` 任务标记为可恢复中断，默认 `120` 秒 |
+| `DOCUMENT_PARSING_HEARTBEAT_SECONDS` | 独立解析进程更新任务心跳的间隔，默认 `15` 秒 |
+| `DOCUMENT_PARSING_DISPATCH_INTERVAL_SECONDS` | 本地 API 补发排队解析任务的检查间隔，默认 `10` 秒 |
+| `DOCUMENT_PARSING_TASK_TIMEOUT_SECONDS` | 单个 MinerU 子进程最长运行时间，超时后终止并标记为可恢复中断 |
+| `DOCUMENT_PARSING_CPU_THREADS` | CPU 推理时每个解析进程的 OMP/MKL 线程数，默认 `2` |
+| `DOCUMENT_QUEUE_NAME` | RQ 文档解析队列名，默认 `documents` |
+| `MINERU_DEVICE` | `auto`、`cpu`、`mps`、`cuda` 或 `cuda:<index>`；Apple Silicon Mac 建议 `mps`，NVIDIA 部署建议 `cuda` |
+| `MINERU_CUDA_DEVICE` | 当 `MINERU_DEVICE=cuda` 时使用的逻辑设备号，默认 `0` |
+| `MINERU_CUDA_VISIBLE_DEVICES` | 可选，传给独立解析进程的 `CUDA_VISIBLE_DEVICES` |
 | `EMBEDDING_BASE_URL` / `EMBEDDING_API_KEY` / `EMBEDDING_MODEL` | PostgreSQL 入库前的 embedding provider 配置 |
 | `MINIO_ENDPOINT` / `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` / `MINIO_SECURE` | MinIO 对象存储连接 |
 | `OBJECT_STORE_PROVIDER` / `OBJECT_STORE_BUCKET` / `OBJECT_STORE_LOCAL_ROOT` | 对象存储 provider（`minio` 或 `local`）与 bucket / 本地根目录 |
@@ -149,6 +160,10 @@ analysis_runs 状态机（analysis_runs.py）
 | `A2A_SEND_TIMEOUT_SECONDS` | A2A `SendMessage` 等待邮箱专家结果的上限；默认 `300` 秒 |
 
 在 API 与 RQ worker 分进程/容器运行时，`AGENT_RUNTIME_DATA_DIR` 必须指向双方共享的持久化目录；当前 Docker Compose 已为 API 与 worker 共同挂载 `agent_runtime_data` volume。运行时目录权限为 `0700`、邮箱与状态文件为 `0600`，不得放置招股书全文、密钥或 chain-of-thought。
+
+`GET /analysis-runs/{run_id}/evidence` 会同时返回正式证据与状态为
+`retrieval_candidate` 的未核验检索候选，便于审计“召回了什么、为何未通过”。报告、
+finding 验证和风险评级仍只读取内部已入门禁的正式证据，不会把候选检索分当作可信度。
 
 ## 本地运行
 

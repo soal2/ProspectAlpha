@@ -107,9 +107,15 @@ function AnalysisShell() {
   );
 }
 
-function Gauge({ score, level }: { score: number; level: "high" | "mid" | "low" }) {
+function Gauge({ score, level }: { score: number; level: "high" | "mid" | "low" | "unrated" }) {
   const color =
-    level === "high" ? "var(--risk-high)" : level === "mid" ? "var(--risk-mid)" : "var(--risk-low)";
+    level === "high"
+      ? "var(--risk-high)"
+      : level === "mid"
+        ? "var(--risk-mid)"
+        : level === "unrated"
+          ? "var(--muted-foreground)"
+          : "var(--risk-low)";
   const circumference = 2 * Math.PI * 26;
   const offset = circumference - (score / 100) * circumference;
   return (
@@ -124,13 +130,17 @@ function Gauge({ score, level }: { score: number; level: "high" | "mid" | "low" 
           strokeWidth={6}
           fill="none"
           strokeDasharray={circumference}
-          strokeDashoffset={offset}
+          strokeDashoffset={level === "unrated" ? circumference : offset}
           strokeLinecap="round"
         />
       </svg>
       <div className="absolute text-center">
-        <div className="font-serif text-lg font-semibold leading-none tabular">{score}</div>
-        <div className="text-[9px] text-muted-foreground">RISK</div>
+        <div className="font-serif text-lg font-semibold leading-none tabular">
+          {level === "unrated" ? "—" : score}
+        </div>
+        <div className="text-[9px] text-muted-foreground">
+          {level === "unrated" ? "UNRATED" : "RISK"}
+        </div>
       </div>
     </div>
   );

@@ -93,7 +93,7 @@ def test_database_upload_returns_registered_asset_and_schedules_mineru(
         lambda **_kwargs: SimpleNamespace(document_id="doc_async"),
     )
     monkeypatch.setattr(
-        "riskagent.api.documents.process_registered_prospectus",
+        "riskagent.api.documents.dispatch_document_job",
         lambda document_id: scheduled.append(document_id),
     )
 

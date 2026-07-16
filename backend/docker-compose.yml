@@ -6,6 +6,12 @@ services:
     environment:
       ANALYSIS_EXECUTION_MODE: rq
       ANALYSIS_QUEUE_NAME: analysis
+      DOCUMENT_PARSING_EXECUTION_MODE: rq
+      DOCUMENT_QUEUE_NAME: documents
+      DOCUMENT_PARSING_STALE_SECONDS: ${DOCUMENT_PARSING_STALE_SECONDS:-120}
+      DOCUMENT_PARSING_HEARTBEAT_SECONDS: ${DOCUMENT_PARSING_HEARTBEAT_SECONDS:-15}
+      MINERU_DEVICE: ${MINERU_DEVICE:-auto}
+      MINERU_CUDA_DEVICE: ${MINERU_CUDA_DEVICE:-0}
       AGENT_RUNTIME_DATA_DIR: /app/data/agent_runtime
       A2A_PUBLIC_BASE_URL: ${A2A_PUBLIC_BASE_URL:-http://localhost:8000}
       LANGGRAPH_CHECKPOINT_BACKEND: postgres
@@ -30,6 +36,8 @@ services:
       - "8000:8000"
     volumes:
       - agent_runtime_data:/app/data/agent_runtime
+      - document_raw_data:/app/data/raw
+      - document_processed_data:/app/data/processed
     depends_on:
       postgres:
         condition: service_healthy
@@ -50,6 +58,16 @@ services:
     environment:
       ANALYSIS_EXECUTION_MODE: rq
       ANALYSIS_QUEUE_NAME: analysis
+      DOCUMENT_PARSING_EXECUTION_MODE: inline
+      DOCUMENT_QUEUE_NAME: documents
+      DOCUMENT_PARSING_MAX_CONCURRENCY: ${DOCUMENT_PARSING_MAX_CONCURRENCY:-1}
+      DOCUMENT_PARSING_STALE_SECONDS: ${DOCUMENT_PARSING_STALE_SECONDS:-120}
+      DOCUMENT_PARSING_HEARTBEAT_SECONDS: ${DOCUMENT_PARSING_HEARTBEAT_SECONDS:-15}
+      DOCUMENT_PARSING_TASK_TIMEOUT_SECONDS: ${DOCUMENT_PARSING_TASK_TIMEOUT_SECONDS:-7200}
+      DOCUMENT_PARSING_CPU_THREADS: ${DOCUMENT_PARSING_CPU_THREADS:-2}
+      MINERU_DEVICE: ${MINERU_DEVICE:-auto}
+      MINERU_CUDA_DEVICE: ${MINERU_CUDA_DEVICE:-0}
+      MINERU_CUDA_VISIBLE_DEVICES: ${MINERU_CUDA_VISIBLE_DEVICES:-}
       AGENT_RUNTIME_DATA_DIR: /app/data/agent_runtime
       A2A_PUBLIC_BASE_URL: ${A2A_PUBLIC_BASE_URL:-http://localhost:8000}
       LANGGRAPH_CHECKPOINT_BACKEND: postgres
@@ -71,6 +89,8 @@ services:
       DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
     volumes:
       - agent_runtime_data:/app/data/agent_runtime
+      - document_raw_data:/app/data/raw
+      - document_processed_data:/app/data/processed
     depends_on:
       postgres:
         condition: service_healthy
@@ -124,3 +144,5 @@ volumes:
   agent_runtime_data:
   postgres_data:
   minio_data:
+  document_raw_data:
+  document_processed_data:

@@ -1,5 +1,8 @@
 from riskagent.retrieval.query_planner import (
+    build_evidence_gap_queries,
+    build_module_search_queries,
     build_rule_search_queries,
+    prioritize_rules_for_context,
     rerank_rule_candidates,
     rule_anchor_terms,
 )
@@ -93,3 +96,69 @@ def test_customer_word_alone_is_not_customer_concentration_evidence():
     )
 
     assert ranked == []
+
+
+def test_module_queries_preserve_specific_user_and_assignment_intent():
+    queries = build_module_search_queries(
+        module="市场与估值风险",
+        goal="分析发行价区间 32.20-34.20 港元的合理性和破发风险",
+        expected_outputs=["RiskFinding: 发行定价风险", "股票代号"],
+        rules=[_rule()],
+        user_requirement="股票代号是什么，并分析发行定价风险",
+    )
+
+    joined = " ".join(queries)
+    assert "股份代號" in joined
+    assert "發售價" in joined
+    assert any(len(query) < 40 for query in queries)
+
+
+def test_gap_queries_are_short_and_include_counter_evidence_terms():
+    queries = build_evidence_gap_queries(
+        _rule(),
+        missing_reason="缺少现金余额和管理层改善说明",
+        user_requirement="重点分析现金流",
+        module_goal="核查持续经营能力",
+    )
+
+    assert any("持續經營" in query for query in queries)
+    assert any("改善措施" in query for query in queries)
+    assert all(len(query) < 80 for query in queries)
+
+
+def test_business_assignment_generates_pipeline_specific_queries():
+    queries = build_module_search_queries(
+        module="业务风险分析",
+        goal="分析研发管线依赖和候选药物商业化风险",
+        expected_outputs=["RiskFinding: 研发管线依赖风险"],
+        rules=[_rule()],
+        user_requirement="重点检查候选药物是否均未获批",
+    )
+
+    joined = " ".join(queries)
+    assert "候選藥物" in joined
+    assert "監管批准" in joined or "未取得監管批准" in joined
+
+
+def test_assignment_context_prioritizes_matching_rules():
+    pipeline_rule = _rule().model_copy(
+        update={
+            "rule_id": "PIPELINE",
+            "category": "持续经营",
+            "risk_item": "核心产品/管线推进不及预期",
+        }
+    )
+    unrelated_rule = _rule().model_copy(
+        update={
+            "rule_id": "CUSTOMER",
+            "category": "客户/供应商依赖",
+            "risk_item": "前五大客户集中度过高",
+        }
+    )
+
+    ordered = prioritize_rules_for_context(
+        [unrelated_rule, pipeline_rule],
+        context="核查研发管线依赖风险",
+    )
+
+    assert ordered[0].rule_id == "PIPELINE"

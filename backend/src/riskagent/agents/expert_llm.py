@@ -11,12 +11,13 @@ EXPERT_SYSTEM_PROMPT = """\\
 你是 ProspectAlpha 多 Agent 团队中的「{agent_title}」专家（agent_name={agent_name}）。
 下面是你能力域内通过规则预筛的候选风险条目，以及对应招股书原文片段。
 请逐条做严谨的二次判断，给出：
-1. severity: low | medium | high
-2. confidence: 0.0-1.0
-3. reasoning_summary: 80-200 字，必须引用页码/章节或证据片段
-4. needs_more_evidence: bool
+1. evaluation_result: triggered | not_triggered | insufficient_evidence
+2. severity: low | medium | high
+3. confidence: 0.0-1.0
+4. reasoning_summary: 80-200 字，必须引用页码/章节或证据片段
+5. needs_more_evidence: bool
 
-只输出 JSON 对象，格式：{{"items":[{{"rule_id":str,"severity":str,"confidence":float,"reasoning_summary":str,"needs_more_evidence":bool}}]}}
+只输出 JSON 对象，格式：{{"items":[{{"rule_id":str,"evaluation_result":str,"severity":str,"confidence":float,"reasoning_summary":str,"needs_more_evidence":bool}}]}}
 """
 
 
@@ -26,6 +27,10 @@ async def analyze_findings_with_llm(
     agent_title: str,
     candidates: list[RuleEvaluation],
     evidence_snippets: list[str],
+    evidence_by_rule: dict[str, list[str]] | None = None,
+    user_requirement: str = "",
+    assignment: dict[str, Any] | None = None,
+    query_history: list[str] | None = None,
     system_prompt: str | None = None,
     on_delta: Callable[[str], None] | None = None,
     on_response: Callable[[str], None] | None = None,
@@ -38,8 +43,15 @@ async def analyze_findings_with_llm(
     )
     user_payload = json.dumps(
         {
+            "user_requirement": user_requirement,
+            "assignment": assignment or {},
+            "query_history": query_history or [],
             "candidates": [c.model_dump() for c in candidates],
             "evidence_snippets": [s for s in evidence_snippets if s][:20],
+            "evidence_by_rule": {
+                rule_id: [snippet for snippet in snippets if snippet][:4]
+                for rule_id, snippets in (evidence_by_rule or {}).items()
+            },
         },
         ensure_ascii=False,
     )
@@ -76,9 +88,13 @@ async def analyze_findings_with_llm(
         except (TypeError, ValueError):
             pass
         needs_more = bool(enriched.get("needs_more_evidence", False))
-        cand.evaluation_result = (
-            "triggered"
-            if not needs_more and cand.confidence >= 0.55
-            else "insufficient_evidence"
-        )
+        outcome = str(enriched.get("evaluation_result") or "")
+        if outcome not in {"triggered", "not_triggered", "insufficient_evidence"}:
+            # Fail closed when an older/malformed model reply omits the actual
+            # trigger decision. Confidence alone cannot distinguish a
+            # confirmed risk from a confident non-trigger.
+            outcome = "insufficient_evidence"
+        if needs_more or (outcome == "triggered" and cand.confidence < 0.55):
+            outcome = "insufficient_evidence"
+        cand.evaluation_result = outcome
     return items

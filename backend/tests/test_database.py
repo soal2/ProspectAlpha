@@ -1,7 +1,13 @@
-from sqlalchemy import Integer, String, select
+from sqlalchemy import Integer, String, inspect, select, text
 from sqlalchemy.orm import Mapped, mapped_column, sessionmaker
 
-from riskagent.database import Base, check_database_connection, make_engine, session_scope
+from riskagent.database import (
+    Base,
+    check_database_connection,
+    ensure_database_schema,
+    make_engine,
+    session_scope,
+)
 
 
 class DatabaseSmokeRow(Base):
@@ -48,3 +54,26 @@ def test_session_scope_rolls_back_on_error(tmp_path):
         row = session.scalar(select(DatabaseSmokeRow).where(DatabaseSmokeRow.id == 1))
 
     assert row is None
+
+
+def test_existing_prospectus_table_gets_processing_diagnostic_columns(tmp_path):
+    engine = make_engine(f"sqlite:///{tmp_path / 'legacy.db'}")
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "CREATE TABLE prospectus_documents ("
+                "document_id VARCHAR(64) PRIMARY KEY, status VARCHAR(64) NOT NULL)"
+            )
+        )
+
+    ensure_database_schema(engine)
+
+    columns = {column["name"] for column in inspect(engine).get_columns("prospectus_documents")}
+    assert {
+        "processing_error_code",
+        "processing_error_message",
+        "processing_attempts",
+        "processing_started_at",
+        "processing_heartbeat_at",
+        "processing_finished_at",
+    } <= columns

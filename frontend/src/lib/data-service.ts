@@ -36,6 +36,7 @@ export interface AnalysisFinding {
   evidence_snippets: string[];
   matched_terms: string[];
   requires_human_review: boolean;
+  verification_status?: string;
 }
 
 export interface OrchestraStage {
@@ -224,7 +225,10 @@ export type UploadedDocument = {
   page_count: number;
   text_chars: number;
   block_count: number;
-  processing_status: "uploaded" | "queued" | "processing" | "ready" | "failed";
+  processing_status: "uploaded" | "queued" | "processing" | "ready" | "failed" | "interrupted";
+  processing_error_code: string | null;
+  processing_error_message: string | null;
+  processing_attempts: number;
   source_url: string | null;
   created_at: string;
 };
@@ -404,6 +408,7 @@ function evidenceStatusLabel(status: string): string {
     weakly_supported: "弱支持证据",
     needs_human_review: "待人工复核",
     rejected_by_debate: "红队否决候选证据",
+    retrieval_candidate: "检索候选 · 尚未核验",
     pending: "待核验",
   };
   return labels[status] ?? status;
@@ -422,8 +427,16 @@ async function fetchEvidenceDetailItems(id: string): Promise<EvidenceDetailItem[
       id: item.evidence_id,
       section: item.section_path,
       page: item.page_number,
-      conf: item.relevance_score,
-      scoreKind: item.relevance_score > 0 ? "relevance" : "unavailable",
+      conf:
+        item.verifier_status === "retrieval_candidate"
+          ? item.retrieval_score
+          : item.relevance_score,
+      scoreKind:
+        item.verifier_status === "retrieval_candidate"
+          ? "retrieval"
+          : item.relevance_score > 0
+            ? "relevance"
+            : "unavailable",
       snippet: item.text,
       risk: riskByFinding[item.finding_id] ?? evidenceStatusLabel(item.verifier_status),
       documentId: item.document_id,
@@ -473,8 +486,16 @@ async function fetchKnowledgeData(): Promise<KnowledgeData> {
       name: run.company_name,
       section: item.section_path,
       page: item.page_number,
-      conf: item.relevance_score,
-      scoreKind: item.relevance_score > 0 ? "relevance" : "unavailable",
+      conf:
+        item.verifier_status === "retrieval_candidate"
+          ? item.retrieval_score
+          : item.relevance_score,
+      scoreKind:
+        item.verifier_status === "retrieval_candidate"
+          ? "retrieval"
+          : item.relevance_score > 0
+            ? "relevance"
+            : "unavailable",
       snippet: item.text,
       risk: riskByFinding[item.finding_id] ?? evidenceStatusLabel(item.verifier_status),
       documentId: item.document_id,
@@ -713,6 +734,23 @@ export async function getDocument(documentId: string) {
   return apiRequest<UploadedDocument>(`/documents/${documentId}`);
 }
 
+export async function reparseDocument(documentId: string) {
+  return apiRequest<UploadedDocument>(`/documents/${documentId}/reparse`, {
+    method: "POST",
+  });
+}
+
+export async function getDocumentParserHealth() {
+  return apiRequest<{
+    status: "ready" | "model_download_required" | "unavailable";
+    installed: boolean;
+    model_source: string;
+    device: string;
+    model_cache_present: boolean;
+    message: string;
+  }>("/documents/parser-health");
+}
+
 export async function waitForDocumentReady(
   documentId: string,
   onProgress?: (document: UploadedDocument) => void,
@@ -722,8 +760,10 @@ export async function waitForDocumentReady(
     const document = await getDocument(documentId);
     onProgress?.(document);
     if (document.block_count > 0 || document.processing_status === "ready") return document;
-    if (document.processing_status === "failed") {
-      throw new Error("MinerU 解析失败，请检查后端日志后重新上传。");
+    if (["failed", "interrupted"].includes(document.processing_status)) {
+      throw new Error(
+        document.processing_error_message ?? "MinerU 解析失败，可点击“重新解析”再次尝试。",
+      );
     }
     await new Promise((resolve) => setTimeout(resolve, 3000));
   }
@@ -981,6 +1021,9 @@ function toAnalysisSummary(run: AnalysisRun, evidenceCountOverride?: number): An
     run.findings.reduce((total, finding) => total + finding.evidence_snippets.length, 0);
   const highConfidence = run.findings.filter((finding) => finding.confidence >= 0.75).length;
   const riskScore = scoreRun(run);
+  const hasAdmittedFinding = run.findings.some((finding) =>
+    ["supported", "weakly_supported"].includes(finding.verification_status ?? ""),
+  );
   return {
     id: run.run_id,
     code: String(structured.code ?? structured.ticker ?? "IPO"),
@@ -989,7 +1032,14 @@ function toAnalysisSummary(run: AnalysisRun, evidenceCountOverride?: number): An
     listingDate: String(structured.listing_date ?? run.data_cutoff_date),
     offerPrice: Number(structured.offer_price ?? 0),
     offerSize: String(structured.offer_size ?? "待确认"),
-    riskLevel: riskScore >= 70 ? "high" : riskScore >= 40 ? "mid" : "low",
+    riskLevel:
+      run.status === "completed" && !hasAdmittedFinding
+        ? "unrated"
+        : riskScore >= 70
+          ? "high"
+          : riskScore >= 40
+            ? "mid"
+            : "low",
     riskScore,
     evidenceCount,
     highConfidence,

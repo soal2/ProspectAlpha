@@ -4,6 +4,8 @@ pdf_processor:
     method: ocr
     backend: pipeline
     lang: chinese_cht
+    # auto / cpu / mps / cuda / cuda:<index>; MINERU_DEVICE overrides this value.
+    device: auto
     reuse_existing: true
     image_analysis: true
 

@@ -20,6 +20,18 @@ class ProspectusDocumentRow(Base):
     file_size_bytes: Mapped[int] = mapped_column(Integer)
     source_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     status: Mapped[str] = mapped_column(String(64), default="registered", index=True)
+    processing_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    processing_error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    processing_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    processing_started_at: Mapped[object | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    processing_heartbeat_at: Mapped[object | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    processing_finished_at: Mapped[object | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

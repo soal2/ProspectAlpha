@@ -4,15 +4,21 @@ const styles: Record<string, string> = {
   high: "bg-[color:var(--risk-high)]/12 text-[color:var(--risk-high)] ring-[color:var(--risk-high)]/30",
   mid: "bg-[color:var(--risk-mid)]/15 text-[oklch(0.45_0.12_75)] ring-[color:var(--risk-mid)]/40",
   low: "bg-[color:var(--risk-low)]/12 text-[color:var(--risk-low)] ring-[color:var(--risk-low)]/30",
+  unrated: "bg-muted text-muted-foreground ring-border",
 };
-const labels: Record<string, string> = { high: "高风险", mid: "中风险", low: "低风险" };
+const labels: Record<string, string> = {
+  high: "高风险",
+  mid: "中风险",
+  low: "低风险",
+  unrated: "未评级",
+};
 
 export function RiskBadge({
   level,
   className,
   withDot = true,
 }: {
-  level: "high" | "mid" | "low";
+  level: "high" | "mid" | "low" | "unrated";
   className?: string;
   withDot?: boolean;
 }) {
@@ -34,13 +40,14 @@ export function RiskDot({
   level,
   className,
 }: {
-  level: "high" | "mid" | "low";
+  level: "high" | "mid" | "low" | "unrated";
   className?: string;
 }) {
   const colors: Record<string, string> = {
     high: "bg-[color:var(--risk-high)]",
     mid: "bg-[color:var(--risk-mid)]",
     low: "bg-[color:var(--risk-low)]",
+    unrated: "bg-muted-foreground",
   };
   return <span className={cn("inline-block size-2 rounded-full", colors[level], className)} />;
 }

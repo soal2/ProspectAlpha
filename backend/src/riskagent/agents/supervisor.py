@@ -6,8 +6,10 @@ import asyncio
 import inspect
 import operator
 import os
+import re
 import sqlite3
 import threading
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,13 +36,21 @@ from riskagent.agents.orchestrator import (
 )
 from riskagent.agents.expert_llm import analyze_findings_with_llm
 from riskagent.agents.prompts import render_expert_prompt
+from riskagent.agents.query_llm import rewrite_retrieval_queries_with_llm
 from riskagent.retrieval import ChunkSearchResult, prospectus_hybrid_search
-from riskagent.retrieval.query_planner import build_module_search_queries
+from riskagent.retrieval.query_planner import (
+    build_evidence_gap_queries,
+    build_module_search_intents,
+    build_rule_search_queries,
+    prioritize_rules_for_context,
+    rerank_rule_candidates,
+)
 from riskagent.runtime_events import LiveLLMCall
 from riskagent.risk_rules import RiskRule, RiskRuleRepository
 from riskagent.seed_data import AGENT_EXPERTS, AGENT_NAME_ALIASES, AGENT_SPECS
 from riskagent.skills.risk_extract import RuleEvaluation, evaluate_text_against_rules
 from riskagent.skills.risk_skill_registry import (
+    CATEGORY_ALIASES,
     rules_for_skill,
     rules_from_snapshot,
     skill_for_agent,
@@ -87,6 +97,7 @@ class ExpertModuleResult(BaseModel):
     peer_message_ids: list[str] = Field(default_factory=list)
     peer_reviews: list[dict[str, Any]] = Field(default_factory=list)
     strategy_guidance: dict[str, Any] | None = None
+    screening_observations: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ExpertTaskOutput(BaseModel):
@@ -472,6 +483,7 @@ class AgentTeamSupervisor:
                             assignment=resolved_assignment,
                             text=state["text"],
                             document_id=state.get("document_id", ""),
+                            user_requirement=state.get("user_requirement", ""),
                             rules=all_rules,
                             rule_snapshot=state["rule_snapshot"],
                         ),
@@ -612,6 +624,7 @@ class AgentTeamSupervisor:
                                 assignment=replacement_assignment,
                                 text=state["text"],
                                 document_id=state.get("document_id", ""),
+                                user_requirement=state.get("user_requirement", ""),
                                 rules=all_rules,
                                 rule_snapshot=state["rule_snapshot"],
                             ),
@@ -841,6 +854,7 @@ class AgentTeamSupervisor:
         assignment: StrategyAssignment,
         text: str,
         document_id: str = "",
+        user_requirement: str = "",
         rules: list[RiskRule],
         rule_snapshot: dict[str, Any],
     ):
@@ -882,42 +896,233 @@ class AgentTeamSupervisor:
             selected_rules = (
                 rules_for_skill(skill, rules, set()) if skill else _rules_for_spec(spec, rules)
             )
-            analysis_text = text
-            if document_id:
-                queries = build_module_search_queries(
-                    module=assignment.module,
-                    goal=assignment.goal,
-                    rules=selected_rules,
+            selected_rules = prioritize_rules_for_context(
+                selected_rules,
+                context=" ".join(
+                    [
+                        user_requirement,
+                        assignment.module,
+                        assignment.goal,
+                        *assignment.expected_outputs,
+                    ]
+                ),
+            )
+            rule_by_id = {rule.rule_id: rule for rule in rules}
+            query_history: list[str] = []
+            chunks_by_id: dict[str, ChunkSearchResult] = {}
+
+            def retrieve(search_queries: list[str], *, round_name: str) -> int:
+                fresh = 0
+                planned = [
+                    query
+                    for query in dict.fromkeys(
+                        query.strip() for query in search_queries if query.strip()
+                    )
+                    if query not in query_history
+                ]
+                if not document_id or not planned:
+                    return 0
+                query_history.extend(query for query in planned if query not in query_history)
+                publish_llm_event(
+                    _event(
+                        "retrieval_query_planned",
+                        spec.name,
+                        f"{spec.title} 生成{round_name}检索问题",
+                        f"围绕用户要求和模块目标生成 {len(planned)} 条原子 Query。",
+                        payload={
+                            "agent_name": spec.name,
+                            "module_id": assignment.module_id,
+                            "round": round_name,
+                            "queries": planned,
+                        },
+                    )
                 )
-                chunks_by_id: dict[str, ChunkSearchResult] = {}
-                for query_index, query in enumerate(queries):
+                for query_index, query in enumerate(planned):
                     for chunk in _invoke_chunk_retriever(
                         self.chunk_retriever,
                         query=query,
                         document_id=document_id,
                         limit=8,
-                        vector_weight=0.45 if query_index < 3 else 0.65,
+                        vector_weight=0.35 if query_index < 3 else 0.65,
                     ):
                         current = chunks_by_id.get(chunk.chunk_id)
+                        if current is None:
+                            fresh += 1
                         if current is None or chunk.score > current.score:
                             chunks_by_id[chunk.chunk_id] = chunk
+                publish_llm_event(
+                    _event(
+                        "retrieval_query_completed",
+                        spec.name,
+                        f"{spec.title} 完成{round_name}检索",
+                        f"新增 {fresh} 个原文块，累计 {len(chunks_by_id)} 个。",
+                        payload={
+                            "agent_name": spec.name,
+                            "module_id": assignment.module_id,
+                            "round": round_name,
+                            "new_chunk_count": fresh,
+                            "chunk_ids": list(chunks_by_id)[:50],
+                            "chunks": [
+                                {
+                                    "chunk_id": chunk.chunk_id,
+                                    "document_id": chunk.document_id,
+                                    "page_number": chunk.page_idx,
+                                    "section_path": str(
+                                        chunk.metadata.get("section_path")
+                                        or chunk.chunk_type
+                                    ),
+                                    "text": chunk.text[:300],
+                                    "bbox": (
+                                        chunk.merged_bboxes[0].get("bbox", [])
+                                        if chunk.merged_bboxes
+                                        else []
+                                    ),
+                                    "bbox_coordinate_space": str(
+                                        chunk.metadata.get("bbox_coordinate_space")
+                                        or "pdf_points"
+                                    ),
+                                    "retrieval_score": chunk.score,
+                                }
+                                for chunk in sorted(
+                                    chunks_by_id.values(),
+                                    key=lambda item: item.score,
+                                    reverse=True,
+                                )[:10]
+                            ],
+                        },
+                    )
+                )
+                return fresh
+
+            if (
+                peer_context.message_type == MessageType.PEER_REQUEST
+                and isinstance(payload, dict)
+                and payload.get("kind") == "cross_module_review"
+            ):
+                reviews: list[dict[str, Any]] = []
+                for summary in payload.get("finding_summaries", [])[:10]:
+                    rule = rule_by_id.get(str(summary.get("rule_id") or ""))
+                    if rule is None:
+                        continue
+                    before = set(chunks_by_id)
+                    review_queries = build_rule_search_queries(
+                        rule,
+                        user_requirement=user_requirement,
+                    )[:4]
+                    retrieve(review_queries, round_name="跨模块反证")
+                    new_ids = [chunk_id for chunk_id in chunks_by_id if chunk_id not in before]
+                    reviews.append(
+                        {
+                            "rule_id": rule.rule_id,
+                            "queries": review_queries,
+                            "evidence_chunk_ids": new_ids[:5],
+                            "status": "evidence_found" if new_ids else "needs_more_evidence",
+                        }
+                    )
+                return {
+                    "reviewer_agent": spec.name,
+                    "reviewed_module": payload.get("origin_module"),
+                    "related_rule_ids": [review["rule_id"] for review in reviews],
+                    "reviews": reviews,
+                    "summary": f"{spec.title} 针对原 finding 执行了 {len(reviews)} 组反证检索。",
+                }
+
+            analysis_text = text
+            retrieval_failure: str | None = None
+            if document_id:
+                intents = build_module_search_intents(
+                    module=assignment.module,
+                    goal=assignment.goal,
+                    rules=selected_rules,
+                    user_requirement=user_requirement,
+                    expected_outputs=assignment.expected_outputs,
+                    limit=6,
+                )
+                queries = []
+                query_width = max((len(intent.queries) for intent in intents), default=0)
+                for query_index in range(query_width):
+                    queries.extend(
+                        intent.queries[query_index]
+                        for intent in intents
+                        if query_index < len(intent.queries)
+                    )
+                seed_queries = list(dict.fromkeys(queries))[:14]
+                llm_queries: list[str] = []
+                try:
+                    llm_queries = asyncio.run(
+                        rewrite_retrieval_queries_with_llm(
+                            user_requirement=user_requirement,
+                            assignment=assignment.model_dump(),
+                            rules=selected_rules,
+                            seed_queries=seed_queries,
+                            limit=10,
+                        )
+                    )
+                    publish_llm_event(
+                        _event(
+                            "retrieval_query_rewritten",
+                            spec.name,
+                            f"{spec.title} 自主改写检索问题",
+                            f"根据用户要求和模块目标生成 {len(llm_queries)} 条 Query。",
+                            payload={
+                                "agent_name": spec.name,
+                                "module_id": assignment.module_id,
+                                "queries": llm_queries,
+                            },
+                        )
+                    )
+                except Exception as exc:
+                    publish_llm_event(
+                        _event(
+                            "retrieval_query_rewrite_failed",
+                            spec.name,
+                            f"{spec.title} Query 改写失败",
+                            f"{type(exc).__name__}: {exc}",
+                            stage_status="failed",
+                        )
+                    )
+                final_queries = list(dict.fromkeys([*llm_queries, *seed_queries]))[:14]
+                retrieve(final_queries, round_name="首轮")
                 chunks = sorted(
                     chunks_by_id.values(), key=lambda item: item.score, reverse=True
                 )
                 if not chunks:
-                    raise ValueError(
-                        f"No PostgreSQL chunks retrieved for document {document_id}"
+                    retrieval_failure = f"文档 {document_id} 未召回原文块。"
+                    analysis_text = ""
+                else:
+                    analysis_text = "\n\n".join(
+                        f"[第{chunk.page_idx}页][{chunk.metadata.get('section_path') or chunk.chunk_type}] {chunk.text}"
+                        for chunk in chunks
                     )
-                analysis_text = "\n\n".join(
-                    f"[第{chunk.page_idx}页][{chunk.metadata.get('section_path') or chunk.chunk_type}] {chunk.text}"
-                    for chunk in chunks
-                )
             evaluations = evaluate_text_against_rules(
                 analysis_text,
                 rules=selected_rules,
                 repository=self.repository,
                 rule_set_snapshot=rule_snapshot,
             )
+            if document_id:
+                uncovered_rule_ids = [
+                    item.rule_id
+                    for item in evaluations
+                    if item.evaluation_result == "not_evaluated"
+                ][:6]
+                coverage_query_groups = [
+                    build_rule_search_queries(
+                        rule_by_id[rule_id],
+                        user_requirement=user_requirement,
+                    )[:3]
+                    for rule_id in uncovered_rule_ids
+                    if rule_id in rule_by_id
+                ]
+                coverage_queries = _round_robin_queries(coverage_query_groups, limit=12)
+                if retrieve(coverage_queries, round_name="规则覆盖") > 0:
+                    analysis_text = _analysis_text_from_chunks(chunks_by_id.values())
+                    evaluations = evaluate_text_against_rules(
+                        analysis_text,
+                        rules=selected_rules,
+                        repository=self.repository,
+                        rule_set_snapshot=rule_snapshot,
+                    )
             candidates = [
                 item
                 for item in evaluations
@@ -926,25 +1131,20 @@ class AgentTeamSupervisor:
             for item in evaluations:
                 item.source_type = spec.name
                 item.skill_id = skill.skill_id if skill else None
-            if peer_context.message_type == MessageType.PEER_REQUEST:
-                return {
-                    "reviewer_agent": spec.name,
-                    "reviewed_module": payload.get("origin_module"),
-                    "related_rule_ids": [item.rule_id for item in candidates[:10]],
-                    "summary": (
-                        f"{spec.title} 通过 A2A 对等消息复核，"
-                        f"在自身能力域发现 {len(candidates)} 条待验证规则候选。"
-                    ),
-                }
-
             llm_failure: str | None = None
             strategy_guidance: dict[str, Any] | None = None
             if candidates:
                 try:
-                    snippets = []
-                    for item in candidates:
-                        if item.evidence_snippets:
-                            snippets.append(item.evidence_snippets[0])
+                    evidence_by_rule = _attach_rule_evidence_packs(
+                        candidates,
+                        rule_by_id=rule_by_id,
+                        chunks=chunks_by_id.values(),
+                    )
+                    snippets = [
+                        snippets[0]
+                        for snippets in evidence_by_rule.values()
+                        if snippets
+                    ]
                     publish_llm_event(
                         _event(
                             "expert_llm_started",
@@ -972,6 +1172,10 @@ class AgentTeamSupervisor:
                                 agent_title=spec.title,
                                 candidates=candidates,
                                 evidence_snippets=snippets,
+                                evidence_by_rule=evidence_by_rule,
+                                user_requirement=user_requirement,
+                                assignment=assignment.model_dump(),
+                                query_history=query_history,
                                 system_prompt=render_expert_prompt(spec.capability_payload()),
                                 on_delta=live_call.delta,
                                 on_response=live_call.complete,
@@ -980,14 +1184,29 @@ class AgentTeamSupervisor:
                     except Exception as exc:
                         live_call.fail(exc)
                         raise
-                    needs_more = [
-                        str(item.get("rule_id"))
+                    needs_more_items = [
+                        item
                         for item in llm_items
-                        if isinstance(item, dict) and item.get("needs_more_evidence")
+                        if isinstance(item, dict)
+                        and (
+                            item.get("needs_more_evidence")
+                            or item.get("evaluation_result") == "insufficient_evidence"
+                        )
                     ]
+                    needs_more = [str(item.get("rule_id")) for item in needs_more_items]
                     if needs_more:
-                        # Ask the orchestrator for guidance; failure is tolerated —
-                        # the module still returns its rule-based findings.
+                        gaps = []
+                        for item in needs_more_items:
+                            rule = rule_by_id.get(str(item.get("rule_id") or ""))
+                            if rule is not None:
+                                gaps.append(
+                                    {
+                                        "rule_id": rule.rule_id,
+                                        "question": f"补充核查{rule.risk_item}",
+                                        "section_hints": rule.source_sections,
+                                        "reason": str(item.get("reasoning_summary") or ""),
+                                    }
+                                )
                         try:
                             strategy_guidance = _as_dict(
                                 peer_context.request(
@@ -997,6 +1216,8 @@ class AgentTeamSupervisor:
                                         "agent_name": spec.name,
                                         "module_id": assignment.module_id,
                                         "rule_ids": needs_more[:20],
+                                        "evidence_gaps": gaps,
+                                        "attempted_queries": query_history,
                                     },
                                     timeout=30.0,
                                 )
@@ -1005,6 +1226,86 @@ class AgentTeamSupervisor:
                             strategy_guidance = {
                                 "error": f"{type(exc).__name__}: {exc}"
                             }
+                        gap_query_groups: list[list[str]] = []
+                        for item in needs_more_items:
+                            rule = rule_by_id.get(str(item.get("rule_id") or ""))
+                            if rule is not None:
+                                gap_query_groups.append(
+                                    build_evidence_gap_queries(
+                                        rule,
+                                        missing_reason=str(item.get("reasoning_summary") or ""),
+                                        user_requirement=user_requirement,
+                                        module_goal=assignment.goal,
+                                    )
+                                )
+                        gap_queries: list[str] = []
+                        gap_width = max(
+                            (len(group) for group in gap_query_groups),
+                            default=0,
+                        )
+                        for query_index in range(gap_width):
+                            gap_queries.extend(
+                                group[query_index]
+                                for group in gap_query_groups
+                                if query_index < len(group)
+                            )
+                        if strategy_guidance:
+                            gap_queries.extend(
+                                str(query)
+                                for query in strategy_guidance.get("suggested_queries", [])
+                            )
+                        if retrieve(gap_queries[:18], round_name="补证") > 0:
+                            supplemented_text = "\n\n".join(
+                                f"[第{chunk.page_idx}页][{chunk.metadata.get('section_path') or chunk.chunk_type}] {chunk.text}"
+                                for chunk in sorted(
+                                    chunks_by_id.values(), key=lambda value: value.score, reverse=True
+                                )
+                            )
+                            missing_rules = [
+                                rule_by_id[rule_id]
+                                for rule_id in needs_more
+                                if rule_id in rule_by_id
+                            ]
+                            supplemental = evaluate_text_against_rules(
+                                supplemented_text,
+                                rules=missing_rules,
+                                repository=self.repository,
+                                rule_set_snapshot=rule_snapshot,
+                            )
+                            supplemental_candidates = [
+                                item for item in supplemental if item.evaluation_result == "candidate"
+                            ]
+                            for item in supplemental:
+                                item.source_type = spec.name
+                                item.skill_id = skill.skill_id if skill else None
+                            if supplemental_candidates:
+                                supplemental_evidence_by_rule = _attach_rule_evidence_packs(
+                                    supplemental_candidates,
+                                    rule_by_id=rule_by_id,
+                                    chunks=chunks_by_id.values(),
+                                )
+                                asyncio.run(
+                                    analyze_findings_with_llm(
+                                        agent_name=spec.name,
+                                        agent_title=spec.title,
+                                        candidates=supplemental_candidates,
+                                        evidence_snippets=[
+                                            snippet
+                                            for snippets in supplemental_evidence_by_rule.values()
+                                            for snippet in snippets[:1]
+                                        ],
+                                        evidence_by_rule=supplemental_evidence_by_rule,
+                                        user_requirement=user_requirement,
+                                        assignment=assignment.model_dump(),
+                                        query_history=query_history,
+                                        system_prompt=render_expert_prompt(spec.capability_payload()),
+                                    )
+                                )
+                                supplemental_by_rule = {item.rule_id: item for item in supplemental}
+                                evaluations = [
+                                    supplemental_by_rule.get(item.rule_id, item)
+                                    for item in evaluations
+                                ]
                     publish_llm_event(
                         _event(
                             "expert_llm_completed",
@@ -1083,14 +1384,15 @@ class AgentTeamSupervisor:
                     "rule_ids": [item.rule_id for item in triggered],
                     "skill_id": skill.skill_id if skill else None,
                     "rules_read": len(selected_rules),
-                    "limitations": _build_module_limitations(
-                        peer_review_error,
-                        llm_failure,
-                        triggered,
-                    ),
+                    "limitations": [
+                        *_build_module_limitations(peer_review_error, llm_failure, triggered),
+                        *_assignment_rule_coverage_gaps(assignment, selected_rules),
+                        *([retrieval_failure] if retrieval_failure else []),
+                    ],
                     "peer_message_ids": peer_message_ids,
                     "peer_reviews": peer_reviews,
                     "strategy_guidance": strategy_guidance,
+                    "screening_observations": _screening_observations(evaluations),
                 },
             }
 
@@ -1238,12 +1540,17 @@ def _build_checkpointer(runtime_root: Path):
 
 
 def _rules_for_spec(spec: AgentSpec, all_rules: list[RiskRule]) -> list[RiskRule]:
+    expanded_categories = {
+        category
+        for configured in spec.categories
+        for category in (configured, *CATEGORY_ALIASES.get(configured, ()))
+    }
     selected = []
     for rule in all_rules:
         if spec.rule_types and rule.rule_type in spec.rule_types:
             selected.append(rule)
             continue
-        if spec.categories and rule.category in spec.categories:
+        if expanded_categories and rule.category in expanded_categories:
             selected.append(rule)
     return selected or (all_rules if spec.default else [])
 
@@ -1261,6 +1568,37 @@ def _build_module_limitations(
     if not triggered:
         out.append("本轮未命中高置信规则，仍建议人工复核相关招股书章节。")
     return out
+
+
+def _assignment_rule_coverage_gaps(
+    assignment: StrategyAssignment,
+    selected_rules: list[RiskRule],
+) -> list[str]:
+    """Expose strategist outputs that the frozen rule taxonomy cannot evaluate."""
+
+    descriptors = [f"{rule.category} {rule.risk_item}" for rule in selected_rules]
+    gaps: list[str] = []
+    for output in assignment.expected_outputs:
+        value = str(output).strip()
+        if not value.lower().startswith("riskfinding"):
+            continue
+        target = value.split(":", 1)[-1].strip()
+        terms = [
+            term.strip().removesuffix("风险")
+            for term in re.split(r"[、/与及和（）()]", target)
+            if len(term.strip().removesuffix("风险")) >= 2
+        ]
+        missing_terms = [
+            term
+            for term in terms
+            if not any(term in descriptor for descriptor in descriptors)
+        ]
+        if missing_terms:
+            gaps.append(
+                f"冻结规则集缺少“{'、'.join(missing_terms)}”的直接规则映射，"
+                "本模块不得声称已完成该项判断。"
+            )
+    return gaps
 
 
 def _validate_expert_output(
@@ -1335,6 +1673,115 @@ def _as_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {"result": value}
 
 
+def _round_robin_queries(groups: list[list[str]], *, limit: int) -> list[str]:
+    """Share a bounded retrieval budget across rules instead of starving later gaps."""
+
+    queries: list[str] = []
+    width = max((len(group) for group in groups), default=0)
+    for query_index in range(width):
+        for group in groups:
+            if query_index >= len(group):
+                continue
+            query = group[query_index].strip()
+            if query and query not in queries:
+                queries.append(query)
+            if len(queries) >= limit:
+                return queries
+    return queries
+
+
+def _analysis_text_from_chunks(chunks: Iterable[ChunkSearchResult]) -> str:
+    return "\n\n".join(
+        f"[第{chunk.page_idx}页][{chunk.metadata.get('section_path') or chunk.chunk_type}] "
+        f"{chunk.text}"
+        for chunk in sorted(chunks, key=lambda item: item.score, reverse=True)
+    )
+
+
+def _attach_rule_evidence_packs(
+    evaluations: list[RuleEvaluation],
+    *,
+    rule_by_id: dict[str, RiskRule],
+    chunks: Iterable[ChunkSearchResult],
+) -> dict[str, list[str]]:
+    """Give each rule its own multi-block context instead of one global first match."""
+
+    chunk_candidates = [
+        {
+            "block_id": chunk.chunk_id,
+            "document_id": chunk.document_id,
+            "page_number": chunk.page_idx,
+            "section_path": str(
+                chunk.metadata.get("section_path") or chunk.chunk_type
+            ),
+            "text": chunk.text,
+            "bbox": (
+                chunk.merged_bboxes[0].get("bbox", [])
+                if chunk.merged_bboxes
+                else []
+            ),
+            "retrieval_score": chunk.score,
+            "score": chunk.score,
+        }
+        for chunk in chunks
+    ]
+    evidence_by_rule: dict[str, list[str]] = {}
+    for evaluation in evaluations:
+        rule = rule_by_id.get(evaluation.rule_id)
+        ranked = (
+            rerank_rule_candidates(chunk_candidates, rule=rule, limit=4)
+            if rule is not None
+            else []
+        )
+        snippets = [
+            f"[第{item['page_number']}页][{item['section_path']}] "
+            f"{str(item['text'])[:900]}"
+            for item in ranked
+        ]
+        if not snippets:
+            snippets = evaluation.evidence_snippets[:2]
+        evaluation.evidence_snippets = snippets[:4]
+        evidence_by_rule[evaluation.rule_id] = evaluation.evidence_snippets
+    return evidence_by_rule
+
+
+def _screening_observations(
+    evaluations: list[RuleEvaluation],
+    *,
+    limit: int = 8,
+) -> list[dict[str, Any]]:
+    """Preserve useful unresolved audit context without promoting it to a finding."""
+
+    eligible = [
+        item
+        for item in evaluations
+        if item.evaluation_result
+        in {"insufficient_evidence", "not_evaluated", "not_triggered"}
+    ]
+    eligible.sort(
+        key=lambda item: (
+            {
+                "insufficient_evidence": 0,
+                "not_evaluated": 1,
+                "not_triggered": 2,
+            }.get(item.evaluation_result, 3),
+            -item.confidence,
+            item.rule_id,
+        )
+    )
+    return [
+        {
+            "rule_id": item.rule_id,
+            "title": item.title,
+            "evaluation_result": item.evaluation_result,
+            "confidence": item.confidence,
+            "reasoning_summary": item.reasoning_summary,
+            "evidence_snippets": item.evidence_snippets[:2],
+        }
+        for item in eligible[:limit]
+    ]
+
+
 def _build_strategy_handler(
     *,
     runtime: TeamRuntime,
@@ -1361,15 +1808,25 @@ def _build_strategy_handler(
         }
         if kind == "needs_more_evidence":
             module = modules.get(str(request.get("module_id") or ""), {})
+            gaps = [item for item in request.get("evidence_gaps", []) if isinstance(item, dict)]
+            suggested_queries = list(
+                dict.fromkeys(
+                    str(value).strip()
+                    for gap in gaps
+                    for value in [gap.get("question"), gap.get("section_hints")]
+                    if str(value or "").strip()
+                )
+            )[:12]
             return {
                 **base,
                 "guidance": (
-                    "保留已命中的规则判断并如实标注 needs_more_evidence；"
-                    "在 reasoning_summary 中写明缺失的证据类型与建议核查的招股书章节，"
-                    "不要为了凑结论而降低证据标准。"
+                    "保留已命中的规则判断，并根据缺失证据问题执行一轮短 Query 补证检索；补证后仍无直接原文时，"
+                    "保留 needs_more_evidence 并写明已尝试的 Query 与目标章节。"
                 ),
                 "module_goal": module.get("goal", ""),
                 "expected_outputs": module.get("expected_outputs", []),
+                "suggested_queries": suggested_queries,
+                "attempted_query_count": len(request.get("attempted_queries", [])),
             }
         if kind == "peer_status":
             return {**base, "team_states": runtime.states}
@@ -1425,14 +1882,36 @@ def _seed_agent_specs() -> list[AgentSpec]:
 
 
 def _dedupe_evaluations(evaluations: list[RuleEvaluation]) -> list[RuleEvaluation]:
-    seen: set[str] = set()
-    deduped = []
+    """Keep the strongest evaluation when modules overlap on one rule."""
+
+    outcome_rank = {
+        "triggered": 3,
+        "not_triggered": 3,
+        "insufficient_evidence": 2,
+        "candidate": 1,
+        "not_evaluated": 0,
+    }
+    selected: dict[str, RuleEvaluation] = {}
+    order: list[str] = []
     for item in evaluations:
-        if item.rule_id in seen:
+        current = selected.get(item.rule_id)
+        if current is None:
+            order.append(item.rule_id)
+            selected[item.rule_id] = item
             continue
-        seen.add(item.rule_id)
-        deduped.append(item)
-    return deduped
+        item_score = (
+            outcome_rank.get(item.evaluation_result, -1),
+            bool(item.evidence_snippets),
+            item.confidence,
+        )
+        current_score = (
+            outcome_rank.get(current.evaluation_result, -1),
+            bool(current.evidence_snippets),
+            current.confidence,
+        )
+        if item_score > current_score:
+            selected[item.rule_id] = item
+    return [selected[rule_id] for rule_id in order]
 
 
 def _event(

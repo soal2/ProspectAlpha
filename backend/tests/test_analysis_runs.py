@@ -6,9 +6,29 @@ import yaml
 
 from riskagent.agents import debate as debate_module
 from riskagent.agents.exceptions import DebateLLMError
-from riskagent.analysis_runs import AnalysisRunCreate
+from riskagent.analysis_runs import AnalysisRunCreate, _screening_analysis
 from riskagent.api.main import create_app
 from riskagent.risk_rules import RiskRuleRepository
+
+
+def test_screening_analysis_keeps_unresolved_audit_context():
+    rendered = _screening_analysis(
+        {
+            "rules_read": 30,
+            "screening_observations": [
+                {
+                    "title": "关联交易金额重大",
+                    "evaluation_result": "insufficient_evidence",
+                    "reasoning_summary": "第 576 页披露关联方交易，但仍缺少占总收入比例。",
+                }
+            ],
+        }
+    )
+
+    assert "已核查 30 条规则" in rendered
+    assert "第 576 页" in rendered
+    assert "待补充组合证据" in rendered
+    assert "不构成风险判断" in rendered
 
 
 def test_analysis_run_uses_rule_snapshot_and_evidence(tmp_path, analysis_repo_factory):

@@ -27,6 +27,7 @@ class PdfProcessorSettings:
     method: str
     backend: str
     lang: str
+    device: str
     reuse_existing: bool
     image_analysis: bool
 
@@ -77,6 +78,7 @@ def build_pdf_process_request(
         method=settings.method,  # type: ignore[arg-type]
         backend=settings.backend,  # type: ignore[arg-type]
         lang=settings.lang,
+        device=None if settings.device == "auto" else settings.device,
         reuse_existing=settings.reuse_existing,
         image_analysis=settings.image_analysis,
     )
@@ -108,11 +110,26 @@ def _load_pdf_processor_settings(raw: dict[str, Any]) -> PdfProcessorSettings:
     section = _mapping(raw, "pdf_processor")
     name = _string(section, "default", default="mineru")
     processor_config = _mapping(section, name)
+    configured_device = os.getenv("MINERU_DEVICE") or _string(
+        processor_config, "device", default="auto"
+    )
+    device = configured_device.strip().lower()
+    if device == "cuda":
+        cuda_index = os.getenv("MINERU_CUDA_DEVICE", "0").strip() or "0"
+        device = f"cuda:{cuda_index}"
+    if not (
+        device in {"auto", "cpu", "mps"}
+        or device.startswith("cuda:") and device.removeprefix("cuda:").isdigit()
+    ):
+        raise RagConfigError(
+            "MinerU device must be auto, cpu, mps, cuda, or cuda:<index>"
+        )
     return PdfProcessorSettings(
         name=name,
         method=_string(processor_config, "method", default="ocr"),
         backend=_string(processor_config, "backend", default="pipeline"),
         lang=_string(processor_config, "lang", default="chinese_cht"),
+        device=device,
         reuse_existing=_bool(processor_config, "reuse_existing", default=True),
         image_analysis=_bool(processor_config, "image_analysis", default=True),
     )

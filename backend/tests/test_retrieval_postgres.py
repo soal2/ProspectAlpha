@@ -277,3 +277,37 @@ def test_vector_full_text_hybrid_wrapper_functions_call_matching_indexer_methods
 
     assert [name for name, _ in indexer.calls] == ["vector", "full_text", "hybrid"]
     assert all(call["document_id"] == "doc_ysyy" for _, call in indexer.calls)
+
+
+def test_read_only_search_wrappers_never_initialize_schema(monkeypatch):
+    from riskagent.retrieval import full_text as full_text_module
+    from riskagent.retrieval import hybrid as hybrid_module
+    from riskagent.retrieval import vector as vector_module
+
+    ensure_values = []
+
+    class FakeIndexer:
+        def __init__(self, *, ensure=True):
+            ensure_values.append(ensure)
+
+        def vector_search(self, **_kwargs):
+            return []
+
+        def full_text_search(self, **_kwargs):
+            return []
+
+        def hybrid_search(self, **_kwargs):
+            return []
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(vector_module, "PostgresChunkIndexer", FakeIndexer)
+    monkeypatch.setattr(full_text_module, "PostgresChunkIndexer", FakeIndexer)
+    monkeypatch.setattr(hybrid_module, "PostgresChunkIndexer", FakeIndexer)
+
+    vector_search(query="q", document_id="doc_ysyy")
+    full_text_search(query="q", document_id="doc_ysyy")
+    prospectus_hybrid_search(query="q", document_id="doc_ysyy")
+
+    assert ensure_values == [False, False, False]

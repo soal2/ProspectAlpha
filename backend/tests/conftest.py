@@ -153,6 +153,7 @@ def analysis_repo_factory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             items.append(
                 {
                     "rule_id": candidate.rule_id,
+                    "evaluation_result": "triggered",
                     "severity": candidate.severity,
                     "confidence": 0.8,
                     "reasoning_summary": candidate.reasoning_summary,
@@ -164,6 +165,14 @@ def analysis_repo_factory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(
         "riskagent.agents.supervisor.analyze_findings_with_llm",
         confirm_test_candidates,
+    )
+
+    async def keep_seed_queries(**kwargs: Any) -> list[str]:
+        return list(kwargs["seed_queries"])
+
+    monkeypatch.setattr(
+        "riskagent.agents.supervisor.rewrite_retrieval_queries_with_llm",
+        keep_seed_queries,
     )
 
     def build(

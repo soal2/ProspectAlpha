@@ -4,6 +4,7 @@ import fitz
 from fastapi.testclient import TestClient
 
 from riskagent.api.main import create_app
+from riskagent.documents import DocumentAsset
 from riskagent.ingestion import ProspectusRegistration
 
 
@@ -53,3 +54,93 @@ def test_document_metadata_and_pdf_routes(tmp_path, monkeypatch):
     assert pdf.content.startswith(b"%PDF")
 
     assert client.get("/documents/missing/file").status_code == 404
+
+
+def test_failed_document_can_be_reparsed_without_reupload(monkeypatch):
+    asset = DocumentAsset(
+        document_id="doc_failed",
+        filename="failed.pdf",
+        content_type="application/pdf",
+        file_sha256="hash",
+        storage_uri="file:///tmp/failed.pdf",
+        file_size_bytes=100,
+        page_count=2,
+        text_chars=0,
+        block_count=0,
+        processing_status="failed",
+        processing_error_code="model_download_failed",
+        processing_error_message="模型下载失败",
+        processing_attempts=1,
+        source_url=None,
+        created_at="2026-07-16T00:00:00+00:00",
+    )
+
+    class Repo:
+        use_database = True
+        status = "failed"
+
+        def get(self, document_id):
+            assert document_id == asset.document_id
+            return asset.model_copy(update={"processing_status": self.status})
+
+    queued = []
+    dispatched = []
+    repo = Repo()
+    monkeypatch.setattr("riskagent.api.documents._repo", lambda: repo)
+
+    def queue(document_id):
+        queued.append(document_id)
+        repo.status = "queued"
+
+    monkeypatch.setattr(
+        "riskagent.api.documents.queue_registered_prospectus",
+        queue,
+    )
+    monkeypatch.setattr(
+        "riskagent.api.documents.dispatch_document_job",
+        lambda document_id: dispatched.append(document_id),
+    )
+
+    response = TestClient(create_app()).post("/documents/doc_failed/reparse")
+
+    assert response.status_code == 202
+    assert response.json()["processing_status"] == "queued"
+    assert queued == ["doc_failed"]
+    assert dispatched == ["doc_failed"]
+
+
+def test_processing_document_reparse_does_not_start_duplicate_job(monkeypatch):
+    asset = DocumentAsset(
+        document_id="doc_processing",
+        filename="processing.pdf",
+        content_type="application/pdf",
+        file_sha256="hash",
+        storage_uri="file:///tmp/processing.pdf",
+        file_size_bytes=100,
+        page_count=2,
+        text_chars=0,
+        block_count=0,
+        processing_status="processing",
+        processing_attempts=1,
+        created_at="2026-07-16T00:00:00+00:00",
+    )
+
+    class Repo:
+        use_database = True
+
+        def get(self, document_id):
+            assert document_id == asset.document_id
+            return asset
+
+    dispatched = []
+    monkeypatch.setattr("riskagent.api.documents._repo", lambda: Repo())
+    monkeypatch.setattr(
+        "riskagent.api.documents.dispatch_document_job",
+        lambda document_id: dispatched.append(document_id),
+    )
+
+    response = TestClient(create_app()).post("/documents/doc_processing/reparse")
+
+    assert response.status_code == 202
+    assert response.json()["processing_status"] == "processing"
+    assert dispatched == []

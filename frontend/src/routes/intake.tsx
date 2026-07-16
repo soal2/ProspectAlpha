@@ -19,6 +19,7 @@ import {
   getAnalysisOptions,
   getIntakeData,
   listDocuments,
+  reparseDocument,
   startAnalysisRun,
   updateAnalysisInputs,
   uploadDocument,
@@ -27,6 +28,7 @@ import {
   type AnalysisRunInputPatch,
   type AnalysisOptions,
   type AskCitation,
+  type UploadedDocument,
 } from "@/lib/data-service";
 import { toast } from "sonner";
 import { PdfViewer, type PdfHighlight } from "@/components/pdf-viewer";
@@ -77,14 +79,7 @@ function IntakePage() {
   const [analyzing, setAnalyzing] = useState(false);
   const [selectedRuleSetId, setSelectedRuleSetId] = useState("");
   const [analysisDepth, setAnalysisDepth] = useState<"quick" | "standard" | "deep">("standard");
-  const [uploadedDocument, setUploadedDocument] = useState<{
-    document_id: string;
-    filename: string;
-    page_count: number;
-    file_size_bytes: number;
-    created_at: string;
-    block_count?: number;
-  } | null>(null);
+  const [uploadedDocument, setUploadedDocument] = useState<UploadedDocument | null>(null);
   const [pdfUploading, setPdfUploading] = useState(false);
   const [pdfProcessing, setPdfProcessing] = useState(false);
   const [pdfDragging, setPdfDragging] = useState(false);
@@ -100,16 +95,8 @@ function IntakePage() {
   const pdfAbortRef = useRef<AbortController | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [matching, setMatching] = useState(false);
-  const [matchResults, setMatchResults] = useState<
-    {
-      document_id: string;
-      filename: string;
-      page_count: number;
-      file_size_bytes: number;
-      created_at: string;
-      block_count: number;
-    }[]
-  >([]);
+  const [matchResults, setMatchResults] = useState<UploadedDocument[]>([]);
+  const [documentLibraryError, setDocumentLibraryError] = useState<string | null>(null);
 
   const handleMatchTarget = async () => {
     const query = companyName.trim();
@@ -120,6 +107,7 @@ function IntakePage() {
     setMatching(true);
     try {
       const documents = await listDocuments();
+      setDocumentLibraryError(null);
       const tokens = query
         .toLowerCase()
         .split(/[\s·、,，/]+/)
@@ -140,36 +128,76 @@ function IntakePage() {
         toast.success(`匹配到 ${hits.length} 份相关文档`);
       }
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "匹配标的失败");
+      const message = err instanceof Error ? err.message : "匹配标的失败";
+      setDocumentLibraryError(message);
+      toast.error(message);
     } finally {
       setMatching(false);
     }
   };
 
   const selectMatchedDocument = (doc: (typeof matchResults)[number]) => {
-    setUploadedDocument({
-      document_id: doc.document_id,
-      filename: doc.filename,
-      page_count: doc.page_count,
-      file_size_bytes: doc.file_size_bytes,
-      created_at: doc.created_at,
-      block_count: doc.block_count,
-    });
+    setUploadedDocument(doc);
     setMatchResults([]);
     setPdfProcessing(false);
     toast.success(`已选用文档：${doc.filename}`);
   };
 
+  const retryDocumentParsing = async (doc: UploadedDocument) => {
+    setAnalysisError(null);
+    setPdfProcessing(true);
+    setUploadedDocument(doc);
+    try {
+      const queued = await reparseDocument(doc.document_id);
+      setUploadedDocument(queued);
+      setMatchResults((current) =>
+        current.map((item) => (item.document_id === queued.document_id ? queued : item)),
+      );
+      const ready = await waitForDocumentReady(queued.document_id, (current) => {
+        setUploadedDocument(current);
+        setMatchResults((items) =>
+          items.map((item) => (item.document_id === current.document_id ? current : item)),
+        );
+      });
+      setUploadedDocument(ready);
+      toast.success("MinerU 重新解析和索引已完成");
+    } catch (err) {
+      setAnalysisError(err instanceof Error ? err.message : "重新解析失败");
+    } finally {
+      setPdfProcessing(false);
+    }
+  };
+
   useEffect(() => {
     let cancelled = false;
-    Promise.all([getIntakeData(), getAnalysisOptions()]).then(([intake, loadedOptions]) => {
-      if (cancelled) return;
-      setData(intake);
-      setOptions(loadedOptions);
-      setSelectedRuleSetId(
-        loadedOptions.risk_rule_sets.find((item) => item.active)?.rule_set_id ?? "",
-      );
-    });
+    void getIntakeData()
+      .then((intake) => {
+        if (!cancelled) setData(intake);
+      })
+      .catch((err) => {
+        if (!cancelled) setAnalysisError(err instanceof Error ? err.message : "初始化页面失败");
+      });
+    void getAnalysisOptions()
+      .then((loadedOptions) => {
+        if (cancelled) return;
+        setOptions(loadedOptions);
+        setSelectedRuleSetId(
+          loadedOptions.risk_rule_sets.find((item) => item.active)?.rule_set_id ?? "",
+        );
+      })
+      .catch((err) => {
+        if (!cancelled) setAnalysisError(err instanceof Error ? err.message : "分析配置加载失败");
+      });
+    void listDocuments()
+      .then((documents) => {
+        if (cancelled) return;
+        setMatchResults(documents.slice(0, 5));
+        setDocumentLibraryError(null);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setDocumentLibraryError(err instanceof Error ? err.message : "文档库暂时无法访问");
+      });
     return () => {
       cancelled = true;
     };
@@ -232,24 +260,40 @@ function IntakePage() {
                 匹配标的
               </button>
             </div>
+            {documentLibraryError ? (
+              <div className="mt-3 rounded-md border border-destructive/30 bg-destructive/8 px-3 py-2 text-xs text-destructive">
+                文档库加载失败：{documentLibraryError}。已上传 PDF 不会因此被删除。
+              </div>
+            ) : null}
             {matchResults.length ? (
               <div className="mt-4 space-y-2">
                 <div className="text-xs text-muted-foreground">
-                  匹配到以下已入库招股书，点击选用（无需重新上传）：
+                  数据库中的招股书；解析中断的文件可直接重新解析：
                 </div>
-                {matchResults.map((doc) => (
-                  <button
-                    key={doc.document_id}
-                    onClick={() => selectMatchedDocument(doc)}
-                    className="flex w-full items-center gap-3 rounded-lg border border-border bg-background px-3 py-2 text-left text-sm transition hover:border-primary/40 hover:bg-accent"
-                  >
-                    <FileText className="size-4 shrink-0 text-primary" />
-                    <span className="min-w-0 flex-1 truncate">{doc.filename}</span>
-                    <span className="shrink-0 text-[11px] text-muted-foreground tabular">
-                      {doc.page_count} 页
-                    </span>
-                  </button>
-                ))}
+                {matchResults.map((doc) => {
+                  const retryable = ["failed", "interrupted"].includes(doc.processing_status);
+                  const busy = ["queued", "processing", "uploaded"].includes(doc.processing_status);
+                  return (
+                    <button
+                      key={doc.document_id}
+                      onClick={() =>
+                        retryable
+                          ? void retryDocumentParsing(doc)
+                          : !busy
+                            ? selectMatchedDocument(doc)
+                            : undefined
+                      }
+                      disabled={busy || pdfProcessing}
+                      className="flex w-full items-center gap-3 rounded-lg border border-border bg-background px-3 py-2 text-left text-sm transition hover:border-primary/40 hover:bg-accent disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      <FileText className="size-4 shrink-0 text-primary" />
+                      <span className="min-w-0 flex-1 truncate">{doc.filename}</span>
+                      <span className="shrink-0 text-[11px] text-muted-foreground tabular">
+                        {retryable ? "重新解析" : busy ? "解析中" : `${doc.page_count} 页`}
+                      </span>
+                    </button>
+                  );
+                })}
               </div>
             ) : null}
           </div>
@@ -330,9 +374,31 @@ function IntakePage() {
                     ) : null}
                   </div>
                   <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary">
-                    {pdfProcessing ? "后台解析中" : "已接入"}
+                    {uploadedDocument &&
+                    ["failed", "interrupted"].includes(uploadedDocument.processing_status)
+                      ? "解析中断"
+                      : pdfProcessing
+                        ? "后台解析中"
+                        : "已接入"}
                   </span>
                 </div>
+                {uploadedDocument &&
+                ["failed", "interrupted"].includes(uploadedDocument.processing_status) ? (
+                  <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-border pt-3">
+                    <span className="text-xs text-destructive">
+                      {uploadedDocument.processing_error_message ??
+                        "解析任务已中断，原始 PDF 已保留。"}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => void retryDocumentParsing(uploadedDocument)}
+                      disabled={pdfProcessing}
+                      className="rounded-full border border-border px-3 py-1.5 text-xs font-medium hover:bg-accent disabled:opacity-60"
+                    >
+                      重新解析
+                    </button>
+                  </div>
+                ) : null}
               </div>
             )}
           </div>

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 import pytest
@@ -61,6 +62,7 @@ def test_analyze_findings_with_llm_enriches_candidate_fields(monkeypatch):
             "items": [
                 {
                     "rule_id": "R1",
+                    "evaluation_result": "triggered",
                     "severity": "high",
                     "confidence": 0.9,
                     "reasoning_summary": "第 12 页第 3 节显示现金流压力，证据片段已覆盖。",
@@ -86,6 +88,60 @@ def test_analyze_findings_with_llm_enriches_candidate_fields(monkeypatch):
     assert candidate.severity == "high"
     assert candidate.confidence == 0.9
     assert candidate.evaluation_result == "triggered"
+    payload = json.loads(llm.calls[0][1]["content"])
+    assert payload["evidence_by_rule"] == {}
+
+
+def test_analyze_findings_with_llm_sends_rule_scoped_evidence(monkeypatch):
+    llm = _ScriptedLLM({"items": []})
+    monkeypatch.setattr(expert_llm_module, "get_default_llm_client", lambda: llm)
+
+    asyncio.run(
+        expert_llm_module.analyze_findings_with_llm(
+            agent_name="agent_name",
+            agent_title="agent_title",
+            candidates=[_candidate("R1")],
+            evidence_snippets=["global"],
+            evidence_by_rule={"R1": ["第 424 页关联交易", "第 576 页关联方表格"]},
+        )
+    )
+
+    payload = json.loads(llm.calls[0][1]["content"])
+    assert payload["evidence_by_rule"]["R1"] == [
+        "第 424 页关联交易",
+        "第 576 页关联方表格",
+    ]
+
+
+def test_analyze_findings_with_llm_preserves_confirmed_non_trigger(monkeypatch):
+    llm = _ScriptedLLM(
+        {
+            "items": [
+                {
+                    "rule_id": "R1",
+                    "evaluation_result": "not_triggered",
+                    "severity": "low",
+                    "confidence": 0.92,
+                    "reasoning_summary": "第 12 页明确披露不存在该安排，触发条件不成立。",
+                    "needs_more_evidence": False,
+                }
+            ]
+        }
+    )
+    monkeypatch.setattr(expert_llm_module, "get_default_llm_client", lambda: llm)
+    candidate = _candidate("R1")
+
+    asyncio.run(
+        expert_llm_module.analyze_findings_with_llm(
+            agent_name="agent_name",
+            agent_title="agent_title",
+            candidates=[candidate],
+            evidence_snippets=["snippet"],
+        )
+    )
+
+    assert candidate.evaluation_result == "not_triggered"
+    assert candidate.confidence == 0.92
 
 
 def test_analyze_findings_with_llm_propagates_llm_errors(monkeypatch):

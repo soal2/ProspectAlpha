@@ -10,7 +10,7 @@ from urllib.parse import quote
 
 import fitz
 
-from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Response, UploadFile, status
+from fastapi import APIRouter, File, Form, HTTPException, Response, UploadFile, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -21,10 +21,13 @@ from riskagent.documents import (
     DocumentCreate,
     DocumentRepository,
     get_default_document_repository,
-    process_registered_prospectus,
+    queue_registered_prospectus,
+    recover_interrupted_prospectus_jobs,
     register_uploaded_prospectus,
 )
 from riskagent.ingestion import ProspectusRegistration
+from riskagent.parsing import mineru_runtime_health
+from riskagent.workers.documents import dispatch_document_job
 
 
 router = APIRouter(prefix="/documents", tags=["documents"])
@@ -54,7 +57,6 @@ def create_document(payload: DocumentCreate) -> DocumentAsset:
 
 @router.post("/upload", response_model=DocumentAsset, status_code=status.HTTP_201_CREATED)
 async def upload_document(
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     source_url: str | None = Form(default=None),
 ) -> DocumentAsset:
@@ -70,11 +72,17 @@ async def upload_document(
                 source_url=source_url,
             )
             asset = await asyncio.to_thread(repo.get, registration.document_id)
-            if asset.block_count <= 0 and asset.processing_status != "processing":
-                background_tasks.add_task(
-                    process_registered_prospectus,
-                    registration.document_id,
-                )
+            if asset.block_count <= 0:
+                if asset.processing_status in {"failed", "interrupted"}:
+                    await asyncio.to_thread(
+                        queue_registered_prospectus, registration.document_id
+                    )
+                    asset = await asyncio.to_thread(repo.get, registration.document_id)
+                if asset.processing_status in {"uploaded", "queued"}:
+                    await asyncio.to_thread(
+                        dispatch_document_job, registration.document_id
+                    )
+                    asset = await asyncio.to_thread(repo.get, registration.document_id)
             return asset
         asset = await asyncio.to_thread(
             repo.create_from_bytes,
@@ -86,11 +94,55 @@ async def upload_document(
         return await asyncio.to_thread(repo.prepare_for_retrieval, asset.document_id)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except (OSError, RuntimeError) as exc:
+        logger.exception("Document parsing dispatch failed")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="PDF 已保存，但 MinerU 解析任务启动失败；请检查解析服务后点击重新解析。",
+        ) from exc
 
 
 @router.get("", response_model=list[DocumentAsset])
 def list_documents() -> list[DocumentAsset]:
-    return _repo().list_assets()
+    repo = _repo()
+    if getattr(repo, "use_database", False):
+        recover_interrupted_prospectus_jobs()
+    return repo.list_assets()
+
+
+@router.get("/parser-health")
+def parser_health() -> dict[str, object]:
+    return mineru_runtime_health()
+
+
+@router.post("/{document_id}/reparse", response_model=DocumentAsset, status_code=status.HTTP_202_ACCEPTED)
+async def reparse_document(
+    document_id: str,
+) -> DocumentAsset:
+    repo = _repo()
+    try:
+        asset = await asyncio.to_thread(repo.get, document_id)
+        if asset.block_count > 0 or asset.processing_status == "ready":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Document is already parsed and indexed.",
+            )
+        if asset.processing_status == "processing":
+            return asset
+        if asset.processing_status not in {"queued", "processing"}:
+            await asyncio.to_thread(queue_registered_prospectus, document_id)
+        await asyncio.to_thread(dispatch_document_job, document_id)
+        return await asyncio.to_thread(repo.get, document_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except (OSError, RuntimeError) as exc:
+        logger.exception("Document reparse dispatch failed for %s", document_id)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="原始 PDF 仍已保存，但 MinerU 解析任务启动失败。",
+        ) from exc
 
 
 @router.get("/{document_id}/file")

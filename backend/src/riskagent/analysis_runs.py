@@ -637,9 +637,140 @@ class AnalysisRunRepository:
 
     def evidence(self, run_id: str) -> list[RunEvidence]:
         run = self.get(run_id)
-        if run.evidence:
-            return run.evidence
-        return self._recover_rejected_evidence(run)
+        primary = (
+            list(run.evidence)
+            if run.evidence
+            else self._recover_rejected_evidence(run)
+        )
+        candidates = self._recover_retrieval_candidates(run)
+        seen_blocks = {
+            (item.document_id, item.document_block_id) for item in primary
+        }
+        return [
+            *primary,
+            *[
+                item
+                for item in candidates
+                if (item.document_id, item.document_block_id) not in seen_blocks
+            ],
+        ]
+
+    def _recover_retrieval_candidates(self, run: AnalysisRun) -> list[RunEvidence]:
+        """Expose persisted retrieval hits as unverified audit candidates."""
+
+        raw_candidates: list[dict[str, Any]] = []
+        legacy_chunk_ids: set[str] = set()
+        for event in run.events:
+            if event.get("event_type") != "retrieval_query_completed":
+                continue
+            payload = event.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            chunks = payload.get("chunks")
+            if isinstance(chunks, list):
+                raw_candidates.extend(
+                    item for item in chunks if isinstance(item, dict)
+                )
+            chunk_ids = payload.get("chunk_ids")
+            if isinstance(chunk_ids, list):
+                legacy_chunk_ids.update(
+                    str(chunk_id) for chunk_id in chunk_ids if chunk_id
+                )
+
+        embedded_ids = {
+            str(item.get("chunk_id") or "") for item in raw_candidates
+        }
+        legacy_chunk_ids -= embedded_ids
+        if self.use_database and legacy_chunk_ids:
+            document_ids = {
+                chunk_id.rsplit("_chunk_", 1)[0]
+                for chunk_id in legacy_chunk_ids
+                if "_chunk_" in chunk_id
+            }
+            indexer = PostgresChunkIndexer(ensure=False)
+            try:
+                for document_id in document_ids:
+                    for chunk in indexer.list_document_chunks(document_id):
+                        if chunk.chunk_id not in legacy_chunk_ids:
+                            continue
+                        metadata = (
+                            chunk.metadata
+                            if isinstance(chunk.metadata, dict)
+                            else {}
+                        )
+                        raw_candidates.append(
+                            {
+                                "chunk_id": chunk.chunk_id,
+                                "document_id": document_id,
+                                "page_number": chunk.page_idx,
+                                "section_path": metadata.get("section_path")
+                                or chunk.chunk_type,
+                                "text": chunk.text,
+                                "bbox": (
+                                    chunk.merged_bboxes[0].get("bbox", [])
+                                    if chunk.merged_bboxes
+                                    else []
+                                ),
+                                "bbox_coordinate_space": metadata.get(
+                                    "bbox_coordinate_space", "pdf_points"
+                                ),
+                                # Legacy events persisted ids but not scores.
+                                "retrieval_score": 0.0,
+                            }
+                        )
+            finally:
+                indexer.close()
+
+        recovered: list[RunEvidence] = []
+        seen: set[tuple[str, str]] = set()
+        for raw_chunk in raw_candidates:
+            block_id = str(raw_chunk.get("chunk_id") or "")
+            document_id = str(raw_chunk.get("document_id") or "")
+            text_value = str(raw_chunk.get("text") or "").strip()
+            if not block_id or not document_id or not text_value:
+                continue
+            dedupe_key = (document_id, block_id)
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            try:
+                page_number = int(raw_chunk.get("page_number") or 0)
+                bbox = [float(value) for value in raw_chunk.get("bbox") or []]
+                retrieval_score = float(raw_chunk.get("retrieval_score") or 0)
+            except (TypeError, ValueError):
+                continue
+            if page_number < 1 or len(bbox) not in {0, 4}:
+                continue
+            coordinate_space = str(
+                raw_chunk.get("bbox_coordinate_space") or "pdf_points"
+            )
+            if coordinate_space not in {"pdf_points", "normalized_1000"}:
+                coordinate_space = "pdf_points"
+            candidate_key = hashlib.sha256(
+                f"{run.run_id}:{document_id}:{block_id}".encode("utf-8")
+            ).hexdigest()[:12]
+            recovered.append(
+                RunEvidence(
+                    evidence_id=f"candidate_{candidate_key}",
+                    finding_id="retrieval_candidate",
+                    document_block_id=block_id,
+                    document_id=document_id,
+                    page_number=page_number,
+                    section_path=str(
+                        raw_chunk.get("section_path") or "招股书原文"
+                    ),
+                    text=text_value,
+                    bbox=bbox,
+                    bbox_coordinate_space=coordinate_space,
+                    source_hash=hashlib.sha256(
+                        text_value.encode("utf-8")
+                    ).hexdigest(),
+                    retrieval_score=retrieval_score,
+                    relevance_score=0.0,
+                    verifier_status="retrieval_candidate",
+                )
+            )
+        return recovered
 
     def _recover_rejected_evidence(self, run: AnalysisRun) -> list[RunEvidence]:
         """Recover legacy debate-rejected evidence from audit events and PG chunks."""
@@ -656,7 +787,7 @@ class AnalysisRunRepository:
         } - {""}
         if not document_ids:
             return []
-        indexer = PostgresChunkIndexer()
+        indexer = PostgresChunkIndexer(ensure=False)
         try:
             chunks_by_document = {
                 document_id: indexer.list_document_chunks(document_id)
@@ -1288,17 +1419,41 @@ class AnalysisRunRepository:
                     for eid in module.get("evidence_ids", [])
                     if str(eid) in admitted_evidence_ids
                 ]
+                screening_observations = [
+                    observation
+                    for observation in module.get("screening_observations", [])
+                    if isinstance(observation, dict)
+                ][:8]
+                screening_counts = {
+                    status: sum(
+                        str(item.get("evaluation_result") or "") == status
+                        for item in screening_observations
+                    )
+                    for status in (
+                        "insufficient_evidence",
+                        "not_evaluated",
+                        "not_triggered",
+                    )
+                }
                 sanitized_module_results.append(
                     {
                         **module,
                         "summary": (
                             f"本模块有 {len(module_finding_ids)} 条风险判断通过证据门禁，"
-                            "仅可依据随附 finding 与 evidence 撰写。"
+                            f"另保留 {len(screening_observations)} 条检索审计观察；"
+                            "正式结论仅可依据随附 finding 与 evidence 撰写。"
                             if module_finding_ids
-                            else "本模块未形成通过证据门禁的风险结论；不得据此宣称不存在风险。"
+                            else (
+                                "本模块未形成通过证据门禁的风险结论；"
+                                f"保留 {screening_counts['insufficient_evidence']} 条待补证、"
+                                f"{screening_counts['not_evaluated']} 条未召回规则证据、"
+                                f"{screening_counts['not_triggered']} 条预筛未触发记录，"
+                                "不得据此宣称不存在风险。"
+                            )
                         ),
                         "finding_ids": module_finding_ids,
                         "evidence_ids": module_evidence_ids,
+                        "screening_observations": screening_observations,
                     }
                 )
             integrated: IntegratedRiskReport | None = None
@@ -2810,7 +2965,7 @@ def _empty_verified_report(
             {
                 "module_id": str(module["module_id"]),
                 "title": str(module.get("module") or module["module_id"]),
-                "analysis": "未形成通过证据门禁的风险结论，需补充定向检索或人工复核。",
+                "analysis": _screening_analysis(module),
                 "finding_ids": [],
                 "evidence_ids": [],
             }
@@ -2819,6 +2974,39 @@ def _empty_verified_report(
         recommendations=["针对未充分覆盖的规则执行定向补证和人工复核。"],
         limitations=["无已验证风险结论，不能据此推断企业不存在相关风险。"],
     )
+
+
+def _screening_analysis(module: dict[str, Any]) -> str:
+    """Render concrete audit coverage without promoting observations to findings."""
+
+    observations = [
+        item
+        for item in module.get("screening_observations", [])
+        if isinstance(item, dict)
+    ][:5]
+    rules_read = int(module.get("rules_read") or 0)
+    if not observations:
+        return (
+            f"已核查 {rules_read} 条规则，未形成通过证据门禁的风险结论。"
+            "当前没有足够的规则级原文组合证据，需执行定向检索或人工复核。"
+        )
+    lines = [
+        f"已核查 {rules_read} 条规则，未形成通过证据门禁的正式风险结论。",
+        "以下为检索和二判阶段保留的审计观察，仅表示待核实事项，不构成风险判断：",
+    ]
+    for item in observations:
+        status = (
+            "待补充组合证据"
+            if item.get("evaluation_result") == "insufficient_evidence"
+            else "未召回规则级证据"
+            if item.get("evaluation_result") == "not_evaluated"
+            else "预筛二判未触发"
+        )
+        lines.append(
+            f"- [{status}] {item.get('title') or item.get('rule_id')}："
+            f"{item.get('reasoning_summary') or '未提供二判说明。'}"
+        )
+    return "\n".join(lines)
 
 
 def _render_report_header(run: AnalysisRun) -> str:
@@ -3086,6 +3274,31 @@ def _build_integrated_report(run: AnalysisRun, integrated: IntegratedRiskReport)
                 lines.append(f"- 关联判断：{', '.join(item.finding_ids)}")
             if item.evidence_ids:
                 lines.append(f"- 关联证据：{', '.join(item.evidence_ids)}")
+    modules_with_observations = [
+        module
+        for module in run.module_results
+        if module.get("screening_observations")
+    ]
+    if modules_with_observations and any(
+        section.finding_ids for section in integrated.sections
+    ):
+        lines.extend(
+            [
+                "",
+                "## 检索覆盖与待核实线索",
+                "",
+                "以下内容来自规则预筛和专家二判审计，未通过正式证据门禁，"
+                "仅用于说明检索覆盖、证据缺口和后续核查方向。",
+            ]
+        )
+        for module in modules_with_observations:
+            lines.extend(
+                [
+                    "",
+                    f"### {module.get('module') or module.get('module_id')}",
+                    _screening_analysis(module),
+                ]
+            )
     lines.extend(["", "## 建议"])
     lines.extend(f"- {item}" for item in integrated.recommendations)
     if integrated.limitations:
