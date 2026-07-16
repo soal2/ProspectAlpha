@@ -4,7 +4,9 @@
 Thumbs.db
 Desktop.ini
 *.xlsx
-data/*
+# Data directories
+backend/data/
+@backend/data/
 
 # Local environment
 .env
