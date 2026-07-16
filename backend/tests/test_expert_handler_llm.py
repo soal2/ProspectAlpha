@@ -6,6 +6,7 @@ from riskagent.a2a import MessageType
 from riskagent.agent_experts import AgentSpec
 from riskagent.agents.orchestrator import StrategyAssignment
 from riskagent.agents.supervisor import AgentTeamSupervisor
+from riskagent.retrieval import ChunkSearchResult
 from riskagent.risk_rules import RiskRuleRepository
 
 
@@ -87,3 +88,82 @@ def test_expert_handler_fails_closed_when_llm_fails(tmp_path, monkeypatch):
         "LLM 二判失败" in limitation
         for limitation in result["module_result"]["limitations"]
     )
+
+
+def test_expert_owns_query_rewrite_and_emits_candidate_chunks(tmp_path, monkeypatch):
+    queries_seen: list[str] = []
+
+    async def rewrite_queries(**_kwargs: Any) -> list[str]:
+        return ["概無重大訴訟 法律程序"]
+
+    async def no_findings(**_kwargs: Any) -> list[dict[str, Any]]:
+        return []
+
+    def retrieve(*, query: str, document_id: str, **_kwargs: Any):
+        queries_seen.append(query)
+        return [
+            ChunkSearchResult(
+                chunk_id="chunk_333",
+                document_id=document_id,
+                doc_key="ysyy",
+                chunk_type="text",
+                text="於往績記錄期間，本公司並無面臨任何重大法律訴訟。",
+                page_idx=333,
+                source_file="ysyy.pdf",
+                source_item_indices=[1],
+                bbox_refs=[],
+                merged_bboxes=[{"page_idx": 333, "bbox": [10, 20, 30, 40]}],
+                image_path=None,
+                mineru_img_path=None,
+                table_html=None,
+                metadata={"section_path": "合規和法律程序"},
+                score=0.82,
+            )
+        ]
+
+    monkeypatch.setattr(
+        supervisor_module,
+        "rewrite_retrieval_queries_with_llm",
+        rewrite_queries,
+    )
+    monkeypatch.setattr(supervisor_module, "analyze_findings_with_llm", no_findings)
+    repository = RiskRuleRepository(Path(__file__).parents[1] / "configs" / "risk_rules.yaml")
+    spec = AgentSpec(
+        name="legal_agent",
+        title="Legal specialist",
+        categories=("诉讼与纠纷",),
+    )
+    assignment = StrategyAssignment(
+        module_id="legal",
+        agent_name=spec.name,
+        module="法务风险",
+        goal="核查重大诉讼",
+        expected_outputs=["RiskFinding: 重大诉讼风险"],
+    )
+    supervisor = AgentTeamSupervisor(
+        repository=repository,
+        agent_specs=[spec],
+        chunk_retriever=retrieve,
+        runtime_root=tmp_path / "agent-runtime",
+    )
+    handler = supervisor._expert_handler(
+        run_id="run_query_rewrite",
+        spec=spec,
+        assignment=assignment,
+        text="",
+        document_id="doc_ysyy",
+        user_requirement="检查是否存在重大诉讼",
+        rules=repository.select_rules(),
+        rule_snapshot=repository.load().model_dump(),
+    )
+
+    handler({"assignment": assignment.model_dump()}, _PeerContext())
+
+    assert queries_seen[0] == "概無重大訴訟 法律程序"
+    completed = [
+        event
+        for event in supervisor._take_runtime_events("run_query_rewrite")
+        if event["event_type"] == "retrieval_query_completed"
+    ]
+    assert completed[0]["payload"]["chunks"][0]["page_number"] == 333
+    assert completed[0]["payload"]["chunks"][0]["bbox"] == [10, 20, 30, 40]

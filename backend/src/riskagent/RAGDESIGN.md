@@ -1377,11 +1377,14 @@ experts search concurrently.
 ### Rule-aware Query Rewriting and Evidence Scores
 
 Broad user instructions such as "review this prospectus for IPO risks" are not
-sent directly to PostgreSQL. The strategist first assigns domain modules. Each
-expert then creates structured, atomic retrieval intents from the original user
-requirement, its assignment goal and expected outputs, its Domain Skill, and the
-frozen rules. Query variants are short and complementary instead of concatenating
-an entire category and several trigger conditions into one embedding. Every
+sent directly to PostgreSQL. The strategist first assigns domain modules. Before
+retrieval, each expert asks its LLM to rewrite the original user requirement,
+assignment goal, expected outputs, priority rules, and deterministic seed terms
+into its own atomic Queries. The code planner merges those expert-authored
+Queries with validated Traditional-Chinese exact terms, negative-disclosure
+phrases, English aliases, and a deterministic fallback. Query variants are short
+and complementary instead of concatenating an entire category and several
+trigger conditions into one embedding. Every
 candidate finding is searched again with complementary exact-disclosure,
 simplified/traditional Chinese, English terminology, report-period fact, and
 counter-evidence queries. Short exact queries give PostgreSQL full-text ranking
@@ -1409,8 +1412,12 @@ are evaluated again before the finding is finalized. Cross-module review consume
 the originating finding summaries and executes rule-specific counter-evidence
 queries; it no longer reports unrelated candidates from the reviewer's own
 module. Every planned query, retrieval round, and retrieved chunk id is emitted
-as a runtime event for audit. An explicit empty rule list remains empty, which
-keeps evidence-only and quality roles from silently evaluating the full rule set.
+as a runtime event for audit. Retrieval-completed events also carry the top
+candidate chunks with document/page/bbox/text and raw retrieval score. The live
+UI labels these as candidate source blocks; admitted evidence remains separate
+and uses the rule-aware relevance score. An explicit empty rule list remains
+empty, which keeps evidence-only and quality roles from silently evaluating the
+full rule set.
 
 Evidence stores two distinct values. `retrieval_score` is the raw PostgreSQL
 hybrid ranking signal and is not a probability. `relevance_score` is a separate

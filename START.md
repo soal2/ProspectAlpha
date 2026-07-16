@@ -313,6 +313,8 @@ curl http://127.0.0.1:8000/health
   合并链路异常；当前实现会按 `triggered/not_triggered/insufficient_evidence` 的结论质量合并；
 - 已完成的空报告不会自动重算。重启后端后应创建一次新分析；旧 run 仍保留，作为当时
   失败链路的审计记录。
+- 实时证据侧栏会同时显示“候选原文（检索分）”和“正式证据（相关性）”。候选原文表示
+  Agent 已召回该页但尚未通过规则门禁；它不能被报告当成已验证风险证据。
 
 ### PostgreSQL collation version warning
 

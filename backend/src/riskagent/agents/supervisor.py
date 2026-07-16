@@ -35,11 +35,13 @@ from riskagent.agents.orchestrator import (
 )
 from riskagent.agents.expert_llm import analyze_findings_with_llm
 from riskagent.agents.prompts import render_expert_prompt
+from riskagent.agents.query_llm import rewrite_retrieval_queries_with_llm
 from riskagent.retrieval import ChunkSearchResult, prospectus_hybrid_search
 from riskagent.retrieval.query_planner import (
     build_evidence_gap_queries,
     build_module_search_intents,
     build_rule_search_queries,
+    prioritize_rules_for_context,
 )
 from riskagent.runtime_events import LiveLLMCall
 from riskagent.risk_rules import RiskRule, RiskRuleRepository
@@ -891,6 +893,17 @@ class AgentTeamSupervisor:
             selected_rules = (
                 rules_for_skill(skill, rules, set()) if skill else _rules_for_spec(spec, rules)
             )
+            selected_rules = prioritize_rules_for_context(
+                selected_rules,
+                context=" ".join(
+                    [
+                        user_requirement,
+                        assignment.module,
+                        assignment.goal,
+                        *assignment.expected_outputs,
+                    ]
+                ),
+            )
             rule_by_id = {rule.rule_id: rule for rule in rules}
             query_history: list[str] = []
             chunks_by_id: dict[str, ChunkSearchResult] = {}
@@ -940,6 +953,29 @@ class AgentTeamSupervisor:
                             "round": round_name,
                             "new_chunk_count": fresh,
                             "chunk_ids": list(chunks_by_id)[:50],
+                            "chunks": [
+                                {
+                                    "chunk_id": chunk.chunk_id,
+                                    "document_id": chunk.document_id,
+                                    "page_number": chunk.page_idx,
+                                    "section_path": str(
+                                        chunk.metadata.get("section_path")
+                                        or chunk.chunk_type
+                                    ),
+                                    "text": chunk.text[:300],
+                                    "bbox": (
+                                        chunk.merged_bboxes[0].get("bbox", [])
+                                        if chunk.merged_bboxes
+                                        else []
+                                    ),
+                                    "retrieval_score": chunk.score,
+                                }
+                                for chunk in sorted(
+                                    chunks_by_id.values(),
+                                    key=lambda item: item.score,
+                                    reverse=True,
+                                )[:10]
+                            ],
                         },
                     )
                 )
@@ -987,6 +1023,7 @@ class AgentTeamSupervisor:
                     rules=selected_rules,
                     user_requirement=user_requirement,
                     expected_outputs=assignment.expected_outputs,
+                    limit=6,
                 )
                 queries = []
                 query_width = max((len(intent.queries) for intent in intents), default=0)
@@ -996,7 +1033,43 @@ class AgentTeamSupervisor:
                         for intent in intents
                         if query_index < len(intent.queries)
                     )
-                retrieve(queries[:14], round_name="首轮")
+                seed_queries = list(dict.fromkeys(queries))[:14]
+                llm_queries: list[str] = []
+                try:
+                    llm_queries = asyncio.run(
+                        rewrite_retrieval_queries_with_llm(
+                            user_requirement=user_requirement,
+                            assignment=assignment.model_dump(),
+                            rules=selected_rules,
+                            seed_queries=seed_queries,
+                            limit=10,
+                        )
+                    )
+                    publish_llm_event(
+                        _event(
+                            "retrieval_query_rewritten",
+                            spec.name,
+                            f"{spec.title} 自主改写检索问题",
+                            f"根据用户要求和模块目标生成 {len(llm_queries)} 条 Query。",
+                            payload={
+                                "agent_name": spec.name,
+                                "module_id": assignment.module_id,
+                                "queries": llm_queries,
+                            },
+                        )
+                    )
+                except Exception as exc:
+                    publish_llm_event(
+                        _event(
+                            "retrieval_query_rewrite_failed",
+                            spec.name,
+                            f"{spec.title} Query 改写失败",
+                            f"{type(exc).__name__}: {exc}",
+                            stage_status="failed",
+                        )
+                    )
+                final_queries = list(dict.fromkeys([*llm_queries, *seed_queries]))[:14]
+                retrieve(final_queries, round_name="首轮")
                 chunks = sorted(
                     chunks_by_id.values(), key=lambda item: item.score, reverse=True
                 )
@@ -1110,11 +1183,11 @@ class AgentTeamSupervisor:
                             strategy_guidance = {
                                 "error": f"{type(exc).__name__}: {exc}"
                             }
-                        gap_queries: list[str] = []
+                        gap_query_groups: list[list[str]] = []
                         for item in needs_more_items:
                             rule = rule_by_id.get(str(item.get("rule_id") or ""))
                             if rule is not None:
-                                gap_queries.extend(
+                                gap_query_groups.append(
                                     build_evidence_gap_queries(
                                         rule,
                                         missing_reason=str(item.get("reasoning_summary") or ""),
@@ -1122,6 +1195,17 @@ class AgentTeamSupervisor:
                                         module_goal=assignment.goal,
                                     )
                                 )
+                        gap_queries: list[str] = []
+                        gap_width = max(
+                            (len(group) for group in gap_query_groups),
+                            default=0,
+                        )
+                        for query_index in range(gap_width):
+                            gap_queries.extend(
+                                group[query_index]
+                                for group in gap_query_groups
+                                if query_index < len(group)
+                            )
                         if strategy_guidance:
                             gap_queries.extend(
                                 str(query)

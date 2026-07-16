@@ -54,14 +54,65 @@ _USER_CONCEPT_QUERIES: dict[str, tuple[str, ...]] = {
     "股份代号": ("股份代號", "股份代号", "stock code"),
     "发行价": ("發售價", "发售价", "offer price"),
     "发售价": ("發售價", "发售价", "offer price"),
-    "发行定价": ("發售價", "发行定价", "offer price"),
+    "发行定价": ("發售價 每股發售股份", "发行定价 估值", "offer price"),
     "估值": ("估值", "市盈率", "市销率", "valuation"),
-    "破发": ("發售價", "发行定价", "市场风险"),
+    "破发": ("發售價 每股發售股份", "上市后股价风险", "市场风险"),
     "现金流": ("經營活動所得現金淨額", "经营活动现金流净额", "cash flow"),
     "客户集中": ("五大客戶", "主要客戶", "customer concentration"),
     "供应商集中": ("五大供應商", "主要供應商", "supplier concentration"),
-    "关联交易": ("關連交易", "關聯方交易", "related party transactions"),
-    "诉讼": ("訴訟", "法律程序", "litigation"),
+    "研发管线": (
+        "候選藥物 臨床試驗 未能獲批 商品化",
+        "候选药物 商业化 监管批准",
+        "核心產品 研發管線 依賴",
+    ),
+    "管线依赖": (
+        "候選藥物 臨床試驗 未能獲批 商品化",
+        "目前均未取得監管批准",
+        "業務非常依賴 候選藥物",
+    ),
+    "持续经营": ("持續經營 重大不確定性", "连续亏损 现金储备", "going concern"),
+    "业务模式": ("業務模式 收益來源 商業化", "产品销售收入", "business model"),
+    "关联交易": (
+        "關連交易 金額 定價 政策",
+        "關聯方交易 應收 應付",
+        "related party transactions",
+    ),
+    "对赌": ("特殊股東權利 對賭 贖回", "可贖回優先股 特殊權利", "redemption rights"),
+    "赎回": ("可贖回優先股 贖回權", "特殊股東權利", "redemption"),
+    "诉讼": (
+        "概無重大訴訟 法律程序 處罰",
+        "並無面臨任何法律訴訟",
+        "未決或威脅 法律程序",
+    ),
+    "政策监管": ("監管合規 行政處罰 牌照", "政策法規 重大不利變化", "regulatory"),
+    "税务": ("稅務爭議 稽查 處罰", "實際稅率 法定稅率", "tax dispute"),
+    "行业竞争": (
+        "競爭對手 市場競爭 候選藥物",
+        "業務 競爭 主要製藥公司",
+        "competitors market competition",
+    ),
+    "市场空间": ("市場規模 患者人數 增長率", "目標患者人群 市場接納", "market size CAGR"),
+}
+
+_CONCEPT_RULE_HINTS: dict[str, tuple[str, ...]] = {
+    "现金流": ("现金流", "現金流"),
+    "客户集中": ("客户", "客戶", "客户/供应商依赖"),
+    "供应商集中": ("供应商", "供應商", "客户/供应商依赖"),
+    "研发管线": ("管线", "核心产品", "临床", "核心技术", "持续经营"),
+    "管线依赖": ("管线", "核心产品", "临床", "核心技术", "持续经营"),
+    "持续经营": ("持续经营", "亏损", "现金流"),
+    "业务模式": ("业务模式", "持续经营", "核心产品"),
+    "关联交易": ("关联交易", "關連交易", "关联方"),
+    "对赌": ("对赌", "赎回", "特殊股东权利"),
+    "赎回": ("赎回", "对赌", "特殊股东权利"),
+    "诉讼": ("诉讼", "纠纷", "处罚"),
+    "政策监管": ("政策监管", "行业牌照", "行政处罚", "合规"),
+    "税务": ("税务", "税率", "转让定价"),
+    "行业竞争": ("行业竞争", "技术替代"),
+    "市场空间": ("市场空间", "行业竞争"),
+    "发行定价": ("发行定价", "估值", "发售价"),
+    "估值": ("估值", "发行定价"),
+    "破发": ("破发", "发行定价", "市场风险"),
 }
 
 
@@ -160,7 +211,10 @@ def build_module_search_intents(
 ) -> list[RetrievalIntent]:
     """Translate user/assignment/rules into auditable, atomic evidence needs."""
 
-    active_rules = list(rules)
+    context = " ".join(
+        [user_requirement, module, goal, *[str(item) for item in expected_outputs]]
+    )
+    active_rules = prioritize_rules_for_context(list(rules), context=context)
     intents: list[RetrievalIntent] = []
     focus = _specific_user_focus(user_requirement)
     if focus:
@@ -322,6 +376,34 @@ def _query_aliases(rule: RiskRule) -> str:
 
 def _matched_concepts(text: str) -> list[str]:
     return [concept for concept in _USER_CONCEPT_QUERIES if concept in text]
+
+
+def prioritize_rules_for_context(
+    rules: list[RiskRule],
+    *,
+    context: str,
+) -> list[RiskRule]:
+    """Put rules answering the assignment's concrete evidence needs first."""
+
+    concepts = _matched_concepts(context)
+
+    def score(rule: RiskRule) -> int:
+        descriptor = " ".join(
+            [rule.category, rule.risk_item, rule.trigger_condition, rule.source_sections]
+        )
+        return sum(
+            10
+            for concept in concepts
+            if any(hint in descriptor for hint in _CONCEPT_RULE_HINTS.get(concept, (concept,)))
+        )
+
+    return [
+        rule
+        for _, rule in sorted(
+            enumerate(rules),
+            key=lambda pair: (-score(pair[1]), pair[0]),
+        )
+    ]
 
 
 def _concept_queries(text: str) -> list[str]:

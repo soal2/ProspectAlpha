@@ -126,6 +126,9 @@ https://llm-brsq0ce4o43nxul5.cn-beijing.maas.aliyuncs.com/api/v1
 检索必须传 `document_id`，避免跨招股书混搜。
 三种只读检索入口都以 `ensure=False` 打开索引器，禁止在 Agent 并发查询期间
 重复创建 schema、函数或 trigger；DDL 仅由入库/初始化路径执行。
+专家检索前会先由 LLM 根据 `user_requirement + assignment + expected_outputs + priority_rules`
+自主改写原子 Query，再与确定性的繁体原词、否定性披露和英文别名合并；LLM 失败时
+自动使用确定性 Query，不会中断分析。
 
 ## 配置文件
 

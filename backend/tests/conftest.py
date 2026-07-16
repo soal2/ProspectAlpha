@@ -167,6 +167,14 @@ def analysis_repo_factory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         confirm_test_candidates,
     )
 
+    async def keep_seed_queries(**kwargs: Any) -> list[str]:
+        return list(kwargs["seed_queries"])
+
+    monkeypatch.setattr(
+        "riskagent.agents.supervisor.rewrite_retrieval_queries_with_llm",
+        keep_seed_queries,
+    )
+
     def build(
         *,
         rule_repository: RiskRuleRepository,

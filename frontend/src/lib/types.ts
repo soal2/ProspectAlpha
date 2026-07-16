@@ -123,6 +123,7 @@ export interface EvidenceFeedItem {
   snippet?: string | null;
   document_id?: string | null;
   bbox?: number[];
+  scoreKind?: "retrieval" | "relevance" | "unavailable";
 }
 
 export interface TraceData {
