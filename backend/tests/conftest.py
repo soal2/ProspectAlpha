@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import os
 from itertools import count
 from pathlib import Path
 from typing import Any
 
 import pytest
+
+os.environ.setdefault("PROSPECTALPHA_SKIP_DOTENV", "1")
 
 from riskagent.agent_experts import AgentSpec
 from riskagent.agents.orchestrator import StrategyDecision

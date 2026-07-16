@@ -1168,6 +1168,15 @@ Migration scope:
 - Each expert builds retrieval queries from its strategic assignment, Domain
   Skill, and frozen risk rules, retrieves the relevant chunks, and evaluates
   only the retrieved source text.
+- Persona skills must own non-overlapping rule families where the team contains
+  multiple specialists in the same broad domain: business operations and R&D
+  pipeline rules are split between their experts, while valuation/pricing and
+  industry competition rules are split between the two market experts. This
+  prevents duplicate searches from consuming the rule-coverage budget.
+- Rule-specific compact queries and Traditional-Chinese disclosure aliases run
+  before the full user requirement. Explicit counter-evidence such as “no
+  material litigation” remains auditable instead of being discarded only
+  because the corresponding risk did not trigger.
 - Replacement experts use the same retrieval boundary as the initially
   selected experts.
 - Evidence extraction reuses the same public retrieval entrypoint instead of
@@ -1412,12 +1421,15 @@ are evaluated again before the finding is finalized. Cross-module review consume
 the originating finding summaries and executes rule-specific counter-evidence
 queries; it no longer reports unrelated candidates from the reviewer's own
 module. Every planned query, retrieval round, and retrieved chunk id is emitted
-as a runtime event for audit. Retrieval-completed events also carry the top
+as a runtime event for audit. Initial intent/Query budgets and rule-coverage
+budgets are independently configurable through `AGENT_RETRIEVAL_*` environment
+variables. Retrieval-completed events also carry the top
 candidate chunks with document/page/bbox/text and raw retrieval score. The live
 UI labels these as candidate source blocks; admitted evidence remains separate
 and uses the rule-aware relevance score. An explicit empty rule list remains
-empty, which keeps evidence-only and quality roles from silently evaluating the
-full rule set.
+empty, which keeps evidence-only roles from silently evaluating the full rule
+set. The quality arbiter explicitly owns the `textual_nlp` rules instead of
+receiving an accidental empty rule list.
 
 Evidence stores two distinct values. `retrieval_score` is the raw PostgreSQL
 hybrid ranking signal and is not a probability. `relevance_score` is a separate
@@ -1449,7 +1461,9 @@ directions; they can never be promoted to formal findings.
 chunks as `retrieval_candidate` records. This keeps the evidence browser useful
 when every candidate is rejected by the formal gate. Candidate records retain
 the raw `retrieval_score`, always have zero `relevance_score`, and are labelled
-unverified by the frontend. Internal report synthesis continues to consume only
+unverified by the frontend. Business operations and technology/pipeline personas
+use distinct rule domains, preventing the previous duplicate scan of the same
+business rules. Internal report synthesis continues to consume only
 `run.evidence`, so exposing retrieval audit records does not weaken evidence
 admission or change a report's risk conclusion.
 

@@ -48,7 +48,7 @@ def test_analysis_run_uses_rule_snapshot_and_evidence(tmp_path, analysis_repo_fa
     )
 
     assert run.status == "completed"
-    assert run.rule_snapshot["totals"]["rule_count"] == 143
+    assert run.rule_snapshot["totals"]["rule_count"] == 147
     assert run.findings
     assert all(finding.rule_id.startswith("HKIPO-") for finding in run.findings)
     assert any("关联交易" in finding.matched_terms for finding in run.findings)
@@ -57,6 +57,7 @@ def test_analysis_run_uses_rule_snapshot_and_evidence(tmp_path, analysis_repo_fa
 def test_analysis_api_creates_ready_run_then_start_completes(
     tmp_path, monkeypatch, analysis_repo_factory
 ):
+    monkeypatch.setenv("ANALYSIS_API_EXECUTION_MODE", "inline")
     monkeypatch.setenv("ANALYSIS_RUNS_PATH", str(tmp_path / "runs.yaml"))
     monkeypatch.setenv("RISK_RULES_PATH", str(Path(__file__).parents[1] / "configs" / "risk_rules.yaml"))
     monkeypatch.setenv("USE_DATABASE", "0")
@@ -83,7 +84,7 @@ def test_analysis_api_creates_ready_run_then_start_completes(
     assert response.status_code == 201
     payload = response.json()
     assert payload["status"] == "ready"
-    assert payload["rule_snapshot"]["totals"]["rule_count"] == 143
+    assert payload["rule_snapshot"]["totals"]["rule_count"] == 147
     assert payload["findings"] == []
 
     run_id = payload["run_id"]

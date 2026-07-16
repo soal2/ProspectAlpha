@@ -18,7 +18,7 @@ def test_repository_loads_bootstrap_rules(tmp_path):
     repo = _repo(tmp_path)
     rule_set = repo.load()
 
-    assert rule_set.totals == {"dimension_count": 3, "category_count": 26, "rule_count": 143}
+    assert rule_set.totals == {"dimension_count": 3, "category_count": 28, "rule_count": 147}
     assert rule_set.rules[0].rule_id == "HKIPO-001"
 
 
@@ -38,15 +38,15 @@ def test_repository_crud_recalculates_totals(tmp_path):
         )
     )
 
-    assert created.rule_id == "HKIPO-144"
-    assert repo.load().totals["rule_count"] == 144
+    assert created.rule_id == "HKIPO-148"
+    assert repo.load().totals["rule_count"] == 148
 
     updated = repo.update_rule(created.rule_id, RiskRuleUpdate(risk_item="更新风险", enabled=False))
     assert updated.risk_item == "更新风险"
     assert updated.enabled is False
 
     repo.delete_rule(created.rule_id)
-    assert repo.load().totals["rule_count"] == 143
+    assert repo.load().totals["rule_count"] == 147
 
 
 def test_agent_text_evaluation_uses_rules(tmp_path):

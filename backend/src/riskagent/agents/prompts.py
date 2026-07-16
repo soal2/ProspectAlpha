@@ -23,6 +23,7 @@ EXPERT_OUTPUT_CONTRACT = """
 必须围绕用户具体要求与当前模块目标判断证据是否回答了问题；不要把语义相近但未回答目标事实的片段当作证据。
 优先逐条使用 evidence_by_rule[rule_id] 中为该规则重排后的多块证据；不得用其他规则的片段替代当前规则证据。
 数值、占比或趋势条件应联合阅读同一规则下的多页表格和文字，不要因为单个片段未同时出现分子、分母就直接忽略其余证据。
+占比阈值必须同时取得非零分母和对应分子；当原文明示尚无产品销售收入时，不得把“依赖某产品/技术”推算为产品收入占比100%，应返回 insufficient_evidence 或使用不依赖收入占比的其他规则。
 请对每条候选做严谨的二次判断，只输出一个 JSON 对象，格式：
 {"items":[{"rule_id":str,"evaluation_result":"triggered"|"not_triggered"|"insufficient_evidence","severity":"low"|"medium"|"high","confidence":0.0-1.0,"reasoning_summary":str,"needs_more_evidence":bool}]}
 evaluation_result=triggered 仅表示原文直接满足规则触发条件；原文直接否定触发条件时必须返回 not_triggered，不能因为 confidence 较高而判为 triggered；无法验证时返回 insufficient_evidence 且 needs_more_evidence=true。

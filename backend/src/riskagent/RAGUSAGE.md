@@ -318,6 +318,12 @@ Apple Silicon Mac 使用 `MINERU_DEVICE=mps`；Intel Mac 或 MPS 不可用时使
 `DOCUMENT_PARSING_HEARTBEAT_SECONDS` 写心跳，超过
 `DOCUMENT_PARSING_STALE_SECONDS` 才会标记为可重新解析的中断。
 
+Agent 检索预算可通过 `AGENT_RETRIEVAL_INITIAL_INTENT_LIMIT`、
+`AGENT_RETRIEVAL_INITIAL_QUERY_LIMIT`、`AGENT_RETRIEVAL_RULE_COVERAGE_LIMIT`
+和 `AGENT_RETRIEVAL_RULE_COVERAGE_QUERY_LIMIT` 配置。默认值会让法务、市场、
+研发等非财务模块中的每条规则至少获得一条规则专属 Query；提高预算会增加召回
+覆盖率，也会增加 embedding 调用量和分析时长。
+
 ## 直接检索
 
 示例：

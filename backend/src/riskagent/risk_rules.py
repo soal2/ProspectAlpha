@@ -43,7 +43,7 @@ class RiskRule(BaseModel):
 
 class RiskRuleSet(BaseModel):
     rule_set_id: str = "hk_ipo_prospectus_risk_framework_v1"
-    version: str = "v1.0"
+    version: str = "v1.1"
     name: str = "港股IPO招股书风险识别框架"
     source_workbook: str | None = None
     source_main_sheet: str | None = None
@@ -275,7 +275,7 @@ class RiskRuleRepository:
     def _normalize_data(self, data: dict[str, Any]) -> dict[str, Any]:
         normalized = dict(data)
         normalized.setdefault("rule_set_id", "hk_ipo_prospectus_risk_framework_v1")
-        normalized.setdefault("version", "v1.0")
+        normalized.setdefault("version", "v1.1")
         normalized.setdefault("name", "港股IPO招股书风险识别框架")
         normalized.setdefault("usage_notes", [])
         normalized.setdefault("dimensions", [])

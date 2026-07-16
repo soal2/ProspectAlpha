@@ -338,7 +338,7 @@ def verify_risk_rule_seed(session) -> None:
 
     data = json.loads(RISK_RULE_SEED_PATH.read_text(encoding="utf-8"))
     rule_set_id = data["rule_set_id"]
-    seed_version = data.get("version", "v1.0")
+    seed_version = data.get("version", "v1.1")
     seed_rule_count = len(data.get("rules", []))
 
     row = session.get(RiskRuleSetRow, rule_set_id)
@@ -410,7 +410,7 @@ def seed_risk_rules(session) -> None:
     session.add(
         RiskRuleSetRow(
             rule_set_id=rule_set_id,
-            version=data.get("version", "v1.0"),
+            version=data.get("version", "v1.1"),
             name=data.get("name", "港股IPO招股书风险识别框架"),
             source_workbook=data.get("source_workbook"),
             source_main_sheet=data.get("source_main_sheet"),

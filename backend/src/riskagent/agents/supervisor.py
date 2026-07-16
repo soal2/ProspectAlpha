@@ -64,6 +64,16 @@ TEAM_SHUTDOWN_TIMEOUT_SECONDS = 10.0
 MISSION_BRIEF_TIMEOUT_SECONDS = 10.0
 
 
+def _positive_env_int(name: str, default: int, *, maximum: int = 100) -> int:
+    """Read a bounded positive retrieval budget without failing app startup."""
+
+    try:
+        value = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return min(maximum, max(1, value))
+
+
 StrategyProvider = Callable[..., Any]
 ReplacementProvider = Callable[..., Any]
 ChunkRetriever = Callable[..., list[ChunkSearchResult]]
@@ -1030,13 +1040,25 @@ class AgentTeamSupervisor:
             analysis_text = text
             retrieval_failure: str | None = None
             if document_id:
+                initial_intent_limit = _positive_env_int(
+                    "AGENT_RETRIEVAL_INITIAL_INTENT_LIMIT", 10, maximum=40
+                )
+                initial_query_limit = _positive_env_int(
+                    "AGENT_RETRIEVAL_INITIAL_QUERY_LIMIT", 20, maximum=60
+                )
+                coverage_rule_limit = _positive_env_int(
+                    "AGENT_RETRIEVAL_RULE_COVERAGE_LIMIT", 32, maximum=100
+                )
+                coverage_query_limit = _positive_env_int(
+                    "AGENT_RETRIEVAL_RULE_COVERAGE_QUERY_LIMIT", 36, maximum=100
+                )
                 intents = build_module_search_intents(
                     module=assignment.module,
                     goal=assignment.goal,
                     rules=selected_rules,
                     user_requirement=user_requirement,
                     expected_outputs=assignment.expected_outputs,
-                    limit=6,
+                    limit=initial_intent_limit,
                 )
                 queries = []
                 query_width = max((len(intent.queries) for intent in intents), default=0)
@@ -1046,7 +1068,7 @@ class AgentTeamSupervisor:
                         for intent in intents
                         if query_index < len(intent.queries)
                     )
-                seed_queries = list(dict.fromkeys(queries))[:14]
+                seed_queries = list(dict.fromkeys(queries))[:initial_query_limit]
                 llm_queries: list[str] = []
                 try:
                     llm_queries = asyncio.run(
@@ -1081,7 +1103,9 @@ class AgentTeamSupervisor:
                             stage_status="failed",
                         )
                     )
-                final_queries = list(dict.fromkeys([*llm_queries, *seed_queries]))[:14]
+                final_queries = list(
+                    dict.fromkeys([*llm_queries, *seed_queries])
+                )[:initial_query_limit]
                 retrieve(final_queries, round_name="首轮")
                 chunks = sorted(
                     chunks_by_id.values(), key=lambda item: item.score, reverse=True
@@ -1105,7 +1129,7 @@ class AgentTeamSupervisor:
                     item.rule_id
                     for item in evaluations
                     if item.evaluation_result == "not_evaluated"
-                ][:6]
+                ][:coverage_rule_limit]
                 coverage_query_groups = [
                     build_rule_search_queries(
                         rule_by_id[rule_id],
@@ -1114,7 +1138,10 @@ class AgentTeamSupervisor:
                     for rule_id in uncovered_rule_ids
                     if rule_id in rule_by_id
                 ]
-                coverage_queries = _round_robin_queries(coverage_query_groups, limit=12)
+                coverage_queries = _round_robin_queries(
+                    coverage_query_groups,
+                    limit=coverage_query_limit,
+                )
                 if retrieve(coverage_queries, round_name="规则覆盖") > 0:
                     analysis_text = _analysis_text_from_chunks(chunks_by_id.values())
                     evaluations = evaluate_text_against_rules(

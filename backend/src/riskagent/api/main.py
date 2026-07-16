@@ -5,6 +5,16 @@ from __future__ import annotations
 import logging
 import os
 
+from riskagent.env import load_dotenv
+
+# Uvicorn imports this module before the startup hook runs. Load local
+# configuration before importing modules that construct database engines and
+# repositories at module scope, otherwise a direct local start silently falls
+# back to SQLite and cannot see PDFs indexed in PostgreSQL. Tests explicitly
+# opt out so importing the app never points a unit test at a developer database.
+if os.getenv("PROSPECTALPHA_SKIP_DOTENV") != "1":
+    load_dotenv()
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -13,7 +23,6 @@ from sqlalchemy.exc import SQLAlchemyError
 from riskagent.a2a import build_dynamic_expert_a2a_routes
 from riskagent.agent_experts import AgentSpec, AgentSpecRepository
 from riskagent.api import agents, analysis, analysis_options, chat, documents, knowledge, risk_rules, skills
-from riskagent.env import load_dotenv
 from riskagent.seed_data import AGENT_EXPERTS, AGENT_SPECS
 
 logger = logging.getLogger(__name__)

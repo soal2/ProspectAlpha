@@ -256,7 +256,7 @@ MVP 不再维护单独硬编码的 10 条风险清单。首批实现可以只覆
 ### 5.5 验收标准
 
 - 完成一个 run 的端到端状态流转：`queued -> completed`。
-- `GET /risk-rules` 能展示 active 规则集的 3 个维度、26 个一级分类、143 条规则。
+- `GET /risk-rules` 能展示 active 规则集的 3 个维度、28 个一级分类、147 条规则。
 - `POST /analysis-runs/{run_id}/start` 能把 active 规则完整固化到 run 级快照。
 - 报告中每个关键风险结论都能回到 `run_evidence`。
 - 每个风险发现都能回到 `rule_id` 和规则快照。
@@ -463,7 +463,7 @@ src/riskagent/
 
 验收：
 
-- `GET /risk-rules` 返回 3 个维度、26 个一级分类、143 条规则。
+- `GET /risk-rules` 返回 3 个维度、28 个一级分类、147 条规则。
 - 至少输出若干个带 `rule_id` 和证据引用的结构化发现。
 
 ### 第五批 PR

@@ -144,6 +144,42 @@ def test_analyze_findings_with_llm_preserves_confirmed_non_trigger(monkeypatch):
     assert candidate.confidence == 0.92
 
 
+def test_analyze_findings_rejects_share_threshold_when_product_revenue_is_zero(monkeypatch):
+    llm = _ScriptedLLM(
+        {
+            "items": [
+                {
+                    "rule_id": "HKIPO-086",
+                    "evaluation_result": "triggered",
+                    "severity": "high",
+                    "confidence": 0.85,
+                    "reasoning_summary": (
+                        "第61页披露尚无产品销售收入，但核心产品依赖外部授权，"
+                        "因此产品收入占比超过50%。"
+                    ),
+                    "needs_more_evidence": False,
+                }
+            ]
+        }
+    )
+    monkeypatch.setattr(expert_llm_module, "get_default_llm_client", lambda: llm)
+    candidate = _candidate("HKIPO-086")
+    candidate.trigger_condition = "核心产品收入占比 > 50% 的产品依赖外部授权技术"
+
+    asyncio.run(
+        expert_llm_module.analyze_findings_with_llm(
+            agent_name="technology_agent",
+            agent_title="Technology specialist",
+            candidates=[candidate],
+            evidence_snippets=["第61页：目前并无自产品销售产生的收益。"],
+        )
+    )
+
+    assert candidate.evaluation_result == "insufficient_evidence"
+    assert candidate.confidence == 0.49
+    assert "不得判定该阈值已触发" in candidate.reasoning_summary
+
+
 def test_analyze_findings_with_llm_propagates_llm_errors(monkeypatch):
     llm = _ScriptedLLM(RuntimeError("boom"))
     monkeypatch.setattr(expert_llm_module, "get_default_llm_client", lambda: llm)

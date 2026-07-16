@@ -77,6 +77,7 @@ def test_clarifying_patch_start_freezes_inputs_and_generates_artifacts(
 def test_analysis_api_exposes_minimal_pipeline_resources(
     tmp_path, monkeypatch, analysis_repo_factory
 ):
+    monkeypatch.setenv("ANALYSIS_API_EXECUTION_MODE", "inline")
     monkeypatch.setenv("ANALYSIS_RUNS_PATH", str(tmp_path / "runs.yaml"))
     monkeypatch.setenv("EVIDENCE_LIBRARY_PATH", str(tmp_path / "evidence_library.yaml"))
     monkeypatch.setenv("DOCUMENTS_PATH", str(tmp_path / "documents.yaml"))
@@ -108,9 +109,12 @@ def test_analysis_api_exposes_minimal_pipeline_resources(
         "file_size_bytes",
         "page_count",
             "text_chars",
-            "block_count",
-            "processing_status",
-            "source_url",
+        "block_count",
+        "processing_status",
+        "processing_error_code",
+        "processing_error_message",
+        "processing_attempts",
+        "source_url",
         "created_at",
     }
     duplicate = client.post(
@@ -138,7 +142,7 @@ def test_analysis_api_exposes_minimal_pipeline_resources(
     assert response.status_code == 201
     payload = response.json()
     assert "input_payload" not in payload
-    assert payload["rule_snapshot"]["totals"]["rule_count"] == 143
+    assert payload["rule_snapshot"]["totals"]["rule_count"] == 147
     assert payload["status"] == "ready"
     assert payload["findings"] == []
 
@@ -181,6 +185,7 @@ def test_analysis_api_exposes_minimal_pipeline_resources(
 def test_pdf_upload_drives_analysis_with_page_and_bbox_evidence(
     tmp_path, monkeypatch, analysis_repo_factory
 ):
+    monkeypatch.setenv("ANALYSIS_API_EXECUTION_MODE", "inline")
     monkeypatch.setenv("ANALYSIS_RUNS_PATH", str(tmp_path / "runs.yaml"))
     monkeypatch.setenv("EVIDENCE_LIBRARY_PATH", str(tmp_path / "evidence_library.yaml"))
     monkeypatch.setenv("DOCUMENTS_PATH", str(tmp_path / "documents.yaml"))
