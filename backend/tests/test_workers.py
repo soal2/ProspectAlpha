@@ -7,6 +7,7 @@ import pytest
 
 from riskagent.workers.analysis import dispatch_analysis_job
 from riskagent.workers import rq_worker
+from riskagent.workers import documents as document_workers
 
 
 class InlineExecutor:
@@ -122,6 +123,43 @@ def test_rq_worker_builds_worker_for_configured_queue(monkeypatch):
     worker = rq_worker.make_worker()
 
     assert isinstance(worker, FakeWorker)
-    assert built["queue_name"] == "analysis-workers"
+    assert built["queue_name"] == "documents"
     assert built["connection"] == "connection"
     assert built["queues"][0].name == "analysis-workers"
+    assert built["queues"][1].name == "documents"
+
+
+def test_document_rq_dispatch_uses_dedicated_queue(monkeypatch):
+    enqueued = {}
+
+    class FakeRedisModule:
+        @staticmethod
+        def from_url(url):
+            enqueued["redis_url"] = url
+            return "connection"
+
+    class FakeJob:
+        id = "document_job"
+
+    class FakeQueue:
+        def __init__(self, name, connection):
+            enqueued["queue_name"] = name
+            enqueued["connection"] = connection
+
+        def enqueue(self, func, document_id, job_timeout):
+            enqueued["func_name"] = func.__name__
+            enqueued["document_id"] = document_id
+            enqueued["job_timeout"] = job_timeout
+            return FakeJob()
+
+    monkeypatch.setitem(sys.modules, "redis", FakeRedisModule)
+    monkeypatch.setitem(sys.modules, "rq", types.SimpleNamespace(Queue=FakeQueue))
+    monkeypatch.setenv("DOCUMENT_QUEUE_NAME", "pdf-parsing")
+
+    job_id = document_workers.dispatch_document_job("doc_1", mode="rq")
+
+    assert job_id == "document_job"
+    assert enqueued["queue_name"] == "pdf-parsing"
+    assert enqueued["func_name"] == "run_document_job"
+    assert enqueued["document_id"] == "doc_1"
+    assert enqueued["job_timeout"] == "2h"

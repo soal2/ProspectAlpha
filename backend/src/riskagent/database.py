@@ -93,6 +93,9 @@ def _ensure_prospectus_processing_columns(active_engine) -> None:
         "processing_error_code": "VARCHAR(64)",
         "processing_error_message": "TEXT",
         "processing_attempts": "INTEGER NOT NULL DEFAULT 0",
+        "processing_started_at": "TIMESTAMP",
+        "processing_heartbeat_at": "TIMESTAMP",
+        "processing_finished_at": "TIMESTAMP",
     }
     with active_engine.begin() as connection:
         for column, definition in additions.items():

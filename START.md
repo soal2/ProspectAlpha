@@ -50,7 +50,7 @@ pnpm install
 pnpm run postinstall
 ```
 
-`pipeline` extra 包含 MinerU 和 PostgreSQL 驱动。首次调用 MinerU 时可能下载较大的模型文件；普通前端 PDF 上传使用 PyMuPDF 提取页面文本块，不需要等待 MinerU 完整下载。
+`pipeline` extra 包含 MinerU 和 PostgreSQL 驱动。首次调用 MinerU 时可能下载较大的模型文件。前端上传会先持久化原始 PDF，再由独立解析进程执行 MinerU；关闭页面不会取消上传记录，解析中断后可直接点击“重新解析”。
 
 ## 二、推荐的本地开发启动方式
 
@@ -78,6 +78,9 @@ postgresql+psycopg://prospect_alpha:prospect_alpha@127.0.0.1:5432/prospect_alpha
 cd backend
 DATABASE_URL=postgresql+psycopg://prospect_alpha:prospect_alpha@127.0.0.1:5432/prospect_alpha \
 ANALYSIS_EXECUTION_MODE=inline \
+DOCUMENT_PARSING_EXECUTION_MODE=subprocess \
+DOCUMENT_PARSING_MAX_CONCURRENCY=1 \
+MINERU_DEVICE=mps \
 OBJECT_STORE_PROVIDER=local \
 .venv/bin/uvicorn riskagent.api.main:app \
   --host 127.0.0.1 \
@@ -94,8 +97,13 @@ curl http://127.0.0.1:8000/health
 预期输出：
 
 ```json
-{"status":"ok"}
+{"status":"ok","database":"ready"}
 ```
+
+Apple Silicon Mac 推荐 `MINERU_DEVICE=mps`；系统会启用
+`PYTORCH_ENABLE_MPS_FALLBACK=1`，将 MPS 不支持的算子回退到 CPU。Intel Mac
+或 MPS 不可用时改为 `cpu`。NVIDIA 环境使用 `cuda`（配合
+`MINERU_CUDA_DEVICE`）或直接填写 `cuda:<index>`。
 
 后端启动时会探测 embedding provider，因此有外部模型服务时启动可能需要几十秒。看到 `Application startup complete` 后再使用前端。
 

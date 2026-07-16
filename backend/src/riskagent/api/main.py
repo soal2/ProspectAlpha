@@ -7,6 +7,8 @@ import os
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from sqlalchemy.exc import SQLAlchemyError
 
 from riskagent.a2a import build_dynamic_expert_a2a_routes
 from riskagent.agent_experts import AgentSpec, AgentSpecRepository
@@ -46,21 +48,58 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    @app.exception_handler(SQLAlchemyError)
+    async def _database_unavailable(_request, _exc: SQLAlchemyError) -> JSONResponse:
+        logger.exception("Database request failed")
+        return JSONResponse(
+            status_code=503,
+            content={
+                "detail": "数据库暂不可用，已上传 PDF 不会丢失；请恢复 PostgreSQL 后重试。",
+                "error_code": "database_unavailable",
+            },
+        )
+
     @app.get("/health")
-    def health() -> dict[str, str]:
-        return {"status": "ok"}
+    def health():
+        from riskagent.database import check_database_connection
+
+        try:
+            check_database_connection()
+        except SQLAlchemyError:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "degraded", "database": "unavailable"},
+            )
+        return {"status": "ok", "database": "ready"}
 
     @app.on_event("startup")
     def _probe_embedding_provider() -> None:
         load_dotenv()
+        from riskagent.database import init_db
+        from riskagent.documents import recover_interrupted_prospectus_jobs
         from riskagent.parsing import mineru_runtime_health
+        from riskagent.workers.documents import start_document_dispatcher
+
+        try:
+            init_db()
+            recovered = recover_interrupted_prospectus_jobs()
+            if recovered:
+                logger.warning(
+                    "Marked %d abandoned MinerU jobs as interrupted: %s",
+                    len(recovered),
+                    ", ".join(recovered),
+                )
+            start_document_dispatcher()
+        except Exception:
+            logger.exception("Document parsing recovery probe failed")
 
         parser_health = mineru_runtime_health()
         log_method = logger.info if parser_health["status"] == "ready" else logger.warning
         log_method(
-            "MinerU runtime status=%s source=%s cache_present=%s: %s",
+            "MinerU runtime status=%s source=%s device=%s cache_present=%s: %s",
             parser_health["status"],
             parser_health["model_source"],
+            parser_health["device"],
             parser_health["model_cache_present"],
             parser_health["message"],
         )

@@ -225,7 +225,7 @@ export type UploadedDocument = {
   page_count: number;
   text_chars: number;
   block_count: number;
-  processing_status: "uploaded" | "queued" | "processing" | "ready" | "failed";
+  processing_status: "uploaded" | "queued" | "processing" | "ready" | "failed" | "interrupted";
   processing_error_code: string | null;
   processing_error_message: string | null;
   processing_attempts: number;
@@ -408,6 +408,7 @@ function evidenceStatusLabel(status: string): string {
     weakly_supported: "弱支持证据",
     needs_human_review: "待人工复核",
     rejected_by_debate: "红队否决候选证据",
+    retrieval_candidate: "检索候选 · 尚未核验",
     pending: "待核验",
   };
   return labels[status] ?? status;
@@ -426,8 +427,16 @@ async function fetchEvidenceDetailItems(id: string): Promise<EvidenceDetailItem[
       id: item.evidence_id,
       section: item.section_path,
       page: item.page_number,
-      conf: item.relevance_score,
-      scoreKind: item.relevance_score > 0 ? "relevance" : "unavailable",
+      conf:
+        item.verifier_status === "retrieval_candidate"
+          ? item.retrieval_score
+          : item.relevance_score,
+      scoreKind:
+        item.verifier_status === "retrieval_candidate"
+          ? "retrieval"
+          : item.relevance_score > 0
+            ? "relevance"
+            : "unavailable",
       snippet: item.text,
       risk: riskByFinding[item.finding_id] ?? evidenceStatusLabel(item.verifier_status),
       documentId: item.document_id,
@@ -477,8 +486,16 @@ async function fetchKnowledgeData(): Promise<KnowledgeData> {
       name: run.company_name,
       section: item.section_path,
       page: item.page_number,
-      conf: item.relevance_score,
-      scoreKind: item.relevance_score > 0 ? "relevance" : "unavailable",
+      conf:
+        item.verifier_status === "retrieval_candidate"
+          ? item.retrieval_score
+          : item.relevance_score,
+      scoreKind:
+        item.verifier_status === "retrieval_candidate"
+          ? "retrieval"
+          : item.relevance_score > 0
+            ? "relevance"
+            : "unavailable",
       snippet: item.text,
       risk: riskByFinding[item.finding_id] ?? evidenceStatusLabel(item.verifier_status),
       documentId: item.document_id,
@@ -728,6 +745,7 @@ export async function getDocumentParserHealth() {
     status: "ready" | "model_download_required" | "unavailable";
     installed: boolean;
     model_source: string;
+    device: string;
     model_cache_present: boolean;
     message: string;
   }>("/documents/parser-health");
@@ -742,7 +760,7 @@ export async function waitForDocumentReady(
     const document = await getDocument(documentId);
     onProgress?.(document);
     if (document.block_count > 0 || document.processing_status === "ready") return document;
-    if (document.processing_status === "failed") {
+    if (["failed", "interrupted"].includes(document.processing_status)) {
       throw new Error(
         document.processing_error_message ?? "MinerU 解析失败，可点击“重新解析”再次尝试。",
       );

@@ -92,11 +92,13 @@ def test_expert_handler_fails_closed_when_llm_fails(tmp_path, monkeypatch):
 
 def test_expert_owns_query_rewrite_and_emits_candidate_chunks(tmp_path, monkeypatch):
     queries_seen: list[str] = []
+    llm_payloads: list[dict[str, Any]] = []
 
     async def rewrite_queries(**_kwargs: Any) -> list[str]:
         return ["概無重大訴訟 法律程序"]
 
-    async def no_findings(**_kwargs: Any) -> list[dict[str, Any]]:
+    async def no_findings(**kwargs: Any) -> list[dict[str, Any]]:
+        llm_payloads.append(kwargs)
         return []
 
     def retrieve(*, query: str, document_id: str, **_kwargs: Any):
@@ -167,3 +169,9 @@ def test_expert_owns_query_rewrite_and_emits_candidate_chunks(tmp_path, monkeypa
     ]
     assert completed[0]["payload"]["chunks"][0]["page_number"] == 333
     assert completed[0]["payload"]["chunks"][0]["bbox"] == [10, 20, 30, 40]
+    assert any(
+        "第333页" in snippet
+        for payload in llm_payloads
+        for snippets in payload.get("evidence_by_rule", {}).values()
+        for snippet in snippets
+    )

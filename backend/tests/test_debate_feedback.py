@@ -89,6 +89,102 @@ def _run_with_findings(repo: AnalysisRunRepository) -> AnalysisRun:
     return run
 
 
+def test_retrieval_candidates_remain_visible_without_becoming_formal_evidence(
+    tmp_path, analysis_repo_factory
+):
+    repo = _repository(tmp_path, analysis_repo_factory)
+    run = repo.create_draft(
+        AnalysisRunCreate(company_name="候选证据测试", document_text="关联交易")
+    )
+    run.events = [
+        {
+            "event_type": "retrieval_query_completed",
+            "payload": {
+                "chunks": [
+                    {
+                        "chunk_id": "chunk-related-party",
+                        "document_id": "doc-test",
+                        "page_number": 576,
+                        "section_path": "关联方交易",
+                        "text": "本集团与关联方发生以下交易。",
+                        "bbox": [10, 20, 30, 40],
+                        "bbox_coordinate_space": "normalized_1000",
+                        "retrieval_score": 0.82,
+                    }
+                ]
+            },
+        }
+    ]
+
+    candidates = repo._recover_retrieval_candidates(run)
+
+    assert len(candidates) == 1
+    assert candidates[0].verifier_status == "retrieval_candidate"
+    assert candidates[0].retrieval_score == 0.82
+    assert candidates[0].relevance_score == 0.0
+    assert candidates[0].page_number == 576
+    assert candidates[0].finding_id == "retrieval_candidate"
+
+
+def test_legacy_retrieval_chunk_ids_are_backfilled_from_postgres(
+    tmp_path, monkeypatch, analysis_repo_factory
+):
+    repo = _repository(tmp_path, analysis_repo_factory)
+    repo.use_database = True
+    run = repo.create_draft(
+        AnalysisRunCreate(company_name="历史候选测试", document_text="供应商集中")
+    )
+    run.events = [
+        {
+            "event_type": "retrieval_query_completed",
+            "payload": {
+                "chunk_ids": ["doc_legacy_chunk_000007"],
+            },
+        }
+    ]
+    chunk = ChunkSearchResult(
+        chunk_id="doc_legacy_chunk_000007",
+        document_id="doc_legacy",
+        doc_key="legacy",
+        source_file="legacy_content_list.json",
+        source_item_indices=[7],
+        chunk_type="table",
+        text="前五大供应商采购占比为 82%。",
+        page_idx=88,
+        score=0.0,
+        bbox_refs=[],
+        merged_bboxes=[{"page_idx": 88, "bbox": [1, 2, 3, 4]}],
+        image_path=None,
+        mineru_img_path=None,
+        table_html=None,
+        metadata={
+            "section_path": "主要供应商",
+            "bbox_coordinate_space": "normalized_1000",
+        },
+    )
+
+    class FakeIndexer:
+        def __init__(self, ensure=False):
+            assert ensure is False
+
+        def list_document_chunks(self, document_id):
+            assert document_id == "doc_legacy"
+            return [chunk]
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(analysis_runs_module, "PostgresChunkIndexer", FakeIndexer)
+
+    candidates = repo._recover_retrieval_candidates(run)
+
+    assert len(candidates) == 1
+    assert candidates[0].document_id == "doc_legacy"
+    assert candidates[0].page_number == 88
+    assert candidates[0].retrieval_score == 0.0
+    assert candidates[0].verifier_status == "retrieval_candidate"
+
+
 def _debate_result(
     *,
     revisions: list[dict[str, Any]] | None = None,

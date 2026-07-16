@@ -9,6 +9,8 @@ from riskagent.parsing import (
     build_chunk_request,
     load_rag_pipeline_settings,
 )
+from riskagent.parsing.config import build_pdf_process_request
+from riskagent.parsing.pdf_parser import mineru_runtime_health
 
 
 def _write_content_list(path: Path) -> None:
@@ -400,3 +402,57 @@ chunker:
 
     assert [chunk.chunk_type for chunk in result.chunks] == ["text", "text"]
     assert [chunk.text for chunk in result.chunks] == ["第一段", "第二段"]
+
+
+def test_pdf_processor_device_can_be_selected_from_environment(tmp_path, monkeypatch):
+    config = tmp_path / "rag.yaml"
+    config.write_text(
+        """
+pdf_processor:
+  default: mineru
+  mineru:
+    method: ocr
+    backend: pipeline
+    lang: chinese_cht
+    device: cpu
+    reuse_existing: true
+    image_analysis: true
+chunker:
+  default: block
+  block:
+    max_chars: 1200
+    include_types: [text]
+    skip_types: []
+    merge_text: true
+    require_image_description: false
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MINERU_DEVICE", "cuda")
+    monkeypatch.setenv("MINERU_CUDA_DEVICE", "2")
+
+    settings = load_rag_pipeline_settings(config)
+    request = build_pdf_process_request(
+        doc_key="device-test",
+        pdf_path=tmp_path / "input.pdf",
+        processed_root=tmp_path / "processed",
+        settings=settings.pdf_processor,
+    )
+
+    assert settings.pdf_processor.device == "cuda:2"
+    assert request.device == "cuda:2"
+
+
+def test_mineru_health_detects_modelscope_models_directory(tmp_path, monkeypatch):
+    cache_root = tmp_path / "modelscope"
+    (cache_root / "OpenDataLab--PDF-Extract-Kit-1.0").mkdir(parents=True)
+    monkeypatch.setenv("MODELSCOPE_CACHE", str(cache_root))
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "huggingface"))
+    monkeypatch.setenv("MINERU_DEVICE", "cpu")
+
+    health = mineru_runtime_health()
+
+    assert health["installed"] is True
+    assert health["model_cache_present"] is True
+    assert health["device_ready"] is True
+    assert health["status"] == "ready"

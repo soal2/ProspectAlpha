@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 import pytest
@@ -87,6 +88,29 @@ def test_analyze_findings_with_llm_enriches_candidate_fields(monkeypatch):
     assert candidate.severity == "high"
     assert candidate.confidence == 0.9
     assert candidate.evaluation_result == "triggered"
+    payload = json.loads(llm.calls[0][1]["content"])
+    assert payload["evidence_by_rule"] == {}
+
+
+def test_analyze_findings_with_llm_sends_rule_scoped_evidence(monkeypatch):
+    llm = _ScriptedLLM({"items": []})
+    monkeypatch.setattr(expert_llm_module, "get_default_llm_client", lambda: llm)
+
+    asyncio.run(
+        expert_llm_module.analyze_findings_with_llm(
+            agent_name="agent_name",
+            agent_title="agent_title",
+            candidates=[_candidate("R1")],
+            evidence_snippets=["global"],
+            evidence_by_rule={"R1": ["第 424 页关联交易", "第 576 页关联方表格"]},
+        )
+    )
+
+    payload = json.loads(llm.calls[0][1]["content"])
+    assert payload["evidence_by_rule"]["R1"] == [
+        "第 424 页关联交易",
+        "第 576 页关联方表格",
+    ]
 
 
 def test_analyze_findings_with_llm_preserves_confirmed_non_trigger(monkeypatch):

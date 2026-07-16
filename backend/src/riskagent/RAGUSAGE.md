@@ -310,7 +310,13 @@ MinerU 的 `pdf_file_name` 是逻辑输出键，不要求扩展名。本项目�
 
 解析失败后先查看 `GET /documents/{document_id}` 返回的错误码，再调用
 `POST /documents/{document_id}/reparse`。启动前可用
-`GET /documents/parser-health` 检查 MinerU、模型源和缓存状态。
+`GET /documents/parser-health` 检查 MinerU、模型源、缓存和推理设备状态。
+Apple Silicon Mac 使用 `MINERU_DEVICE=mps`；Intel Mac 或 MPS 不可用时使用
+`cpu`；NVIDIA 环境使用 `cuda` 并通过 `MINERU_CUDA_DEVICE` 选择设备。
+本地解析默认在独立子进程执行，最大并发由
+`DOCUMENT_PARSING_MAX_CONCURRENCY` 控制。页面关闭不会终止任务；子进程会按
+`DOCUMENT_PARSING_HEARTBEAT_SECONDS` 写心跳，超过
+`DOCUMENT_PARSING_STALE_SECONDS` 才会标记为可重新解析的中断。
 
 ## 直接检索
 
@@ -349,9 +355,18 @@ finally:
 
 ## 常见问题
 
-### 为什么没有 `/documents` 上传接口？
+### `/documents/upload` 重复上传同一个 PDF 会怎样？
 
-旧 `/documents` 上传接口和 PyMuPDF 文档块解析已经删除。现在招股书 RAG 的入口是 `process_prospectus_document(...)`，后续 API 应该围绕这个入口新建，而不是恢复旧 asset stack。
+原始 PDF 先按内容哈希注册，因此重复文件会复用稳定的 `document_id`。已完成的
+文档直接返回现有索引；正在解析的文档返回当前状态，不会启动并行重复任务；失败
+或中断的文档会保留原文件并重新排队。也可以不上传文件，直接调用
+`POST /documents/{document_id}/reparse`。
+
+### 为什么报告没有正式结论时证据库仍有内容？
+
+证据接口同时展示 `retrieval_candidate` 检索候选和通过门禁的正式证据。候选只表示
+Agent 找到了可能相关的原文块，前端显示“检索候选分 · 未核验”；它不会进入风险结论
+或改变报告评级。正式证据仍须通过规则相关性、专家二判、交叉验证和证据门禁。
 
 ### 为什么 image chunk 要 VLM？
 

@@ -78,6 +78,8 @@ class MinerUPdfProcessor:
         if not (request.reuse_existing and content_list_path.exists()):
             output_dir.mkdir(parents=True, exist_ok=True)
             _apply_mineru_env(output_dir)
+            if request.device == "mps":
+                os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
             _run_mineru(
                 request=request,
                 pdf_path=pdf_path,
@@ -125,32 +127,84 @@ def mineru_runtime_health() -> dict[str, object]:
 
     installed = find_spec("mineru") is not None
     model_source = os.getenv("MINERU_MODEL_SOURCE", "auto").strip().lower() or "auto"
-    cache_roots = [
-        Path(os.getenv("MODELSCOPE_CACHE", "~/.cache/modelscope/hub")).expanduser(),
-        Path(os.getenv("HF_HOME", "~/.cache/huggingface/hub")).expanduser(),
-    ]
+    device = os.getenv("MINERU_DEVICE", "auto").strip().lower() or "auto"
+    if device == "cuda":
+        device = f"cuda:{os.getenv('MINERU_CUDA_DEVICE', '0').strip() or '0'}"
+    modelscope_cache = os.getenv("MODELSCOPE_CACHE", "").strip()
+    huggingface_cache = os.getenv("HF_HOME", "").strip()
+    cache_roots = (
+        [Path(modelscope_cache).expanduser()]
+        if modelscope_cache
+        else [
+            Path("~/.cache/modelscope").expanduser(),
+            Path("~/.cache/modelscope/hub").expanduser(),
+            Path("~/.cache/modelscope/models").expanduser(),
+        ]
+    )
+    cache_roots.extend(
+        [Path(huggingface_cache).expanduser()]
+        if huggingface_cache
+        else [
+            Path("~/.cache/huggingface").expanduser(),
+            Path("~/.cache/huggingface/hub").expanduser(),
+        ]
+    )
     cache_patterns = ("**/*PDF-Extract-Kit*", "**/*pdf-extract-kit*")
     cache_present = any(
         root.exists()
         and any(any(root.glob(pattern)) for pattern in cache_patterns)
         for root in cache_roots
     )
+    device_ready, device_message = _mineru_device_health(device)
     if not installed:
         status = "unavailable"
         message = "MinerU 未安装。"
+    elif not device_ready:
+        status = "device_unavailable"
+        message = device_message
     elif cache_present:
         status = "ready"
-        message = "MinerU 已安装且检测到本地模型缓存。"
+        message = f"MinerU 已安装且检测到本地模型缓存；{device_message}"
     else:
         status = "model_download_required"
-        message = "MinerU 已安装，但首次解析前仍需从配置的模型源下载模型。"
+        message = (
+            "MinerU 已安装，但首次解析前仍需从配置的模型源下载模型；"
+            f"{device_message}"
+        )
     return {
         "status": status,
         "installed": installed,
         "model_source": model_source,
+        "device": device,
+        "device_ready": device_ready,
         "model_cache_present": cache_present,
         "message": message,
     }
+
+
+def _mineru_device_health(device: str) -> tuple[bool, str]:
+    if device in {"auto", "cpu"}:
+        return True, f"推理设备配置为 {device}。"
+    try:
+        import torch
+    except ImportError:
+        return False, "无法加载 PyTorch，不能验证 MinerU 推理设备。"
+    if device == "mps":
+        available = bool(torch.backends.mps.is_available())
+        return available, (
+            "MPS 设备可用。"
+            if available
+            else "当前 PyTorch 进程无法访问 MPS，请改用 cpu 或检查 PyTorch/macOS 环境。"
+        )
+    if device.startswith("cuda:"):
+        index = int(device.split(":", 1)[1])
+        available = bool(torch.cuda.is_available()) and index < torch.cuda.device_count()
+        return available, (
+            f"CUDA 设备 {index} 可用。"
+            if available
+            else f"CUDA 设备 {index} 不可用，请检查 NVIDIA 驱动、容器 GPU 映射和设备号。"
+        )
+    return False, f"不支持的 MinerU 推理设备：{device}。"
 
 
 def process_pdf_with_mineru(

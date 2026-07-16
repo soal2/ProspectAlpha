@@ -275,6 +275,12 @@ function RealtimeStream() {
     () => mergeEvidenceFeed(evidenceFeed, liveEvents),
     [evidenceFeed, liveEvents],
   );
+  const formalEvidenceCount = liveEvidenceFeed.filter(
+    (item) => item.scoreKind === "relevance",
+  ).length;
+  const retrievalCandidateCount = liveEvidenceFeed.filter(
+    (item) => item.scoreKind === "retrieval",
+  ).length;
   const filteredLiveEvidence = liveEvidenceFeed.filter((item) =>
     `${item.source} ${item.title} ${item.id} ${item.snippet ?? ""}`
       .toLowerCase()
@@ -353,7 +359,8 @@ function RealtimeStream() {
             </span>
           )}
           <span className="inline-flex items-center gap-1">
-            <FileText className="size-3.5" /> {liveEvidenceFeed.length} 条证据
+            <FileText className="size-3.5" /> {formalEvidenceCount} 条正式证据 ·{" "}
+            {retrievalCandidateCount} 条检索候选
           </span>
           <span className="inline-flex items-center gap-1">
             <Users className="size-3.5" /> {activeAgentCount || visibleAgents.length} 位专家
@@ -532,7 +539,7 @@ function RealtimeStream() {
         <aside className="overflow-y-auto border-l border-border bg-card/50 px-5 py-6 max-lg:hidden">
           <div className="flex items-center justify-between text-xs font-medium">
             <span className="flex items-center gap-2">
-              <Database className="size-3.5 text-primary" /> 证据库（实时）
+              <Database className="size-3.5 text-primary" /> 原文与证据（实时）
             </span>
             <span className="tabular text-muted-foreground">{filteredLiveEvidence.length}</span>
           </div>

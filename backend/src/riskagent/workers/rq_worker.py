@@ -20,9 +20,16 @@ def make_worker():
     from rq import Queue, Worker
 
     connection = redis_connection()
-    queue_name = os.getenv("ANALYSIS_QUEUE_NAME", "analysis")
-    queue = Queue(queue_name, connection=connection)
-    return Worker([queue], connection=connection)
+    queue_names = list(
+        dict.fromkeys(
+            [
+                os.getenv("ANALYSIS_QUEUE_NAME", "analysis"),
+                os.getenv("DOCUMENT_QUEUE_NAME", "documents"),
+            ]
+        )
+    )
+    queues = [Queue(queue_name, connection=connection) for queue_name in queue_names]
+    return Worker(queues, connection=connection)
 
 
 def main() -> None:

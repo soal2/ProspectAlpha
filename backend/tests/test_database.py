@@ -73,4 +73,7 @@ def test_existing_prospectus_table_gets_processing_diagnostic_columns(tmp_path):
         "processing_error_code",
         "processing_error_message",
         "processing_attempts",
+        "processing_started_at",
+        "processing_heartbeat_at",
+        "processing_finished_at",
     } <= columns

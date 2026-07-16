@@ -113,7 +113,9 @@ class DocumentAsset(BaseModel):
     page_count: int
     text_chars: int
     block_count: int
-    processing_status: Literal["uploaded", "queued", "processing", "ready", "failed"] = "ready"
+    processing_status: Literal[
+        "uploaded", "queued", "processing", "ready", "failed", "interrupted"
+    ] = "ready"
     processing_error_code: str | None = None
     processing_error_message: str | None = None
     processing_attempts: int = 0
@@ -694,7 +696,78 @@ def queue_registered_prospectus(document_id: str) -> None:
         row.status = "queued"
         row.processing_error_code = None
         row.processing_error_message = None
+        row.processing_heartbeat_at = None
+        row.processing_finished_at = None
         session.commit()
+
+
+def mark_prospectus_interrupted(
+    document_id: str,
+    *,
+    message: str = "上一次 MinerU 解析进程意外中断，原始 PDF 已保存，可直接重新解析。",
+) -> None:
+    """Make an abandoned parse visible and recoverable without deleting its PDF."""
+
+    _set_prospectus_status(
+        document_id,
+        "interrupted",
+        error_code="processing_interrupted",
+        error_message=message,
+    )
+
+
+def recover_interrupted_prospectus_jobs() -> list[str]:
+    """Recover legacy processing rows left behind by a terminated API/OCR process."""
+
+    recovered: list[str] = []
+    now = datetime.now(timezone.utc)
+    stale_seconds = max(30, int(os.getenv("DOCUMENT_PARSING_STALE_SECONDS", "120")))
+    with SessionLocal() as session:
+        rows = session.scalars(
+            select(ProspectusDocumentRow).where(
+                ProspectusDocumentRow.status == "processing"
+            )
+        ).all()
+        for row in rows:
+            last_seen_at = row.processing_heartbeat_at or row.processing_started_at
+            if last_seen_at is not None and getattr(last_seen_at, "tzinfo", None) is None:
+                last_seen_at = last_seen_at.replace(tzinfo=timezone.utc)
+            if last_seen_at is not None and (now - last_seen_at).total_seconds() < stale_seconds:
+                continue
+            row.status = "interrupted"
+            row.processing_error_code = "processing_interrupted"
+            row.processing_error_message = (
+                "上一次 MinerU 解析进程意外中断，原始 PDF 已保存，可直接重新解析。"
+            )
+            row.processing_heartbeat_at = None
+            row.processing_finished_at = now
+            recovered.append(row.document_id)
+        legacy_failed_rows = session.scalars(
+            select(ProspectusDocumentRow).where(
+                ProspectusDocumentRow.status == "failed",
+                ProspectusDocumentRow.processing_error_message.is_(None),
+            )
+        ).all()
+        for row in legacy_failed_rows:
+            row.processing_error_code = (
+                row.processing_error_code or "legacy_parser_failed"
+            )
+            row.processing_error_message = (
+                "历史 MinerU 解析任务失败但未保存原始异常；PDF 仍已保留，"
+                "可点击重新解析以获取新的详细诊断。"
+            )
+        session.commit()
+    return recovered
+
+
+def touch_prospectus_processing(document_id: str) -> None:
+    """Renew the parse lease while the isolated MinerU process is alive."""
+
+    with SessionLocal() as session:
+        row = session.get(ProspectusDocumentRow, document_id)
+        if row is not None and row.status == "processing":
+            row.processing_heartbeat_at = datetime.now(timezone.utc)
+            session.commit()
 
 
 def _set_prospectus_status(
@@ -718,6 +791,13 @@ def _set_prospectus_status(
                 row.processing_error_message = error_message
             if increment_attempt:
                 row.processing_attempts = int(row.processing_attempts or 0) + 1
+            if status == "processing":
+                row.processing_started_at = datetime.now(timezone.utc)
+                row.processing_heartbeat_at = row.processing_started_at
+                row.processing_finished_at = None
+            elif status in {"indexed", "failed", "interrupted"}:
+                row.processing_heartbeat_at = None
+                row.processing_finished_at = datetime.now(timezone.utc)
             session.commit()
 
 
@@ -886,6 +966,8 @@ def _asset_from_registered_row(
             if block_count > 0 or row.status == "indexed"
             else "failed"
             if row.status == "failed"
+            else "interrupted"
+            if row.status == "interrupted"
             else "processing"
             if row.status == "processing"
             else "queued"

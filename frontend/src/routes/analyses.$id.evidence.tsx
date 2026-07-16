@@ -28,6 +28,8 @@ function AnalysisEvidence() {
     }
     return counts;
   }, [items]);
+  const formalCount = items.filter((item) => item.scoreKind === "relevance").length;
+  const candidateCount = items.filter((item) => item.scoreKind === "retrieval").length;
 
   const filtered = useMemo(() => {
     return items.filter((item) => {
@@ -46,7 +48,7 @@ function AnalysisEvidence() {
       <aside className="overflow-y-auto border-r border-border bg-card/40 p-5">
         <h3 className="font-serif text-base font-semibold">本分析证据</h3>
         <p className="mt-1 text-xs text-muted-foreground">
-          {items.length} 条 · {sectionCounts.size} 个章节
+          {formalCount} 条正式证据 · {candidateCount} 条检索候选 · {sectionCounts.size} 个章节
         </p>
         <div className="relative mt-4">
           <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
@@ -97,7 +99,11 @@ function AnalysisEvidence() {
                 <span className="ml-auto inline-flex items-center rounded-full bg-primary/8 px-2 py-0.5 font-medium text-primary tabular">
                   {e.scoreKind === "relevance"
                     ? `证据相关性 ${e.conf.toFixed(2)}`
-                    : "旧记录 · 请重新分析"}
+                    : e.scoreKind === "retrieval"
+                      ? e.conf > 0
+                        ? `检索候选分 ${e.conf.toFixed(2)} · 未核验`
+                        : "检索候选 · 历史任务未记录分数"
+                      : "旧记录 · 请重新分析"}
                 </span>
               </div>
               <p className="mt-3 text-sm leading-relaxed">{e.snippet}</p>

@@ -1435,6 +1435,35 @@ candidate counts cannot leak into the report. If no finding is admitted, the
 system emits a deterministic `未评级（无已验证结论）` report and states that absence
 of verified evidence does not prove absence of risk.
 
+Each rule sent to expert second-pass judgment now receives a separate,
+rule-aware evidence pack containing up to four reranked source blocks. Numeric,
+ratio, and trend rules can therefore combine tables and explanatory text across
+pages instead of being decided from the first global snippet. A bounded
+rule-coverage round distributes Queries across previously unevaluated rules;
+duplicate Queries from earlier rounds are not executed again. Unresolved and
+not-evaluated rules are retained as `screening_observations`. They may appear in
+the report only as concrete retrieval coverage, evidence gaps, and manual-review
+directions; they can never be promoted to formal findings.
+
+`GET /analysis-runs/{run_id}/evidence` also reconstructs persisted top retrieval
+chunks as `retrieval_candidate` records. This keeps the evidence browser useful
+when every candidate is rejected by the formal gate. Candidate records retain
+the raw `retrieval_score`, always have zero `relevance_score`, and are labelled
+unverified by the frontend. Internal report synthesis continues to consume only
+`run.evidence`, so exposing retrieval audit records does not weaken evidence
+admission or change a report's risk conclusion.
+
+Local MinerU parsing runs in a dedicated subprocess with a database heartbeat.
+Closing the browser does not cancel parsing, and restarting the API does not
+delete the raw PDF or mistake a live child process for a failed task. A stale
+heartbeat changes `processing` to recoverable `interrupted`; retrying uses the
+saved PDF through `POST /documents/{document_id}/reparse`. Duplicate uploads
+return the existing indexed document, requeue interrupted/failed documents, and
+do not launch a second parser for an already-processing document. Concurrency,
+heartbeat, timeout, CPU threads, and device selection are environment settings.
+Apple Silicon uses `mps` with PyTorch CPU fallback for unsupported operators;
+NVIDIA deployments use `cuda` or `cuda:<index>`.
+
 The existing `ysyy.pdf` PostgreSQL index was used as a no-reparse regression
 fixture. Targeted searches kept the document boundary, rejected customer
 concentration evidence when no specific passage was retrieved, and recovered

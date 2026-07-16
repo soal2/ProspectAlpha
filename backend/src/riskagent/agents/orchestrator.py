@@ -521,6 +521,8 @@ REPORT_SYSTEM_PROMPT = (
     "不得新增输入中不存在的 finding_id 或 evidence_id；每个专家模块都必须有对应 section，即使结论是未发现重大风险。"
     "每个被引用的 finding 必须在同一 section 中附带至少一条归属于它的 evidence；没有可验证引用时不得创建跨模块风险。"
     "module summary 已经过证据门禁清洗；不得依据没有 finding_id 的模块摘要宣称存在或不存在风险。"
+    "module_results.screening_observations 是检索和二判审计记录，只能用于说明已核查范围、待核实线索和证据缺口，"
+    "不得将其改写为正式风险结论；每个模块分析应具体说明核查数量、主要缺口和下一步补证方向，避免空泛套话。"
     "overall_risk_level 必须由 verified_findings 推导；为空时只能输出未评级，不得输出低/中/高。"
     "只输出 JSON："
     '{"title":str,"executive_summary":str,"overall_risk_level":str,'

@@ -138,7 +138,7 @@ export interface EvidenceDetailItem {
   section: string;
   page: number;
   conf: number;
-  scoreKind: "relevance" | "unavailable";
+  scoreKind: "retrieval" | "relevance" | "unavailable";
   snippet: string;
   risk: string;
   documentId?: string;
@@ -171,7 +171,7 @@ export interface KnowledgeEvidence {
   section: string;
   page: number;
   conf: number;
-  scoreKind: "relevance" | "unavailable";
+  scoreKind: "retrieval" | "relevance" | "unavailable";
   snippet: string;
   risk: string;
   documentId?: string;

@@ -60,7 +60,8 @@ function EvidencePage() {
       if (
         confidence !== "全部" &&
         (item.scoreKind !== "relevance" || !matchConfidence(confidence, item.conf))
-      ) return false;
+      )
+        return false;
       if (keyword.trim()) {
         const query = keyword.trim().toLowerCase();
         const haystack = `${item.snippet} ${item.section} ${item.name} ${item.risk}`.toLowerCase();
@@ -222,7 +223,11 @@ function EvidencePage() {
                 <span className="ml-auto inline-flex items-center gap-1 rounded-full bg-primary/8 px-2 py-0.5 font-medium text-primary tabular">
                   {e.scoreKind === "relevance"
                     ? `相关性 ${e.conf.toFixed(2)}`
-                    : "旧记录 · 请重新分析"}
+                    : e.scoreKind === "retrieval"
+                      ? e.conf > 0
+                        ? `检索候选分 ${e.conf.toFixed(2)} · 未核验`
+                        : "检索候选 · 历史任务未记录分数"
+                      : "旧记录 · 请重新分析"}
                 </span>
               </div>
               <p className="mt-3 text-sm leading-relaxed text-foreground">{e.snippet}</p>

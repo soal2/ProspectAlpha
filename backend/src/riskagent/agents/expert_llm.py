@@ -27,6 +27,7 @@ async def analyze_findings_with_llm(
     agent_title: str,
     candidates: list[RuleEvaluation],
     evidence_snippets: list[str],
+    evidence_by_rule: dict[str, list[str]] | None = None,
     user_requirement: str = "",
     assignment: dict[str, Any] | None = None,
     query_history: list[str] | None = None,
@@ -47,6 +48,10 @@ async def analyze_findings_with_llm(
             "query_history": query_history or [],
             "candidates": [c.model_dump() for c in candidates],
             "evidence_snippets": [s for s in evidence_snippets if s][:20],
+            "evidence_by_rule": {
+                rule_id: [snippet for snippet in snippets if snippet][:4]
+                for rule_id, snippets in (evidence_by_rule or {}).items()
+            },
         },
         ensure_ascii=False,
     )
