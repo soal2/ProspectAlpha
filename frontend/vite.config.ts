@@ -10,10 +10,7 @@ export default defineConfig({
   tanstackStart: {
     server: { entry: "server" },
   },
-  nitro:
-    process.env.GITHUB_PAGES_DEPLOY === "true"
-      ? { preset: "node-server" }
-      : undefined,
+  nitro: process.env.GITHUB_PAGES_DEPLOY === "true" ? { preset: "node-server" } : undefined,
   vite: {
     base: process.env.GITHUB_PAGES_DEPLOY === "true" ? "/ProspectAlpha/" : "/",
     resolve: { dedupe: ["react", "react-dom"] },
