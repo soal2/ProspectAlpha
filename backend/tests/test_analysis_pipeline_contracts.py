@@ -110,6 +110,9 @@ def test_analysis_api_exposes_minimal_pipeline_resources(
             "text_chars",
             "block_count",
             "processing_status",
+            "processing_attempts",
+            "processing_error_code",
+            "processing_error_message",
             "source_url",
         "created_at",
     }
@@ -176,6 +179,7 @@ def test_analysis_api_exposes_minimal_pipeline_resources(
     report = client.get(f"/analysis-runs/{run_id}/report").json()
     assert report["review_status"] in {"draft", "needs_human_review"}
     assert "IPO 风险分析草案" in report["markdown"]
+    client.close()
 
 
 def test_pdf_upload_drives_analysis_with_page_and_bbox_evidence(
@@ -249,6 +253,7 @@ def test_pdf_upload_drives_analysis_with_page_and_bbox_evidence(
     legacy_progress = client.get(f"/analysis-runs/{run_id}/progress").json()
     assert legacy_progress["pdf"]["status"] == "completed"
     assert legacy_progress["pdf"]["parsed_pages"] == 1
+    client.close()
 
 
 def test_database_persistence_covers_document_run_and_evidence(

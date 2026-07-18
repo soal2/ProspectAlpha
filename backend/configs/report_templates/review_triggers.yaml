@@ -1,0 +1,63 @@
+# V2 报告人工复核触发规则
+#
+# 7 条规则，按 trigger_name 索引；任一命中即将 bundle.review_required 置为 true
+# 并在 review_triggers 字段记录原因。规则参数故意保持简单：本阶段只识别
+# 已在 ResearchArtifact/SelectionSummary/RedTeamVerdict 中暴露的可观测信号。
+
+triggers:
+  - trigger_name: external_research_incomplete
+    description: 外部研究未完成（policy 强制 public_only 仍失败）
+    when:
+      artifact_completion_status:
+        - external_research_incomplete
+        - failed
+
+  - trigger_name: red_team_escalate_human
+    description: 红队裁决升级到人工复核
+    when:
+      verdict_decision:
+        - escalate_human
+
+  - trigger_name: high_importance_low_confidence
+    description: 高重要性假设但置信度非高
+    when:
+      hypothesis_importance:
+        - high
+      confidence_level_not:
+        - high
+
+  - trigger_name: authority_source_conflict
+    description: 权威来源之间互相冲突（同维度多 verified 假设互为反证）
+    when:
+      cross_dimension_conflict: true
+
+  - trigger_name: material_negative_allegation
+    description: 重大负面指控（关键词命中）
+    when:
+      hypothesis_title_keywords_any:
+        - 财务造假
+        - 欺诈
+        - 立案调查
+        - 行政处罚
+        - 退市
+        - 暂停上市
+        - 控股股东占用
+        - 重大诉讼
+
+  - trigger_name: listing_qualification_risk
+    description: 上市资格风险（关键词命中）
+    when:
+      hypothesis_title_keywords_any:
+        - 上市资格
+        - 持续经营
+        - 净资产为负
+        - 重大违规
+        - 强制退市
+
+  - trigger_name: verdict_status_conflict
+    description: 同一假设的裁决与状态机状态冲突
+    when:
+      verdict_decision:
+        - material_unresolved
+      hypothesis_status:
+        - verified

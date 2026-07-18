@@ -185,6 +185,37 @@ def test_legacy_retrieval_chunk_ids_are_backfilled_from_postgres(
     assert candidates[0].verifier_status == "retrieval_candidate"
 
 
+def test_evidence_keeps_persisted_records_when_legacy_rag_recovery_fails(
+    tmp_path, monkeypatch, analysis_repo_factory
+):
+    repo = _repository(tmp_path, analysis_repo_factory)
+    repo.use_database = True
+    run = _run_with_findings(repo)
+    run.events = [
+        {
+            "event_type": "retrieval_query_completed",
+            "payload": {"chunk_ids": ["doc_legacy_chunk_000007"]},
+        }
+    ]
+    repo._save_run(run)
+
+    class MissingRagIndexer:
+        def __init__(self, ensure=False):
+            assert ensure is False
+
+        def list_document_chunks(self, _document_id):
+            raise RuntimeError("rag.prospectus_chunks is unavailable")
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(analysis_runs_module, "PostgresChunkIndexer", MissingRagIndexer)
+
+    evidence = repo.evidence(run.run_id)
+
+    assert [item.evidence_id for item in evidence] == ["ev-f1", "ev-f2"]
+
+
 def _debate_result(
     *,
     revisions: list[dict[str, Any]] | None = None,
@@ -285,6 +316,9 @@ def test_legacy_rejected_evidence_is_recovered_only_from_real_chunks(
     )
 
     class FakeIndexer:
+        def __init__(self, ensure=False):
+            assert ensure is False
+
         def list_document_chunks(self, document_id):
             assert document_id == "doc-real"
             return [chunk]

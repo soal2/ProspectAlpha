@@ -1,5 +1,6 @@
 from sqlalchemy import Integer, String, inspect, select, text
 from sqlalchemy.orm import Mapped, mapped_column, sessionmaker
+from sqlalchemy.pool import NullPool
 
 from riskagent.database import (
     Base,
@@ -25,6 +26,15 @@ def _session_factory(tmp_path):
 
 def test_check_database_connection(tmp_path):
     assert check_database_connection(_session_factory(tmp_path)) is True
+
+
+def test_supabase_transaction_pooler_uses_null_pool():
+    engine = make_engine(
+        "postgresql+psycopg://app.project:password@"
+        "aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres?sslmode=require"
+    )
+
+    assert isinstance(engine.pool, NullPool)
 
 
 def test_session_scope_commits(tmp_path):

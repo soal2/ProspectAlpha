@@ -9,6 +9,7 @@ import { defineConfig } from "@lovable.dev/vite-tanstack-config";
 export default defineConfig({
   tanstackStart: {
     server: { entry: "server" },
+    vite: { installDevServerMiddleware: true },
   },
   nitro:
     process.env.GITHUB_PAGES_DEPLOY === "true"

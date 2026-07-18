@@ -17,7 +17,7 @@ from riskagent.analysis_runs import (
 )
 from riskagent.risk_rules import RiskRuleRepository
 
-from conftest import deterministic_report_provider
+from tests.conftest import deterministic_report_provider
 
 
 def _rule_repository() -> RiskRuleRepository:

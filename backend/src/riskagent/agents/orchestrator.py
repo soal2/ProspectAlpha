@@ -290,11 +290,19 @@ def _normalize_strategy_decision(
     payload["assignments"] = [
         {
             **dict(item),
+            "module_id": _normalize_module_id(str(item.get("module_id", ""))),
             "agent_name": _resolve_agent_name(str(item.get("agent_name", "")).strip(), roster),
         }
         for item in payload.get("assignments", [])
     ]
     return StrategyDecision.model_validate(payload)
+
+
+def _normalize_module_id(value: str) -> str:
+    """Normalize common LLM punctuation while retaining the strict ID contract."""
+    value = value.strip().replace("&", "_and_")
+    value = re.sub(r"[^a-zA-Z0-9_-]+", "_", value)
+    return re.sub(r"_+", "_", value).strip("_-")
 
 
 def _capability_match_score(

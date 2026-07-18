@@ -215,6 +215,72 @@ type BackendReport = {
   created_at: string;
 };
 
+export type ReportModuleKind = "decision_brief" | "deep_research";
+
+export interface V2ReportComponent {
+  kind:
+    | "risk_profile_heatmap"
+    | "risk_matrix"
+    | "risk_card"
+    | "financial_trend"
+    | "pipeline_chart"
+    | "peer_comparison"
+    | "event_timeline"
+    | "risk_causal_graph"
+    | "hypothesis_matrix"
+    | "source_quality"
+    | "research_coverage";
+  dataset_key: string;
+  lineage: string[];
+  payload: Record<string, unknown>;
+}
+
+export interface V2ReportSection {
+  section_id: string;
+  title_zh: string;
+  markdown: string;
+  component_anchors: string[];
+  referenced_evidence_ids: string[];
+  referenced_hypothesis_ids: string[];
+  referenced_finding_ids: string[];
+  non_formal: boolean;
+}
+
+export interface V2ReportModule {
+  module_kind: ReportModuleKind;
+  template: { template_id: string; version: number; content_sha256: string };
+  sections: V2ReportSection[];
+  components: V2ReportComponent[];
+  degradations: { code: string; message_zh: string; section_id?: string | null }[];
+  markdown: string;
+  hypothesis_ids_visible: string[];
+  finding_ids_visible: string[];
+}
+
+export interface V2ReportBundle {
+  run_id: string;
+  report_version: number;
+  research_artifact_id: string;
+  research_artifact_version: number;
+  industry_profile: { detected: "general" | "biotech"; detection_reason: string };
+  decision_brief: V2ReportModule;
+  deep_research: V2ReportModule;
+  selection: {
+    verified_hypothesis_ids: string[];
+    material_unresolved_hypothesis_ids: string[];
+    contested_hypothesis_ids: string[];
+    partially_supported_hypothesis_ids: string[];
+    refuted_hypothesis_ids: string[];
+    inconclusive_hypothesis_ids: string[];
+    rule_finding_ids: string[];
+  };
+  review_state: "draft" | "auto_completed" | "review_required" | "human_revised";
+  review_triggers: { trigger_name: string; detail: string; hypothesis_ids: string[] }[];
+  degradations: { code: string; message_zh: string; section_id?: string | null }[];
+  created_at: string;
+  frozen: boolean;
+}
+
 export type UploadedDocument = {
   document_id: string;
   filename: string;
@@ -584,14 +650,22 @@ async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
     },
   });
   if (!response.ok) {
-    throw new Error(await responseError(response));
+    throw new ApiRequestError(response.status, await responseError(response));
   }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
 
+class ApiRequestError extends Error {
+  constructor(readonly status: number, message: string) {
+    super(message);
+    this.name = "ApiRequestError";
+  }
+}
+
 function isNotFound(err: unknown) {
-  return err instanceof Error && err.message.includes("404");
+  return (err instanceof ApiRequestError && err.status === 404)
+    || (err instanceof Error && err.message.includes("404"));
 }
 
 async function fetchRiskRulesData(): Promise<RiskRulesData> {
@@ -638,6 +712,72 @@ export async function getHomepageExamples() {
 // Report
 export async function getReportData(id: string) {
   return fetchReportData(id);
+}
+
+export async function getLatestV2Report(id: string): Promise<V2ReportBundle | null> {
+  try {
+    return await apiRequest<V2ReportBundle>(`/analysis-runs/${id}/v2/reports:latest`);
+  } catch (err) {
+    if (isNotFound(err)) return null;
+    throw err;
+  }
+}
+
+export async function getV2Report(id: string, version: number) {
+  return apiRequest<V2ReportBundle>(`/analysis-runs/${id}/v2/reports/${version}`);
+}
+
+export async function getV2ReportVersions(id: string) {
+  return apiRequest<V2ReportBundle[]>(`/analysis-runs/${id}/v2/reports`);
+}
+
+export function getV2ReportExportUrl(id: string, version: number) {
+  return `${API_BASE_URL}/analysis-runs/${id}/v2/reports/${version}/export?format=markdown`;
+}
+
+export async function addV2ReportAnnotation(
+  id: string,
+  version: number,
+  payload: { target_kind: "hypothesis" | "finding" | "evidence" | "section"; target_id: string; body: string },
+) {
+  return apiRequest(`/analysis-runs/${id}/v2/reports/${version}/annotations`, {
+    method: "POST",
+    body: JSON.stringify({
+      ...payload,
+      actor: { actor_kind: "anonymous", actor_id: "" },
+      idempotency_key: crypto.randomUUID(),
+    }),
+  });
+}
+
+export async function resolveV2ReportRisk(
+  id: string,
+  version: number,
+  payload: { target_kind: "hypothesis" | "finding"; target_id: string; action: "accept" | "downgrade" | "dismiss"; reason: string },
+) {
+  return apiRequest(`/analysis-runs/${id}/v2/reports/${version}/resolutions`, {
+    method: "POST",
+    body: JSON.stringify({
+      ...payload,
+      actor: { actor_kind: "anonymous", actor_id: "" },
+      idempotency_key: crypto.randomUUID(),
+    }),
+  });
+}
+
+export async function requestV2ResearchSupplement(
+  id: string,
+  payload: { query: string; focus_hypothesis_id?: string },
+) {
+  return apiRequest(`/analysis-runs/${id}/v2/reports:supplement`, {
+    method: "POST",
+    body: JSON.stringify({
+      ...payload,
+      trigger_kind: "human_request_supplement",
+      actor: { actor_kind: "anonymous", actor_id: "" },
+      idempotency_key: crypto.randomUUID(),
+    }),
+  });
 }
 
 // Trace
@@ -1029,7 +1169,9 @@ function toAnalysisSummary(run: AnalysisRun, evidenceCountOverride?: number): An
     code: String(structured.code ?? structured.ticker ?? "IPO"),
     name: run.company_name,
     industry: String(structured.industry ?? "港股 IPO"),
-    listingDate: String(structured.listing_date ?? run.data_cutoff_date),
+    // The prospectus cover date freezes the external-research cutoff; it is
+    // not necessarily the eventual listing date.
+    listingDate: String(structured.listing_date ?? "待确认"),
     offerPrice: Number(structured.offer_price ?? 0),
     offerSize: String(structured.offer_size ?? "待确认"),
     riskLevel:

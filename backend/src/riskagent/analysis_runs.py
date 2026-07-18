@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import inspect
 import json
+import logging
 import os
 import re
 import threading
@@ -16,7 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
@@ -51,7 +52,33 @@ from riskagent.retrieval.query_planner import (
     build_rule_search_queries,
     rerank_rule_candidates,
 )
+from riskagent.research import ResearchState
+from riskagent.research.bootstrap import (
+    apply_module_research,
+    bootstrap_research_state,
+    build_research_factory,
+    freeze_module_research_stage,
+)
+from riskagent.research.config import ResearchConfig
+from riskagent.research.engine import (
+    HypothesisEngine,
+    HypothesisProposal,
+    ProposerContext,
+    SearchOperation,
+)
+from riskagent.research.models import (
+    ExternalSearchPolicy,
+    InjectedContext,
+    ResearchCompletionStatus,
+    RiskHypothesis,
+)
+from riskagent.research.redteam import RedTeamReviewer
+from riskagent.research.store import ResearchStore
+from riskagent.research.tools import ResearchToolset, ToolContext
 from riskagent.workers.analysis import dispatch_analysis_job
+
+
+logger = logging.getLogger(__name__)
 
 
 REPORT_SYSTEM_PROMPT = """你是 ProspectAlpha 风险分析报告的章节撰写者。下面是"{company_name}"招股书在某个维度的 finding 与证据。请基于这些结构化数据，用专业、严谨、可追溯的中文写一段 200-500 字的风险分析。要求：1. 直接输出 markdown 段落正文，不要写章节标题；2. 每个判断必须引用证据；3. 不要重复罗列 finding 字段名；4. 如果证据不足，明确指出；5. 只输出正文段落。"""
@@ -100,8 +127,14 @@ class AnalysisRunCreate(BaseModel):
     confirm_defaults: bool = True
     risk_rule_set_id: str | None = None
     analysis_depth: Literal["quick", "standard", "deep"] = "standard"
+    data_cutoff_date: str | None = None
     structured_data: dict[str, Any] = Field(default_factory=dict)
     max_findings: int = 30
+
+    @field_validator("data_cutoff_date")
+    @classmethod
+    def validate_data_cutoff_date(cls, value: str | None) -> str | None:
+        return date.fromisoformat(value).isoformat() if value else None
 
 
 class AnalysisRunInputPatch(BaseModel):
@@ -115,8 +148,14 @@ class AnalysisRunInputPatch(BaseModel):
     confirm_defaults: bool | None = None
     risk_rule_set_id: str | None = None
     analysis_depth: Literal["quick", "standard", "deep"] | None = None
+    data_cutoff_date: str | None = None
     structured_data: dict[str, Any] | None = None
     max_findings: int | None = None
+
+    @field_validator("data_cutoff_date")
+    @classmethod
+    def validate_data_cutoff_date(cls, value: str | None) -> str | None:
+        return date.fromisoformat(value).isoformat() if value else None
 
 
 class ExpertSelectionRequest(BaseModel):
@@ -318,6 +357,12 @@ class AnalysisRun(BaseModel):
     module_results: list[dict[str, Any]] = Field(default_factory=list)
     debate_history: dict[str, Any] = Field(default_factory=dict)
     progress: dict[str, Any] = Field(default_factory=dict)
+    # External research / autonomous risk sub-state (Phase 1).  Unlike RunEvidence
+    # (exclude=True), research evidence is durable by requirement, so this field is
+    # NOT excluded and rides the run payload through both the DB and YAML stores.
+    # Old runs that predate this field load back as None (default), which keeps the
+    # legacy payloads and analysis_repo_factory untouched.
+    research: ResearchState | None = None
     frozen_rule_snapshot: dict[str, Any] = Field(default_factory=dict, exclude=True)
     document_blocks: list[DocumentBlock] = Field(default_factory=list, exclude=True)
     findings: list[RiskFinding] = Field(default_factory=list)
@@ -354,6 +399,9 @@ class AnalysisRunRepository:
         chunk_retriever: Callable[..., list[ChunkSearchResult]] | None = None,
         agent_supervisor: AgentTeamSupervisor | None = None,
         report_provider: Callable[..., Any] | None = None,
+        *,
+        research_gateway: Any | None = None,
+        research_config: ResearchConfig | None = None,
     ) -> None:
         configured = path or os.getenv("ANALYSIS_RUNS_PATH") or DEFAULT_ANALYSIS_RUNS_PATH
         self.path = Path(configured)
@@ -391,6 +439,15 @@ class AnalysisRunRepository:
         )
         self.report_provider = report_provider or synthesize_report
         self._published_event_counts: dict[str, int] = {}
+        # External research fails soft.  An unavailable Bocha gateway still
+        # yields a frozen incomplete artifact, so reports can distinguish a
+        # blocked external investigation from research never having started.
+        self.research_config = research_config or ResearchConfig.from_env()
+        self.research_gateway = (
+            research_gateway
+            if research_gateway is not None
+            else _build_default_research_gateway(self.research_config)
+        )
 
     def create_draft(self, payload: AnalysisRunCreate) -> AnalysisRun:
         now = _now()
@@ -404,7 +461,7 @@ class AnalysisRunRepository:
             status=status,
             current_stage=status,
             created_at=now,
-            data_cutoff_date=date.today().isoformat(),
+            data_cutoff_date=payload.data_cutoff_date or date.today().isoformat(),
             rule_snapshot=_compact_rule_snapshot(rule_snapshot),
             analysis_config=_analysis_config(payload, self.agent_supervisor.agent_options()),
             frozen_rule_snapshot=rule_snapshot,
@@ -457,6 +514,7 @@ class AnalysisRunRepository:
         run.current_stage = run.status
         run.input_summary = _input_summary(patched)
         run.analysis_config = _analysis_config(patched, self.agent_supervisor.agent_options())
+        run.data_cutoff_date = patched.data_cutoff_date or date.today().isoformat()
         run.understood = _understood(patched)
         run.blocking_questions = questions
         run.events.append(_event("stage_completed", "analysis_run", "输入已更新", "已重新执行信息完整性检查。"))
@@ -637,12 +695,27 @@ class AnalysisRunRepository:
 
     def evidence(self, run_id: str) -> list[RunEvidence]:
         run = self.get(run_id)
-        primary = (
-            list(run.evidence)
-            if run.evidence
-            else self._recover_rejected_evidence(run)
-        )
-        candidates = self._recover_retrieval_candidates(run)
+        if run.evidence:
+            primary = list(run.evidence)
+        else:
+            try:
+                primary = self._recover_rejected_evidence(run)
+            except Exception as exc:  # optional legacy RAG recovery
+                logger.warning(
+                    "Skipped legacy evidence recovery for run %s: %s",
+                    run.run_id,
+                    exc,
+                )
+                primary = []
+        try:
+            candidates = self._recover_retrieval_candidates(run)
+        except Exception as exc:  # optional legacy RAG recovery
+            logger.warning(
+                "Skipped retrieval candidate recovery for run %s: %s",
+                run.run_id,
+                exc,
+            )
+            candidates = []
         seen_blocks = {
             (item.document_id, item.document_block_id) for item in primary
         }
@@ -1104,11 +1177,28 @@ class AnalysisRunRepository:
                     run.events = _merge_events(run.events, [event])
                     self._save_run(run)
 
+            research_store = self._build_research_store(run)
+            research_factory = (
+                self._build_research_factory(
+                    run,
+                    research_store,
+                    user_requirement=(
+                        payload_for_orchestra.ipo_project_hint
+                        or payload_for_orchestra.company_name
+                        or "对招股书进行风险分析"
+                    ),
+                    strategy_plan=None,
+                    pdf_context=doc_summary,
+                )
+                if research_store is not None
+                else None
+            )
             if manual_agent_names:
                 team_result = self.agent_supervisor.resume_with_selection(
                     run_id=run.run_id,
                     agent_names=manual_agent_names,
                     event_sink=_persist_team_event,
+                    research_factory=research_factory,
                 )
             else:
                 team_result = self.agent_supervisor.run(
@@ -1123,6 +1213,7 @@ class AnalysisRunRepository:
                     max_findings=_effective_max_findings(payload),
                     rule_snapshot=run.frozen_rule_snapshot,
                     event_sink=_persist_team_event,
+                    research_factory=research_factory,
                 )
             run.events = _merge_events(run.events, team_result.events)
             run.strategy_plan = team_result.strategy_plan
@@ -1130,6 +1221,7 @@ class AnalysisRunRepository:
             run.team_state = team_result.team_state
             run.replacement_history = team_result.replacement_history
             run.module_results = team_result.module_results
+            self._apply_module_research_outputs(run, research_store, team_result)
             if team_result.paused:
                 run.status = "awaiting_expert_selection"
                 run.current_stage = "expert_orchestration"
@@ -1381,6 +1473,16 @@ class AnalysisRunRepository:
                 )
             )
             self._save_run(run)
+
+            self._run_red_team_review(
+                run,
+                research_store,
+                user_requirement=(
+                    payload_for_orchestra.ipo_project_hint
+                    or payload_for_orchestra.company_name
+                    or "对招股书进行风险分析"
+                ),
+            )
 
             run = self._transition(
                 run,
@@ -2454,16 +2556,245 @@ class AnalysisRunRepository:
         self._save_run(run)
         return run
 
+    def _build_research_store(self, run: AnalysisRun) -> ResearchStore | None:
+        """Return a durable :class:`ResearchStore` bound to ``run``.
+
+        A missing external-search credential is represented inside the frozen
+        artifact as ``external_research_incomplete`` instead of suppressing
+        the entire research trail.  The store re-uses ``run.research`` when a
+        run is resumed, so no completed work is replayed.
+        """
+        state = run.research if isinstance(run.research, ResearchState) else ResearchState()
+        run.research = state
+
+        def _emit(
+            event_type: str,
+            actor: str,
+            title: str,
+            summary: str,
+            *,
+            payload: dict[str, Any] | None = None,
+            **kwargs: Any,
+        ) -> None:
+            event = _event(
+                event_type,
+                actor,
+                title,
+                summary,
+                payload=payload,
+                **kwargs,
+            )
+            event.setdefault("event_id", f"evt_{uuid.uuid4().hex}")
+            event.setdefault("created_at", _now())
+            run.events = _merge_events(run.events, [event])
+
+        def _persist() -> None:
+            self._save_run(run)
+
+        return ResearchStore(state, emit=_emit, persist=_persist)
+
+    def _build_research_factory(
+        self,
+        run: AnalysisRun,
+        store: ResearchStore,
+        *,
+        user_requirement: str,
+        strategy_plan: dict[str, Any] | None,
+        pdf_context: str = "",
+    ):
+        """Build the per-module factory handed to ``AgentTeamSupervisor.run``.
+
+        ``strategy_plan`` is ``None`` on the initial pass (the strategist
+        hasn't run yet) — :func:`bootstrap_research_state` falls back to a
+        module-id-less plan in that case and is idempotent on re-entry.
+        The LLM-backed proposer / toolset wiring is delegated to
+        :meth:`_build_research_engine` so this method stays a thin adapter.
+        """
+
+        analysis_depth = str(
+            (run.assumed_defaults or {}).get("analysis_depth") or "standard"
+        )
+        focus = str((run.understood or {}).get("focus") or "")
+        return build_research_factory(
+            run_id=run.run_id,
+            company_name=run.company_name,
+            user_requirement=user_requirement,
+            analysis_depth=analysis_depth,
+            data_cutoff_date=run.data_cutoff_date,
+            strategy_plan=strategy_plan,
+            gateway=self.research_gateway,
+            store=store,
+            config=self.research_config,
+            pdf_context=pdf_context,
+            focus=focus,
+            engine_builder=self._build_research_engine,
+            toolset_builder=self._build_research_toolset,
+        )
+
+    def _build_research_engine(
+        self,
+        *,
+        toolset_factory,
+        store: ResearchStore,
+    ) -> HypothesisEngine:
+        """Construct the hypothesis engine with a bounded LLM proposer."""
+
+        async def _llm_proposer(ctx: ProposerContext) -> list[HypothesisProposal]:
+            return await _propose_research_hypotheses(ctx)
+
+        return HypothesisEngine(
+            proposer=_llm_proposer,
+            toolset_factory=toolset_factory,
+            store=store,
+        )
+
+    def _build_research_toolset(self, ctx: ToolContext) -> ResearchToolset:
+        return ResearchToolset(
+            gateway=self.research_gateway,
+            fetcher=None,  # SafeFetcher wired in Step 9 with SSRF hardening
+            context=ctx,
+            ledger=None,  # ResearchToolset creates its own ledger if None
+        )
+
+    def _apply_module_research_outputs(
+        self,
+        run: AnalysisRun,
+        store: ResearchStore | None,
+        team_result,
+    ) -> None:
+        """Hook B — merge per-module research payloads and freeze the version.
+
+        Called after ``AgentTeamSupervisor.run`` returns.  The engine wrote
+        through ``store`` during the live run; this pass picks up any
+        ``research_outputs`` payloads the supervisor serialised, applies
+        them idempotently (dedup by transition_id / evidence_id), records
+        ``external_research_incomplete`` if any module flagged it, then
+        freezes the artifact version.  Silently no-ops when the store is
+        ``None`` (gateway-unavailable skip path).
+        """
+
+        if store is None:
+            return
+        any_incomplete = False
+        for payload in team_result.research_outputs or []:
+            apply_module_research(store=store, payload=payload)
+            if payload.get("external_incomplete"):
+                any_incomplete = True
+        done_task_ids: list[str] = []
+        if store.state.working is not None:
+            done_task_ids = [
+                task.coverage_task_id
+                for task in store.state.working.plan
+                if task.status == "done"
+            ]
+        completion = (
+            ResearchCompletionStatus.external_research_incomplete
+            if any_incomplete
+            else ResearchCompletionStatus.complete
+        )
+        freeze_module_research_stage(
+            store=store,
+            stage="expert_research",
+            completion=completion,
+            done_task_ids=done_task_ids,
+        )
+        run.research = store.state
+
+    def _run_red_team_review(
+        self,
+        run: AnalysisRun,
+        store: ResearchStore | None,
+        *,
+        user_requirement: str,
+    ) -> None:
+        """Hook C — adversarial red-team pass over engine-produced hypotheses.
+
+        Runs after :func:`_verify_findings` so the rule track has already
+        been admitted / rejected under the existing evidence standard; the
+        red-team pass only touches the research track (``store.state``).
+        Silently no-ops when ``store`` is ``None`` (gateway-unavailable
+        skip path) or when there is no working artifact to review.
+
+        The reviewer uses the ``zhou_shenyan_redteam_agent`` persona via
+        an LLM-backed callable; failures (transient network, parse error
+        on retry exhaustion) are recorded as ``escalate_human`` verdicts
+        inside the reviewer and never bubble up to ``AnalysisRun.status``
+        — see :class:`riskagent.research.redteam.RedTeamReviewer`.
+        """
+
+        if store is None:
+            return
+        if store.state.working is None:
+            return
+        reviewer = RedTeamReviewer(
+            llm_call=self._build_red_team_llm_call(run),
+            store=store,
+        )
+        injected = InjectedContext(
+            run_id=run.run_id,
+            data_cutoff_date=run.data_cutoff_date,
+            policy=self.research_config.policy,
+        )
+        outcomes = asyncio.run(
+            reviewer.review(injected=injected, user_requirement=user_requirement)
+        )
+        if outcomes:
+            done_task_ids = [
+                task.coverage_task_id
+                for task in store.state.working.plan
+                if task.status == "done"
+            ]
+            freeze_module_research_stage(
+                store=store,
+                stage="red_team_review",
+                completion=store.state.working.completion_status,
+                done_task_ids=done_task_ids,
+            )
+        run.research = store.state
+
+    def _build_red_team_llm_call(
+        self,
+        run: AnalysisRun,
+    ):
+        """Return the ``async (system, user) -> dict | None`` callable.
+
+        Wraps :class:`riskagent.providers.llm.LLMClient.chat_json` so the
+        reviewer is testable without an LLM: production wiring uses the
+        default client, tests monkey-patch this method or inject a fake.
+        Returns ``None`` on any exception so the reviewer can retry /
+        escalate without raising into the pipeline.
+        """
+
+        async def _call(system_prompt: str, user_payload: str):
+            try:
+                from riskagent.providers.llm import get_default_llm_client
+
+                client = get_default_llm_client()
+            except Exception:
+                return None
+            try:
+                return await client.chat_json(
+                    [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_payload},
+                    ],
+                    temperature=0.2,
+                )
+            except Exception:
+                return None
+
+        return _call
+
     def _save_run(self, run: AnalysisRun) -> None:
-        dumped = run.model_dump()
-        dumped["input_payload"] = _payload_from_run(run).model_dump()
+        dumped = run.model_dump(mode="json")
+        dumped["input_payload"] = _payload_from_run(run).model_dump(mode="json")
         dumped["frozen_rule_snapshot"] = run.frozen_rule_snapshot
-        dumped["evidence"] = [item.model_dump() for item in run.evidence]
-        dumped["verification_results"] = [item.model_dump() for item in run.verification_results]
-        dumped["report"] = run.report.model_dump() if run.report else None
+        dumped["evidence"] = [item.model_dump(mode="json") for item in run.evidence]
+        dumped["verification_results"] = [item.model_dump(mode="json") for item in run.verification_results]
+        dumped["report"] = run.report.model_dump(mode="json") if run.report else None
         previous_event_count = self._published_event_counts.get(run.run_id)
         if self.use_database:
-            dumped["document_blocks"] = [item.model_dump() for item in run.document_blocks]
+            dumped["document_blocks"] = [item.model_dump(mode="json") for item in run.document_blocks]
             with self.session_factory() as session:
                 row = session.get(AnalysisRunRow, run.run_id)
                 if row is None:
@@ -2502,7 +2833,7 @@ class AnalysisRunRepository:
             if existing_blocks and len(existing_blocks) == len(run.document_blocks):
                 dumped["document_blocks"] = existing_blocks
             else:
-                dumped["document_blocks"] = [item.model_dump() for item in run.document_blocks]
+                dumped["document_blocks"] = [item.model_dump(mode="json") for item in run.document_blocks]
             data[run.run_id] = dumped
             _write_yaml_atomic_unlocked(self.path, data)
         self._publish_new_events(run, previous_event_count)
@@ -3611,6 +3942,159 @@ def _resolve_provider_result(value: Any) -> Any:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _build_default_research_gateway(config: ResearchConfig):
+    """Build the default Bocha-backed research gateway from config.
+
+    Returns a gateway whose ``available()`` is False when no API key is set,
+    so the research track is transparently skipped in that case.
+    """
+    from riskagent.research.adapters import BochaAdapter
+    from riskagent.research.cache import FileQueryCache, InMemoryQueryCache
+    from riskagent.research.gateway import ResearchGateway
+
+    adapter = BochaAdapter(
+        config.bocha,
+        max_retries=config.max_retries,
+        retry_backoff_seconds=config.retry_backoff_seconds,
+    )
+    if config.cache_dir:
+        cache = FileQueryCache(config.cache_dir, ttl_seconds=config.cache_ttl_seconds)
+    else:
+        cache = InMemoryQueryCache(ttl_seconds=config.cache_ttl_seconds)
+    return ResearchGateway(adapter, cache=cache)
+
+
+async def _propose_research_hypotheses(
+    ctx: ProposerContext,
+) -> list[HypothesisProposal]:
+    """Ask the model for bounded, rule-independent investigation hypotheses.
+
+    The returned objects are only investigation leads.  They become risk
+    conclusions only after the evidence gate and red-team review.
+    """
+    coverage = [
+        {
+            "coverage_task_id": task.coverage_task_id,
+            "dimension": task.dimension,
+            "queries": [query.text for query in task.queries[:2]],
+        }
+        for task in ctx.coverage_tasks
+    ]
+    prompt = {
+        "company_name": ctx.company_name,
+        "module": ctx.module_id,
+        "assignment_goal": ctx.assignment_goal,
+        "coverage": coverage,
+        "screening_observations": list(ctx.screening_observations)[:8],
+        "pdf_context": ctx.pdf_context[:6000],
+    }
+    try:
+        raw = await get_default_llm_client().chat_json(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "你是IPO风险研究专家。基于给定的招股书上下文提出最多两项"
+                        "可证伪的外部尽调假设。假设不是结论，不能虚构事实；至少一项"
+                        "必须独立于既有规则，rule_ids 始终为空。只输出JSON："
+                        '{"hypotheses":[{"title":str,"statement":str,"dimension":str,'
+                        '"origin":"anomaly"|"gap"|"user_focus","importance":"high"|"medium"|"low",'
+                        '"anomaly_signals":[str],"causal_chain":str,"potential_impact":str,'
+                        '"investigation_plan":str,"refutation_criteria":str,"query":str,'
+                        '"refutation_query":str}]}。dimension必须来自输入coverage。'
+                    ),
+                },
+                {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
+            ],
+            temperature=0.1,
+        )
+    except Exception:
+        return _fallback_research_hypotheses(ctx)
+
+    allowed_dimensions = {item["dimension"] for item in coverage}
+    proposals: list[HypothesisProposal] = []
+    for index, item in enumerate(raw.get("hypotheses") or []):
+        if not isinstance(item, dict) or len(proposals) >= 2:
+            continue
+        title = str(item.get("title") or "").strip()
+        statement = str(item.get("statement") or "").strip()
+        query = str(item.get("query") or "").strip()
+        dimension = str(item.get("dimension") or "").strip()
+        if not title or not statement or not query or dimension not in allowed_dimensions:
+            continue
+        task = next(task for task in ctx.coverage_tasks if task.dimension == dimension)
+        origin = str(item.get("origin") or "gap")
+        if origin not in {"anomaly", "gap", "user_focus"}:
+            origin = "gap"
+        importance = str(item.get("importance") or "medium")
+        if importance not in {"high", "medium", "low"}:
+            importance = "medium"
+        hypothesis = RiskHypothesis(
+            hypothesis_id=f"hyp_{ctx.module_id}_{index + 1}",
+            title=title,
+            statement=statement,
+            anomaly_signals=[str(value) for value in item.get("anomaly_signals") or []][:6],
+            causal_chain=str(item.get("causal_chain") or "") or None,
+            potential_impact=str(item.get("potential_impact") or "") or None,
+            dimension=dimension,
+            origin=origin,
+            rule_ids=[],
+            importance=importance,
+            investigation_plan=str(item.get("investigation_plan") or "") or None,
+            refutation_criteria=str(item.get("refutation_criteria") or "") or None,
+        )
+        operations = [
+            SearchOperation(
+                query=query,
+                purpose=f"核查假设：{title}",
+                coverage_task_id=task.coverage_task_id,
+            )
+        ]
+        refutation_query = str(item.get("refutation_query") or "").strip()
+        if refutation_query:
+            operations.append(
+                SearchOperation(
+                    query=refutation_query,
+                    purpose=f"反证核查：{title}",
+                    coverage_task_id=task.coverage_task_id,
+                    refutation=True,
+                )
+            )
+        proposals.append(HypothesisProposal(hypothesis=hypothesis, operations=operations))
+    return proposals or _fallback_research_hypotheses(ctx)
+
+
+def _fallback_research_hypotheses(ctx: ProposerContext) -> list[HypothesisProposal]:
+    """Keep a blocked search auditable without manufacturing a risk conclusion."""
+    if not ctx.coverage_tasks:
+        return []
+    task = ctx.coverage_tasks[0]
+    query = task.queries[0].text if task.queries else f"{ctx.company_name} {task.dimension}"
+    hypothesis = RiskHypothesis(
+        hypothesis_id=f"hyp_{ctx.module_id}_baseline",
+        title=f"{task.dimension}外部尽调待核实",
+        statement=f"需以公开来源核实{ctx.company_name}在{task.dimension}维度的重大不利事项。",
+        dimension=task.dimension,
+        origin="baseline_plan",
+        rule_ids=[],
+        importance="medium",
+        investigation_plan="执行公开来源检索并保留支持与反证结果。",
+        refutation_criteria="权威来源未发现相关重大事项，或公司披露能够直接解释疑点。",
+    )
+    return [
+        HypothesisProposal(
+            hypothesis=hypothesis,
+            operations=[
+                SearchOperation(
+                    query=query,
+                    purpose=f"基础尽调：{task.dimension}",
+                    coverage_task_id=task.coverage_task_id,
+                )
+            ],
+        )
+    ]
 
 
 def _path_lock(path: Path) -> threading.RLock:

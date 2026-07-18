@@ -12,7 +12,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from riskagent.a2a import build_dynamic_expert_a2a_routes
 from riskagent.agent_experts import AgentSpec, AgentSpecRepository
-from riskagent.api import agents, analysis, analysis_options, chat, documents, knowledge, risk_rules, skills
+from riskagent.api import agents, analysis, analysis_options, chat, documents, knowledge, reports_v2, risk_rules, skills
 from riskagent.env import load_dotenv
 from riskagent.seed_data import AGENT_EXPERTS, AGENT_SPECS
 
@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 LOCAL_DEVELOPMENT_ORIGIN_REGEX = (
     r"^https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0)(?::\d+)?$"
 )
+REFERENCE_CACHE_PATHS = frozenset({"/agents", "/analysis-options", "/risk-rules"})
 
 def _cors_origins() -> list[str]:
     configured = os.getenv("CORS_ALLOW_ORIGINS")
@@ -32,6 +33,12 @@ def _cors_origins() -> list[str]:
         "http://localhost:5174",
         "http://127.0.0.1:5174",
     ]
+
+
+def _is_vercel_runtime() -> bool:
+    """Whether this process runs inside a Vercel serverless function."""
+
+    return bool(os.getenv("VERCEL"))
 
 
 def create_app() -> FastAPI:
@@ -46,7 +53,17 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        max_age=86400,
     )
+
+    @app.middleware("http")
+    async def cache_reference_data(request, call_next):
+        response = await call_next(request)
+        if request.method == "GET" and request.url.path in REFERENCE_CACHE_PATHS:
+            response.headers.setdefault(
+                "Cache-Control", "public, s-maxage=300, stale-while-revalidate=600"
+            )
+        return response
 
     @app.exception_handler(SQLAlchemyError)
     async def _database_unavailable(_request, _exc: SQLAlchemyError) -> JSONResponse:
@@ -76,6 +93,18 @@ def create_app() -> FastAPI:
     def _probe_embedding_provider() -> None:
         load_dotenv()
         from riskagent.database import init_db
+
+        # Vercel Functions are stateless request handlers.  The document
+        # dispatcher, MinerU model probe, and embedding probe depend on local
+        # files, worker processes, or external model services, none of which
+        # is part of the PostgreSQL-only deployment profile.
+        if _is_vercel_runtime():
+            # Schema setup belongs to a deliberate deployment migration, not a
+            # request-path cold start. The live Supabase schema is initialized
+            # before this function is deployed.
+            logger.info("Skipped schema initialization for Vercel runtime")
+            return
+
         from riskagent.documents import recover_interrupted_prospectus_jobs
         from riskagent.parsing import mineru_runtime_health
         from riskagent.workers.documents import start_document_dispatcher
@@ -133,6 +162,7 @@ def create_app() -> FastAPI:
     app.include_router(analysis.router)
     app.include_router(knowledge.router)
     app.include_router(skills.router)
+    app.include_router(reports_v2.router)
     app.router.routes.extend(
         build_dynamic_expert_a2a_routes(
             _a2a_expert_directory,

@@ -1,0 +1,35 @@
+# 内容审查门禁
+#
+# 在两个时点 lint：
+# 1. 模板加载时（TemplateRepository.ensure_loaded）
+# 2. 人工修订/批注提交时（MutationReceipt 写入前）
+#
+# 命中即拒绝（模板加载 → T10，mutation → 422）。
+
+forbidden_terms:
+  # 投资建议类（产品定位禁止）
+  - BUY
+  - SELL
+  - 强力买入
+  - 买入
+  - 卖出
+  - 减持
+  - 增持
+  - 目标价
+  - 投资评级
+  - 推荐
+
+forbidden_term_case_insensitive: true
+
+forbidden_patterns:
+  # 不透明综合分数
+  - regex: '综合风险评分\s*[:：]\s*\d+'
+    reason: 不允许使用不透明的综合风险分数
+  - regex: 'risk_score\s*[:：]\s*\d+(\.\d+)?'
+    reason: 不允许使用不透明的综合风险分数
+
+require_pairing:
+  # 正反证成对要求：supporting 与 counter 必须成对出现
+  # 命中 supporting 而缺 counter 时 → R5（在 service 层校验，本配置仅为文档化）
+  description: >-
+    重大风险假设在深度报告中引用时必须同时呈现反证检索结果。

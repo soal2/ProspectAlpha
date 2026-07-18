@@ -85,6 +85,15 @@ def test_strategy_rejects_unknown_or_internally_inconsistent_agents():
         orchestrator.validate_strategy_decision(extra, ROSTER)
 
 
+def test_strategy_normalizes_business_module_id_punctuation():
+    raw = _plan()
+    raw["assignments"][0]["module_id"] = "R&D_Pipeline_001"
+
+    result = orchestrator.validate_strategy_decision(raw, ROSTER)
+
+    assert result.assignments[0].module_id == "R_and_D_Pipeline_001"
+
+
 def test_manual_strategy_uses_agent_card_capabilities():
     result = orchestrator.manual_strategy_decision(
         agent_names=["legal_agent"],

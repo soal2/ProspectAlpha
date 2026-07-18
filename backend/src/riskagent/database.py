@@ -9,6 +9,7 @@ from pathlib import Path
 
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+from sqlalchemy.pool import NullPool
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
@@ -29,8 +30,20 @@ def get_database_url() -> str:
 
 def make_engine(database_url: str | None = None):
     url = database_url or get_database_url()
-    connect_args = {"check_same_thread": False} if url.startswith("sqlite") else {}
-    return create_engine(url, connect_args=connect_args, future=True)
+    if url.startswith("sqlite"):
+        return create_engine(
+            url,
+            connect_args={"check_same_thread": False},
+            future=True,
+        )
+    if "pooler.supabase.com" in url:
+        return create_engine(
+            url,
+            connect_args={"prepare_threshold": None},
+            poolclass=NullPool,
+            future=True,
+        )
+    return create_engine(url, future=True)
 
 
 def session_factory_from_url(database_url: str) -> sessionmaker:

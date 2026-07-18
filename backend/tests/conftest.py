@@ -1,15 +1,22 @@
 from __future__ import annotations
 
+import json
+import socket
 from itertools import count
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
+import httpx
 import pytest
+from pydantic import SecretStr
 
 from riskagent.agent_experts import AgentSpec
 from riskagent.agents.orchestrator import StrategyDecision
 from riskagent.agents.supervisor import AgentTeamSupervisor
 from riskagent.analysis_runs import AnalysisRunRepository
+from riskagent.research.adapters import BochaAdapter
+from riskagent.research.config import BochaConfig, ResearchConfig
+from riskagent.research.ssrf import SafeFetcher
 from riskagent.retrieval import ChunkSearchResult
 from riskagent.risk_rules import RiskRuleRepository
 
@@ -203,3 +210,158 @@ def analysis_repo_factory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         )
 
     return build
+
+
+# ---------------------------------------------------------------------------
+# Research fixtures (mock HTTP only — no real Bocha calls, no network).
+# These live in the top-level conftest (rather than tests/research/conftest.py)
+# so there is exactly one importable ``conftest`` module: existing tests do
+# ``from conftest import ...`` and a second same-named conftest would shadow it.
+
+TEST_BOCHA_KEY = "test-secret-key-bocha-12345"
+
+BOCHA_OK_PAYLOAD = {
+    "code": 200,
+    "log_id": "test-log-id",
+    "msg": None,
+    "data": {
+        "webPages": {
+            "value": [
+                {
+                    "id": "https://api.bochaai.com/#WebPages.0",
+                    "name": "联交所披露易:发行人监管公告",
+                    "url": "https://www.hkexnews.hk/listedco/doc001.htm",
+                    "siteName": "披露易",
+                    "siteIcon": "https://www.hkexnews.hk/favicon.ico",
+                    "snippet": "发行人于2025年11月刊发的监管公告摘要。",
+                    "summary": "发行人监管公告全文摘要,包含诉讼进展。",
+                    "datePublished": "2025-11-03T08:00:00+08:00",
+                },
+                {
+                    "id": "https://api.bochaai.com/#WebPages.1",
+                    "name": "财新:某公司境外诉讼报道",
+                    "url": "https://www.caixin.com/2025/article.html",
+                    "siteName": "财新网",
+                    "snippet": "据财新报道,该公司境外子公司涉诉。",
+                    "summary": "财新对诉讼事件的深度报道。",
+                    "datePublished": "2025/06/01",
+                },
+                {
+                    "id": "https://api.bochaai.com/#WebPages.2",
+                    "name": "论坛帖子:传闻讨论",
+                    "url": "https://example-forum.com/thread/1",
+                    "siteName": "某论坛",
+                    "snippet": "网友讨论传闻。",
+                    "summary": None,
+                    "datePublished": "unknown-date",
+                },
+            ]
+        }
+    },
+}
+
+
+class RecordingHandler:
+    """MockTransport handler that records every request it sees."""
+
+    def __init__(self, responder: Callable[[httpx.Request], httpx.Response]) -> None:
+        self.requests: list[httpx.Request] = []
+        self._responder = responder
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        return self._responder(request)
+
+    def body_of(self, index: int) -> dict:
+        return json.loads(self.requests[index].content.decode("utf-8"))
+
+
+@pytest.fixture
+def bocha_ok_handler() -> RecordingHandler:
+    return RecordingHandler(lambda request: httpx.Response(200, json=BOCHA_OK_PAYLOAD))
+
+
+@pytest.fixture
+def bocha_error_handler() -> Callable[[int], RecordingHandler]:
+    def factory(status: int) -> RecordingHandler:
+        return RecordingHandler(
+            lambda request: httpx.Response(status, json={"code": status, "msg": "error"})
+        )
+
+    return factory
+
+
+@pytest.fixture
+def bocha_timeout_handler() -> RecordingHandler:
+    def raise_timeout(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectTimeout("connection timed out")
+
+    return RecordingHandler(raise_timeout)
+
+
+@pytest.fixture
+def make_bocha_adapter() -> Callable[..., BochaAdapter]:
+    def factory(
+        handler: Callable[[httpx.Request], httpx.Response],
+        *,
+        api_key: str | None = TEST_BOCHA_KEY,
+        max_retries: int = 2,
+    ) -> BochaAdapter:
+        config = BochaConfig(api_key=SecretStr(api_key) if api_key else None)
+        return BochaAdapter(
+            config,
+            transport=httpx.MockTransport(handler),
+            max_retries=max_retries,
+            retry_backoff_seconds=0.0,
+        )
+
+    return factory
+
+
+PUBLIC_TEST_IP = "93.184.216.34"
+
+
+@pytest.fixture
+def make_safe_fetcher() -> Callable[..., tuple[SafeFetcher, RecordingHandler]]:
+    """Build a SafeFetcher wired to a MockTransport route table and fake DNS.
+
+    ``routes`` maps exact URL strings to an ``httpx.Response`` or a callable.
+    Unrouted robots.txt URLs return 404 (crawl allowed).  ``dns`` maps
+    hostnames to IP lists; ``None`` means resolution failure; unknown hosts
+    resolve to a public IP so tests only list the interesting cases.
+    """
+
+    def factory(
+        routes: dict[str, object] | None = None,
+        *,
+        dns: dict[str, list[str] | None] | None = None,
+        **config_overrides: object,
+    ) -> tuple[SafeFetcher, RecordingHandler]:
+        route_table = routes or {}
+        dns_map = dns or {}
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            entry = route_table.get(str(request.url))
+            if entry is None:
+                return httpx.Response(404, text="not found")
+            if callable(entry):
+                return entry(request)
+            return entry
+
+        handler = RecordingHandler(respond)
+
+        async def resolver(host: str) -> list[str]:
+            if host in dns_map:
+                value = dns_map[host]
+                if value is None:
+                    raise socket.gaierror(socket.EAI_NONAME, "name not known")
+                return list(value)
+            return [PUBLIC_TEST_IP]
+
+        config = ResearchConfig(**config_overrides)
+        fetcher = SafeFetcher(
+            config, transport=httpx.MockTransport(handler), resolver=resolver
+        )
+        return fetcher, handler
+
+    return factory

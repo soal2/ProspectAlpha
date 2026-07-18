@@ -46,6 +46,7 @@ from riskagent.retrieval.query_planner import (
     rerank_rule_candidates,
 )
 from riskagent.runtime_events import LiveLLMCall
+from riskagent.research import ExpertResearchContext, ResearchFactory
 from riskagent.risk_rules import RiskRule, RiskRuleRepository
 from riskagent.seed_data import AGENT_EXPERTS, AGENT_NAME_ALIASES, AGENT_SPECS
 from riskagent.skills.risk_extract import RuleEvaluation, evaluate_text_against_rules
@@ -105,6 +106,7 @@ class ExpertTaskOutput(BaseModel):
 
     evaluations: list[RuleEvaluation]
     module_result: ExpertModuleResult
+    research: dict[str, Any] | None = None
 
 
 @dataclass
@@ -117,6 +119,7 @@ class AgentTeamResult:
     module_results: list[dict[str, Any]] = field(default_factory=list)
     team_state: list[dict[str, Any]] = field(default_factory=list)
     replacement_history: list[dict[str, Any]] = field(default_factory=list)
+    research_outputs: list[dict[str, Any]] = field(default_factory=list)
     paused: bool = False
     interrupt_reason: str | None = None
 
@@ -145,6 +148,7 @@ class AgentState(TypedDict, total=False):
     replacement_history: list[dict[str, Any]]
     excluded_agents: list[str]
     recovery_mode: bool
+    research_outputs: list[dict[str, Any]]
 
 
 class AgentTeamSupervisor:
@@ -159,6 +163,7 @@ class AgentTeamSupervisor:
         chunk_retriever: ChunkRetriever | None = None,
         checkpointer: Any | None = None,
         runtime_root: Path | str | None = None,
+        research_factory: ResearchFactory | None = None,
     ) -> None:
         self.repository = repository
         self.agent_spec_repository = agent_spec_repository or AgentSpecRepository()
@@ -170,6 +175,8 @@ class AgentTeamSupervisor:
         self._runtime_events: dict[str, list[dict[str, Any]]] = {}
         self._runtime_events_lock = threading.Lock()
         self._event_sinks: dict[str, Callable[[dict[str, Any]], None]] = {}
+        self._research_factory_default = research_factory
+        self._research_factories: dict[str, ResearchFactory] = {}
         self._checkpointer = checkpointer
         self._graph: Any | None = None
         self._graph_lock = threading.Lock()
@@ -197,6 +204,7 @@ class AgentTeamSupervisor:
         rule_snapshot: dict[str, Any] | None = None,
         manual_agent_names: list[str] | None = None,
         event_sink: Callable[[dict[str, Any]], None] | None = None,
+        research_factory: ResearchFactory | None = None,
     ) -> AgentTeamResult:
         initial: AgentState = {
             "run_id": run_id,
@@ -213,14 +221,17 @@ class AgentTeamSupervisor:
             "events": [],
             "module_results": [],
             "replacement_history": [],
+            "research_outputs": [],
         }
         config = {"configurable": {"thread_id": run_id}}
         self._set_event_sink(run_id, event_sink)
+        self._set_research_factory(run_id, research_factory)
         try:
             output = self.graph.invoke(initial, config)
             return self._result_from_output(output, config)
         finally:
             self._set_event_sink(run_id, None)
+            self._set_research_factory(run_id, None)
 
     def resume_with_selection(
         self,
@@ -228,9 +239,11 @@ class AgentTeamSupervisor:
         run_id: str,
         agent_names: list[str],
         event_sink: Callable[[dict[str, Any]], None] | None = None,
+        research_factory: ResearchFactory | None = None,
     ) -> AgentTeamResult:
         config = {"configurable": {"thread_id": run_id}}
         self._set_event_sink(run_id, event_sink)
+        self._set_research_factory(run_id, research_factory)
         try:
             output = self.graph.invoke(
                 Command(
@@ -242,6 +255,7 @@ class AgentTeamSupervisor:
             return self._result_from_output(output, config)
         finally:
             self._set_event_sink(run_id, None)
+            self._set_research_factory(run_id, None)
 
     def agent_options(
         self, *, runtime_states: dict[str, str] | None = None
@@ -468,11 +482,17 @@ class AgentTeamSupervisor:
         assignment_by_task: dict[str, StrategyAssignment] = {}
         result_payloads: dict[str, dict[str, Any]] = {}
         failures: list[tuple[StrategyAssignment, str]] = []
+        research_factory = self._lookup_research_factory(state["run_id"])
         try:
             started_assignments: list[StrategyAssignment] = []
             for assignment in plan.assignments:
                 resolved_agent_name = _resolve_agent_name(assignment.agent_name, specs)
                 resolved_assignment = assignment.model_copy(update={"agent_name": resolved_agent_name})
+                research_ctx = (
+                    research_factory(resolved_assignment.module_id, resolved_assignment.module)
+                    if research_factory is not None
+                    else None
+                )
                 try:
                     spec = specs[resolved_agent_name]
                     capability = spec.capability_payload()
@@ -486,6 +506,7 @@ class AgentTeamSupervisor:
                             user_requirement=state.get("user_requirement", ""),
                             rules=all_rules,
                             rule_snapshot=state["rule_snapshot"],
+                            research_ctx=research_ctx,
                         ),
                         resolved_assignment,
                     )
@@ -617,6 +638,14 @@ class AgentTeamSupervisor:
                         replacement_capability = (
                             replacement_spec.capability_payload()
                         )
+                        replacement_research_ctx = (
+                            research_factory(
+                                replacement_assignment.module_id,
+                                replacement_assignment.module,
+                            )
+                            if research_factory is not None
+                            else None
+                        )
                         replacement_handler = _validated_expert_handler(
                             self._expert_handler(
                                 run_id=state["run_id"],
@@ -627,6 +656,7 @@ class AgentTeamSupervisor:
                                 user_requirement=state.get("user_requirement", ""),
                                 rules=all_rules,
                                 rule_snapshot=state["rule_snapshot"],
+                                research_ctx=replacement_research_ctx,
                             ),
                             replacement_assignment,
                         )
@@ -708,12 +738,17 @@ class AgentTeamSupervisor:
             agent_counts: dict[str, int] = {}
             skill_rule_counts: dict[str, int] = {}
             team_state: list[dict[str, Any]] = []
+            research_outputs: list[dict[str, Any]] = []
             for module_id, payload in result_payloads.items():
                 serialized = list(payload.get("evaluations") or [])
                 evaluations.extend(serialized)
                 result = dict(payload.get("module_result") or {})
                 result.setdefault("module_id", module_id)
                 module_results.append(result)
+                research_payload = payload.get("research")
+                if isinstance(research_payload, dict):
+                    research_payload.setdefault("module_id", module_id)
+                    research_outputs.append(research_payload)
                 agent_name = str(result.get("agent_name") or "unknown")
                 agent_counts[agent_name] = sum(
                     1 for item in serialized if item.get("evaluation_result") == "triggered"
@@ -808,6 +843,7 @@ class AgentTeamSupervisor:
                 "module_results": [*existing_modules, *module_results],
                 "team_state": list(merged_team_state.values()),
                 "replacement_history": [*existing_history, *replacement_history],
+                "research_outputs": [*list(state.get("research_outputs", [])), *research_outputs],
                 "team_needs_manual": bool(unresolved),
                 "recovery_mode": False,
                 "execution_plan": {},
@@ -857,6 +893,7 @@ class AgentTeamSupervisor:
         user_requirement: str = "",
         rules: list[RiskRule],
         rule_snapshot: dict[str, Any],
+        research_ctx: ExpertResearchContext | None = None,
     ):
         def publish_llm_event(event: dict[str, Any]) -> None:
             if not run_id:
@@ -1370,6 +1407,16 @@ class AgentTeamSupervisor:
                         peer_reviews.append(review)
                 except Exception as exc:
                     peer_review_error = f"{type(exc).__name__}: {exc}"
+
+            research_payload = self._run_module_research(
+                publish_llm_event=publish_llm_event,
+                spec=spec,
+                assignment=assignment,
+                evaluations=evaluations,
+                analysis_text=analysis_text,
+                research_ctx=research_ctx,
+            )
+
             return {
                 "evaluations": [item.model_dump() for item in evaluations],
                 "module_result": {
@@ -1394,9 +1441,68 @@ class AgentTeamSupervisor:
                     "strategy_guidance": strategy_guidance,
                     "screening_observations": _screening_observations(evaluations),
                 },
+                **({"research": research_payload} if research_payload else {}),
             }
 
         return handle
+
+    def _run_module_research(
+        self,
+        *,
+        publish_llm_event: Callable[[dict[str, Any]], None],
+        spec: AgentSpec,
+        assignment: StrategyAssignment,
+        evaluations: list[RuleEvaluation],
+        analysis_text: str,
+        research_ctx: ExpertResearchContext | None,
+    ) -> dict[str, Any] | None:
+        """Invoke the research engine for this module.
+
+        Returns the engine payload as a plain dict (suitable for JSON state
+        and supervisor return), or ``None`` when research is disabled,
+        nothing is investigable, or the engine raised — research failure is
+        non-fatal and the rule track proceeds normally.  All decisions about
+        skip vs. investigate vs. fail-closed live in the engine; this wrapper
+        only threads context and records failures as runtime events so the
+        operator sees them in the audit trail.
+        """
+        if research_ctx is None:
+            return None
+        screening_observations = _screening_observations(evaluations)
+        try:
+            payload = asyncio.run(
+                research_ctx.engine.run_module(
+                    module_id=assignment.module_id,
+                    agent_name=spec.name,
+                    company_name=research_ctx.company_name,
+                    user_requirement=research_ctx.user_requirement,
+                    assignment=research_ctx.assignment,
+                    coverage_tasks=research_ctx.coverage_tasks,
+                    rule_candidates=evaluations,
+                    screening_observations=screening_observations,
+                    pdf_context=research_ctx.pdf_context or analysis_text[:8000],
+                    injected=research_ctx.injected,
+                )
+            )
+        except Exception as exc:
+            publish_llm_event(
+                _event(
+                    "research_module_failed",
+                    spec.name,
+                    f"{spec.title} 外部研究失败",
+                    f"{type(exc).__name__}: {exc}",
+                    stage_status="failed",
+                    payload={
+                        "agent_name": spec.name,
+                        "module_id": assignment.module_id,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    },
+                )
+            )
+            return None
+        if payload is None:
+            return None
+        return payload.as_payload()
 
     def _finish_node(self, state: AgentState) -> AgentState:
         evaluations = [RuleEvaluation.model_validate(item) for item in state.get("evaluations", [])]
@@ -1436,6 +1542,7 @@ class AgentTeamSupervisor:
             module_results=list(values.get("module_results", [])),
             team_state=list(values.get("team_state", [])),
             replacement_history=list(values.get("replacement_history", [])),
+            research_outputs=list(values.get("research_outputs", [])),
             paused=paused,
             interrupt_reason=interrupt_reason,
         )
@@ -1466,6 +1573,22 @@ class AgentTeamSupervisor:
                 self._event_sinks.pop(run_id, None)
             else:
                 self._event_sinks[run_id] = sink
+
+    def _set_research_factory(
+        self,
+        run_id: str,
+        factory: ResearchFactory | None,
+    ) -> None:
+        with self._runtime_events_lock:
+            if factory is None:
+                self._research_factories.pop(run_id, None)
+            else:
+                self._research_factories[run_id] = factory
+
+    def _lookup_research_factory(self, run_id: str) -> ResearchFactory | None:
+        with self._runtime_events_lock:
+            factory = self._research_factories.get(run_id)
+        return factory or self._research_factory_default
 
     def _take_runtime_events(self, run_id: str) -> list[dict[str, Any]]:
         with self._runtime_events_lock:

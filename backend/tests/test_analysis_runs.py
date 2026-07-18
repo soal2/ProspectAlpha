@@ -54,6 +54,21 @@ def test_analysis_run_uses_rule_snapshot_and_evidence(tmp_path, analysis_repo_fa
     assert any("关联交易" in finding.matched_terms for finding in run.findings)
 
 
+def test_analysis_run_freezes_explicit_data_cutoff(tmp_path, analysis_repo_factory):
+    rule_repo = RiskRuleRepository(Path(__file__).parents[1] / "configs" / "risk_rules.yaml")
+    repo = analysis_repo_factory(rule_repository=rule_repo, path=tmp_path / "runs.yaml")
+
+    run = repo.create_draft(
+        AnalysisRunCreate(
+            company_name="截止日测试",
+            document_text="招股书正文",
+            data_cutoff_date="2018-07-20",
+        )
+    )
+
+    assert run.data_cutoff_date == "2018-07-20"
+
+
 def test_analysis_api_creates_ready_run_then_start_completes(
     tmp_path, monkeypatch, analysis_repo_factory
 ):
@@ -76,6 +91,7 @@ def test_analysis_api_creates_ready_run_then_start_completes(
             "company_name": "测试 IPO",
             "document_id": "doc_test",
             "document_text": "招股书披露对赌和赎回安排，同时存在供应商集中度风险。",
+            "data_cutoff_date": "2018-07-20",
             "structured_data": {"供应商集中度": "Top5 采购占比 80%"},
         },
     )
@@ -83,6 +99,7 @@ def test_analysis_api_creates_ready_run_then_start_completes(
     assert response.status_code == 201
     payload = response.json()
     assert payload["status"] == "ready"
+    assert payload["data_cutoff_date"] == "2018-07-20"
     assert payload["rule_snapshot"]["totals"]["rule_count"] == 143
     assert payload["findings"] == []
 

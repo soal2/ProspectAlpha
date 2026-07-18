@@ -1,0 +1,107 @@
+# V2 报告中文文案
+#
+# Python 代码不含业务标题；所有面向用户的中文文案集中在本文件。
+# 修改文案不需要改代码或模板结构，只需要改本 YAML。
+
+bundle:
+  brief_title: 风险研究简报
+  deep_title: 专项深度研究报告
+  review_required_banner: 本报告包含需要人工复核的事项，结论以最终复核结果为准。
+
+sections:
+  risk_profile:
+    title: 风险全景
+    empty: 本轮未形成有效结论。
+  risks_verified:
+    title: 已验证重大风险事项
+    empty: 本轮未发现通过证据门槛的已验证重大风险事项。
+  risks_unresolved:
+    title: 重大待核实事项
+    empty: 本轮没有被裁决为"重大待核实"的事项。
+  evidence_quality:
+    title: 证据质量
+    empty: 本轮无可展示证据。
+  coverage_limits:
+    title: 覆盖与限制
+    empty: 本轮未形成有效结论。
+  company:
+    title: 公司概况
+    empty: 本轮未形成有效结论。
+  business:
+    title: 业务
+    empty: 本轮未形成有效结论。
+  financials:
+    title: 财务
+    empty: 本轮未形成有效结论。
+  governance:
+    title: 治理
+    empty: 本轮未形成有效结论。
+  regulatory:
+    title: 监管
+    empty: 本轮未形成有效结论。
+  industry:
+    title: 行业竞争
+    empty: 本轮未形成有效结论。
+  valuation:
+    title: 估值
+    empty: 本轮未形成有效结论。
+  key_personnel:
+    title: 核心人员
+    empty: 本轮未形成有效结论。
+  supply_chain:
+    title: 供应链
+    empty: 本轮未形成有效结论。
+  reputation:
+    title: 声誉
+    empty: 本轮未形成有效结论。
+  hypothesis_matrix:
+    title: 假设矩阵（非正式结论）
+    empty: 本轮无调查中假设。
+    non_formal_banner: >-
+      本章节内容不构成正式结论。列出目的是为投资决策提供完整的研究轨迹。
+  weak_sources_appendix:
+    title: 弱来源隔离区
+    empty: 本轮无弱来源线索。
+    non_formal_banner: >-
+      下列证据来自三级以下来源，仅作为调查线索保留，不得作为正式结论依据。
+  evidence_and_counter:
+    title: 证据与反证
+    empty: 本轮无证据可展示。
+  timeline:
+    title: 时间线
+    empty: 本轮无可展示事件。
+  methodology:
+    title: 方法与研究限制
+    empty: 本轮未形成有效结论。
+
+industry_fragments:
+  general: 通用行业片段
+  biotech: 生物医药片段
+
+biotech_sections:
+  bio_rd_pipeline:
+    title: 研发管线
+    empty: 本轮未形成有效结论。
+  bio_regulatory:
+    title: 监管审批进度
+    empty: 本轮未形成有效结论。
+  bio_patents:
+    title: 专利与知识产权
+    empty: 本轮未形成有效结论。
+  bio_licensing:
+    title: 授权与合作
+    empty: 本轮未形成有效结论。
+  bio_commercialization:
+    title: 商业化进展
+    empty: 本轮未形成有效结论。
+  bio_manufacturing_quality:
+    title: 生产与质量
+    empty: 本轮未形成有效结论。
+
+exclusions:
+  request_supplement_verdict: 红队裁决为"请求补充研究"，本轮不计入正式结论。
+
+review_state:
+  auto_completed: 自动完成
+  human_revised: 人工修订
+  pending_review: 等待人工复核

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from sqlalchemy import func, select
+from sqlalchemy import func, inspect, select, text
 
 from riskagent.database import init_db, session_factory_from_url
 from riskagent.models import (
@@ -43,7 +43,7 @@ def _seed_one_business_row(session_factory) -> None:
         session.commit()
 
 
-def test_reset_database_clears_business_tables_and_reseeds(tmp_path: Path) -> None:
+def test_reset_database_clears_analysis_tables_and_retains_reference_data(tmp_path: Path) -> None:
     db_url = f"sqlite:///{tmp_path}/test_reset.db"
     init_db(db_url)
     session_factory = session_factory_from_url(db_url)
@@ -56,16 +56,28 @@ def test_reset_database_clears_business_tables_and_reseeds(tmp_path: Path) -> No
     # Now pollute the business tables.
     _seed_one_business_row(session_factory)
     with session_factory() as session:
+        session.execute(text("CREATE TABLE runtime_checkpoint (checkpoint_id TEXT PRIMARY KEY)"))
+        session.execute(text("INSERT INTO runtime_checkpoint VALUES ('checkpoint-1')"))
+        session.commit()
         assert session.scalar(select(func.count()).select_from(DocumentAssetRow)) == 1
         assert session.scalar(select(func.count()).select_from(AgentExpertRow)) == len(AGENT_EXPERTS)
+
+    expected_tables = set(inspect(session_factory.kw["bind"]).get_table_names()) - {
+        "agent_experts",
+        "agent_specs",
+        "risk_rule_sets",
+        "risk_rule_dimensions",
+        "risk_rules",
+    }
 
     # Import here so init_db has run first (ensures models import cleanly).
     from scripts.reset_database import reset_database
 
     deleted = reset_database(db_url)
 
-    # All current reset-managed tables were touched.
-    assert len(deleted) == 9
+    # Every table presently in the application's schema was touched, including
+    # persistence tables that are not part of the legacy ORM module.
+    assert set(deleted) == expected_tables
     for table_name, count in deleted.items():
         assert isinstance(table_name, str)
         assert isinstance(count, int)
@@ -75,8 +87,9 @@ def test_reset_database_clears_business_tables_and_reseeds(tmp_path: Path) -> No
         assert session.scalar(select(func.count()).select_from(DocumentAssetRow)) == 0
         assert session.scalar(select(func.count()).select_from(AnalysisRunRow)) == 0
         assert session.scalar(select(func.count()).select_from(EvidenceLibraryRow)) == 0
+        assert session.scalar(text("SELECT count(*) FROM runtime_checkpoint")) == 0
 
-    # Reference tables must be re-populated to the seed constants' length.
+    # Reference tables must stay intact, not be deleted and recreated.
     with session_factory() as session:
         assert session.scalar(select(func.count()).select_from(AgentExpertRow)) == len(AGENT_EXPERTS)
         assert session.scalar(select(func.count()).select_from(AgentSpecRow)) == len(AGENT_SPECS)
@@ -84,17 +97,20 @@ def test_reset_database_clears_business_tables_and_reseeds(tmp_path: Path) -> No
 
 
 def test_reset_database_is_idempotent(tmp_path: Path) -> None:
-    """Calling reset twice should not crash or duplicate reference rows."""
+    """Calling reset twice should not crash or alter reference rows."""
     db_url = f"sqlite:///{tmp_path}/test_reset_idempotent.db"
     init_db(db_url)
     session_factory = session_factory_from_url(db_url)
+    from riskagent.seed_data import seed_reference_data
+
+    seed_reference_data(session_factory)
 
     from scripts.reset_database import reset_database
 
     reset_database(db_url)
     deleted_again = reset_database(db_url)
 
-    assert len(deleted_again) == 9
+    assert deleted_again
     with session_factory() as session:
         assert session.scalar(select(func.count()).select_from(AgentExpertRow)) == len(AGENT_EXPERTS)
         assert session.scalar(select(func.count()).select_from(AgentSpecRow)) == len(AGENT_SPECS)

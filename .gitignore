@@ -7,6 +7,10 @@ Desktop.ini
 # Data directories
 backend/data/
 @backend/data/
+backend/docs/
+@backend/docs/
+doc/
+data/
 
 # Local environment
 .env

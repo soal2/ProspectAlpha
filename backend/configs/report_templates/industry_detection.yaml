@@ -1,0 +1,37 @@
+# 行业片段选择
+#
+# 按公司名/业务描述/证据关键词匹配行业片段。本阶段只支持 general + biotech。
+# 命中失败时回退到 general 并在 IndustryProfile.detection_note 中记录原因。
+
+industries:
+  - id: biotech
+    fragment_template_id: fragment_biotech
+    description: 生物医药
+    keywords:
+      - 生物制药
+      - 生物医药
+      - 创新药
+      - 临床试验
+      - NMPA药品审评
+      - 药品注册
+      - IND
+      - NDA
+      - BLA
+      - GMP认证
+      - CMC
+      - 单克隆抗体
+      - mRNA
+      - 疫苗
+      - 生物制品
+    business_segments:
+      - Pharmaceutical
+      - Biotechnology
+      - Biotech
+      - 生物制品
+
+  - id: general
+    fragment_template_id: fragment_general
+    description: 通用
+    keywords: []
+    business_segments: []
+    is_default: true
