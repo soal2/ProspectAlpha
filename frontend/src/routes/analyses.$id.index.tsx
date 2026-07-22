@@ -42,6 +42,7 @@ import {
 } from "@/components/ui/alert-dialog";
 
 export const Route = createFileRoute("/analyses/$id/")({
+  shouldReload: true,
   loader: async ({ params }) => {
     const [agentsList, run, trace, feed] = await Promise.all([
       getAgents(),
