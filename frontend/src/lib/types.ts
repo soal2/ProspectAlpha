@@ -9,7 +9,6 @@ export interface AnalysisSummary {
   offerPrice: number;
   offerSize: string;
   riskLevel: RiskLevel;
-  riskScore: number;
   evidenceCount: number;
   highConfidence: number;
   mode: "quick" | "deep" | "expert";
@@ -28,6 +27,7 @@ export interface Agent {
   avgTokens: number;
   avatar: string;
   accent: string;
+  runtimeName?: string;
 }
 
 export interface BacktestSummary {

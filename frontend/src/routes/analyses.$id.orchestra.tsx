@@ -1,5 +1,5 @@
 import { createFileRoute, getRouteApi, useNavigate } from "@tanstack/react-router";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
   ArrowRight,
@@ -30,6 +30,16 @@ import {
   type StrategyPlan,
 } from "@/lib/data-service";
 import type { Agent } from "@/lib/types";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 
 export const Route = createFileRoute("/analyses/$id/orchestra")({
   loader: async ({ params }) => {
@@ -64,6 +74,8 @@ function OrchestraPage() {
   const [selectedAgents, setSelectedAgents] = useState<string[]>([]);
   const [resuming, setResuming] = useState(false);
   const [resumeError, setResumeError] = useState<string | null>(null);
+  const [reportReadyOpen, setReportReadyOpen] = useState(false);
+  const completionPromptShownRef = useRef(initialRun.status === "completed");
 
   const plan = useMemo(() => strategyPlanForRun(run), [run]);
   const teamState = run.team_state ?? [];
@@ -75,6 +87,10 @@ function OrchestraPage() {
   const pendingModuleCount = plan
     ? plan.assignments.filter((assignment) => !completedModuleIds.has(assignment.module_id)).length
     : undefined;
+  const reportEvents = useMemo(
+    () => events.filter((event) => event.event_type === "agent_reported"),
+    [events],
+  );
 
   useEffect(() => {
     if (TERMINAL.has(run.status) || PAUSED.has(run.status)) return;
@@ -114,6 +130,12 @@ function OrchestraPage() {
     }, 1500);
     return () => clearInterval(timer);
   }, [id, run.status]);
+
+  useEffect(() => {
+    if (run.status !== "completed" || completionPromptShownRef.current) return;
+    completionPromptShownRef.current = true;
+    setReportReadyOpen(true);
+  }, [run.status]);
 
   async function resumeWithExperts() {
     if (!selectedAgents.length) return;
@@ -158,7 +180,7 @@ function OrchestraPage() {
               <span
                 className={`size-1.5 rounded-full bg-primary ${TERMINAL.has(run.status) ? "" : "animate-pulse"}`}
               />
-              {TERMINAL.has(run.status) ? "已结束" : "A2A 实时同步中"}
+              {TERMINAL.has(run.status) ? "已结束" : "分析进行中"}
             </span>
           )}
           <span className="rounded bg-muted px-1.5 py-0.5 tabular">
@@ -166,7 +188,7 @@ function OrchestraPage() {
           </span>
           {run.status === "completed" ? (
             <button
-              onClick={() => navigate({ to: "/analyses/$id", params: { id } })}
+              onClick={() => navigate({ to: "/analyses/$id/report", params: { id } })}
               className="inline-flex items-center gap-1 rounded-full bg-primary px-3 py-1 text-primary-foreground hover:bg-primary/90"
             >
               查看报告 <ArrowRight className="size-3" />
@@ -291,29 +313,18 @@ function OrchestraPage() {
             runStatus={run.status}
             failedStage={run.failed_stage}
           />
-          {!plan ? (
-            <div className="absolute inset-x-0 bottom-4 flex justify-center">
-              <motion.div
-                animate={{ opacity: [0.5, 1, 0.5] }}
-                transition={{ duration: 1.6, repeat: Infinity }}
-                className="inline-flex items-center gap-1.5 rounded-full bg-card px-3 py-1.5 text-[11px] text-muted-foreground shadow ring-1 ring-border"
-              >
-                <Sparkles className="size-3 text-primary" /> 等待战略层生成动态编队…
-              </motion.div>
-            </div>
-          ) : null}
         </section>
 
         <aside className="flex flex-col overflow-hidden border-l border-border bg-card/40">
           <div className="flex items-center justify-between border-b border-border px-4 py-3 text-[11px] font-medium">
             <span className="inline-flex items-center gap-1.5">
-              <FileText className="size-3.5 text-primary" /> A2A 生命周期
+              <FileText className="size-3.5 text-primary" /> 专家分析汇报
             </span>
-            <span className="text-muted-foreground tabular">{events.length}</span>
+            <span className="text-muted-foreground tabular">{reportEvents.length}</span>
           </div>
           <div className="flex-1 overflow-y-auto px-4 py-3">
             <AnimatePresence initial={false}>
-              {events.map((event, index) => (
+              {reportEvents.map((event, index) => (
                 <motion.div
                   key={`${event.created_at ?? index}-${event.event_type}-${event.actor_name}`}
                   initial={{ opacity: 0, y: 6 }}
@@ -327,7 +338,7 @@ function OrchestraPage() {
                       {kindLabel(event.event_type)}
                     </span>
                     <span className="truncate font-medium text-foreground/80">
-                      {event.actor_name}
+                      {displayNameForAgent(options, event.actor_name)}
                     </span>
                     {event.created_at ? (
                       <span className="ml-auto shrink-0 tabular">
@@ -343,19 +354,37 @@ function OrchestraPage() {
                   ) : null}
                 </motion.div>
               ))}
-              {!TERMINAL.has(run.status) && !paused ? (
+              {!reportEvents.length && !TERMINAL.has(run.status) && !paused ? (
                 <motion.div
                   animate={{ opacity: [0.4, 1, 0.4] }}
                   transition={{ duration: 1.4, repeat: Infinity }}
                   className="inline-flex items-center gap-1.5 text-[10.5px] text-muted-foreground"
                 >
-                  <span className="size-1.5 rounded-full bg-primary" /> Agent 正在监听 JSON 邮箱…
+                  <span className="size-1.5 rounded-full bg-primary" /> 等待专家提交首份分析汇报
                 </motion.div>
               ) : null}
             </AnimatePresence>
           </div>
         </aside>
       </div>
+      <AlertDialog open={reportReadyOpen} onOpenChange={setReportReadyOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>分析报告已生成</AlertDialogTitle>
+            <AlertDialogDescription>
+              {run.company_name} 的专家分析与证据校验已完成，是否现在进入报告查看页面？
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>留在当前页</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => navigate({ to: "/analyses/$id/report", params: { id } })}
+            >
+              查看报告
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
@@ -612,11 +641,19 @@ function StageStatusIcon({ status }: { status: OrchestraStageStatus }) {
 }
 
 function expertTitle(options: AnalysisOptions, agentName: string) {
-  return options.agents.find((agent) => agent.agent_name === agentName)?.title ?? agentName;
+  return displayNameForAgent(options, agentName);
+}
+
+function displayNameForAgent(options: AnalysisOptions, agentName: string) {
+  return (
+    options.agents.find((agent) => agent.agent_name === agentName)?.display_name ??
+    ({ orchestrator: "沈北辰", strategic_agent: "沈北辰" }[agentName] || agentName)
+  );
 }
 
 function kindLabel(eventType: string): string {
   const type = eventType.toLowerCase();
+  if (type === "agent_reported") return "汇报";
   if (type.includes("mailbox") || type.includes("message") || type.includes("a2a")) return "A2A";
   if (type.includes("idle") || type.includes("thread") || type.includes("shutdown"))
     return "生命周期";
@@ -644,7 +681,8 @@ function kindClass(eventType: string): string {
   if (label === "质证") return "bg-[color:var(--gold)]/20 text-[color:var(--navy)]";
   if (label === "修订") return "bg-sky-500/15 text-sky-700";
   if (label === "辩论") return "bg-[color:var(--gold)]/15 text-[color:var(--navy)]";
-  if (label === "完成" || label === "整合") return "bg-emerald-500/15 text-emerald-700";
+  if (label === "完成" || label === "整合" || label === "汇报")
+    return "bg-emerald-500/15 text-emerald-700";
   if (label === "A2A") return "bg-sky-500/12 text-sky-700";
   if (label === "生命周期") return "bg-slate-500/12 text-slate-700";
   if (label === "战略" || label === "启动") return "bg-primary/10 text-primary";

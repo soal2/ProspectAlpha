@@ -1,5 +1,5 @@
 import { createFileRoute, Link, Outlet, useRouterState, notFound } from "@tanstack/react-router";
-import { ArrowLeft, ShieldAlert, FileText, Network, Database, PlayCircle } from "lucide-react";
+import { ArrowLeft, FileText, Network, Database, PlayCircle } from "lucide-react";
 import { getAnalysis } from "@/lib/data-service";
 import { RiskBadge } from "@/components/risk-badge";
 
@@ -79,10 +79,7 @@ function AnalysisShell() {
             </p>
           </div>
           <div className="flex shrink-0 items-center gap-4">
-            <Gauge score={analysis.riskScore} level={analysis.riskLevel} />
-            <button className="inline-flex h-9 items-center gap-1.5 rounded-full bg-primary px-4 text-sm font-medium text-primary-foreground hover:bg-primary/90">
-              <ShieldAlert className="size-4" /> 触发再分析
-            </button>
+            <Rating level={analysis.riskLevel} />
           </div>
         </div>
 
@@ -107,41 +104,12 @@ function AnalysisShell() {
   );
 }
 
-function Gauge({ score, level }: { score: number; level: "high" | "mid" | "low" | "unrated" }) {
-  const color =
-    level === "high"
-      ? "var(--risk-high)"
-      : level === "mid"
-        ? "var(--risk-mid)"
-        : level === "unrated"
-          ? "var(--muted-foreground)"
-          : "var(--risk-low)";
-  const circumference = 2 * Math.PI * 26;
-  const offset = circumference - (score / 100) * circumference;
+function Rating({ level }: { level: "high" | "mid" | "low" | "unrated" }) {
+  const labels = { high: "高风险", mid: "中风险", low: "低风险", unrated: "未评级" };
   return (
-    <div className="relative grid size-16 place-items-center">
-      <svg className="-rotate-90" width={64} height={64}>
-        <circle cx={32} cy={32} r={26} stroke="var(--border)" strokeWidth={6} fill="none" />
-        <circle
-          cx={32}
-          cy={32}
-          r={26}
-          stroke={`oklch(${color})`}
-          strokeWidth={6}
-          fill="none"
-          strokeDasharray={circumference}
-          strokeDashoffset={level === "unrated" ? circumference : offset}
-          strokeLinecap="round"
-        />
-      </svg>
-      <div className="absolute text-center">
-        <div className="font-serif text-lg font-semibold leading-none tabular">
-          {level === "unrated" ? "—" : score}
-        </div>
-        <div className="text-[9px] text-muted-foreground">
-          {level === "unrated" ? "UNRATED" : "RISK"}
-        </div>
-      </div>
+    <div className="rounded-lg border border-border bg-background px-4 py-2 text-center">
+      <div className="text-[10px] uppercase tracking-wider text-muted-foreground">风险评级</div>
+      <div className="mt-0.5 font-serif text-lg font-semibold">{labels[level]}</div>
     </div>
   );
 }

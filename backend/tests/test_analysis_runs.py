@@ -231,6 +231,12 @@ def test_dynamic_domain_skills_keep_rule_counts_and_skill_ids(
     )
     assert all(item["rules_read"] > 0 for item in run.module_results)
     assert any(event["event_type"] == "peer_request_sent" for event in run.events)
+    reports = [event for event in run.events if event["event_type"] == "agent_reported"]
+    assert len(reports) == len(run.module_results)
+    assert all("汇报结论" in event["summary"] for event in reports)
+    trace = repo.trace(run.run_id)
+    assert trace.flow
+    assert all("A2A runtime state changed" not in item.text for item in trace.flow)
 
 
 def test_invalid_strategy_pauses_and_api_selection_resumes(
@@ -383,6 +389,43 @@ def test_completed_run_archives_report_into_knowledge_library(tmp_path, analysis
     with repo.session_factory() as session:
         rows = session.scalars(select(ReportLibraryRow)).all()
         assert len(rows) == 1
+
+
+def test_analysis_delete_removes_run_report_and_promoted_evidence(
+    tmp_path, monkeypatch, analysis_repo_factory
+):
+    from sqlalchemy import select
+
+    from riskagent.models import ReportLibraryRow
+
+    repo = analysis_repo_factory(
+        rule_repository=RiskRuleRepository(
+            Path(__file__).parents[1] / "configs" / "risk_rules.yaml"
+        ),
+        path=tmp_path / "runs.yaml",
+        evidence_library_path=tmp_path / "evidence.yaml",
+    )
+    run = repo.create_and_run(
+        AnalysisRunCreate(
+            company_name="待删除 IPO",
+            document_text="公司存在关联交易、赎回安排，经营活动现金流持续为负。",
+        )
+    )
+    monkeypatch.setattr("riskagent.api.analysis._repo", lambda: repo)
+    client = TestClient(create_app())
+
+    response = client.delete(f"/analysis-runs/{run.run_id}")
+
+    assert response.status_code == 204
+    assert client.get(f"/analysis-runs/{run.run_id}").status_code == 404
+    assert all(
+        item.get("source_run_id") != run.run_id
+        for item in repo._load_evidence_library()
+    )
+    with repo.session_factory() as session:
+        assert session.scalar(
+            select(ReportLibraryRow).where(ReportLibraryRow.source_run_id == run.run_id)
+        ) is None
 
 
 def test_knowledge_reports_api_lists_and_fetches_archived_reports(monkeypatch, tmp_path):

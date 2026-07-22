@@ -59,6 +59,16 @@ def get_analysis_run(run_id: str) -> AnalysisRun:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found") from exc
 
 
+@router.delete("/{run_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_analysis_run(run_id: str) -> None:
+    try:
+        _repo().delete_run(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
 @router.get("/{run_id}/progress", response_model=AnalysisProgress)
 def get_analysis_progress(run_id: str) -> AnalysisProgress:
     try:
