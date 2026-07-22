@@ -523,7 +523,10 @@ async function fetchKnowledgeData(): Promise<KnowledgeData> {
       { label: "公司", items: ["全部", ...companies] },
       { label: "招股书章节", items: ["全部", ...sections] },
       { label: "风险类别", items: ["全部", ...risks] },
-      { label: "证据相关性", items: ["全部", "≥ 0.9 高", "0.7–0.9 中", "< 0.7 低"] },
+      {
+        label: "证据相关性",
+        items: ["全部", "≥ 0.9 高", "0.7–0.9 中", "< 0.7 低", "未核验"],
+      },
     ],
     evidence,
     stats: { totalEvidence: evidence.length, totalCompanies: companies.length },

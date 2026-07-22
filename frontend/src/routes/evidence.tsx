@@ -18,13 +18,18 @@ export const Route = createFileRoute("/evidence")({
   component: EvidencePage,
 });
 
-const CONFIDENCE_BUCKETS = ["全部", "≥ 0.9 高", "0.7–0.9 中", "< 0.7 低"] as const;
+const CONFIDENCE_BUCKETS = ["全部", "≥ 0.9 高", "0.7–0.9 中", "< 0.7 低", "未核验"] as const;
 
 function matchConfidence(bucket: string, conf: number) {
   if (bucket === "≥ 0.9 高") return conf >= 0.9;
   if (bucket === "0.7–0.9 中") return conf >= 0.7 && conf < 0.9;
   if (bucket === "< 0.7 低") return conf < 0.7;
   return true;
+}
+
+function matchesConfidenceBucket(bucket: string, item: KnowledgeEvidence) {
+  if (bucket === "未核验") return item.scoreKind !== "relevance";
+  return item.scoreKind === "relevance" && matchConfidence(bucket, item.conf);
 }
 
 function EvidencePage() {
@@ -96,9 +101,7 @@ function EvidencePage() {
         counts: new Map(
           CONFIDENCE_BUCKETS.filter((bucket) => bucket !== "全部").map((bucket) => [
             bucket,
-            confidenceEvidence.filter(
-              (item) => item.scoreKind === "relevance" && matchConfidence(bucket, item.conf),
-            ).length,
+            confidenceEvidence.filter((item) => matchesConfidenceBucket(bucket, item)).length,
           ]),
         ),
         total: confidenceEvidence.length,
@@ -294,7 +297,7 @@ function filterEvidence(
     if (
       skip !== "confidence" &&
       filters.confidence !== "全部" &&
-      (item.scoreKind !== "relevance" || !matchConfidence(filters.confidence, item.conf))
+      !matchesConfidenceBucket(filters.confidence, item)
     ) {
       return false;
     }

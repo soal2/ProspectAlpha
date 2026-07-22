@@ -4,6 +4,9 @@ import { getAnalysis } from "@/lib/data-service";
 import { RiskBadge } from "@/components/risk-badge";
 
 export const Route = createFileRoute("/analyses/$id")({
+  // A running analysis mutates its rating, evidence and expert counts in place.
+  // Refresh the shared shell whenever users move between live flow and report tabs.
+  shouldReload: true,
   loader: async ({ params }) => {
     const analysis = await getAnalysis(params.id);
     if (!analysis) throw notFound();

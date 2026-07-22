@@ -306,7 +306,7 @@ function RealtimeStream() {
     (item) => item.scoreKind === "retrieval",
   ).length;
   const filteredLiveEvidence = liveEvidenceFeed.filter((item) =>
-    `${item.source} ${item.title} ${item.id} ${item.snippet ?? ""}`
+    `${displayAgentName(agentsList, item.source)} ${item.title} ${item.id} ${item.snippet ?? ""}`
       .toLowerCase()
       .includes(filter.toLowerCase()),
   );
@@ -547,7 +547,7 @@ function RealtimeStream() {
                         <span className="ml-auto text-muted-foreground tabular">+{bubble.t}</span>
                       </div>
                       <div className="mt-1 rounded-xl rounded-tl-sm border border-border bg-card px-3 py-2 text-sm leading-relaxed shadow-sm">
-                        {bubble.text}
+                        {displayAgentText(agentsList, bubble.text)}
                       </div>
                     </div>
                   </motion.div>
@@ -599,7 +599,7 @@ function RealtimeStream() {
                         : "bg-muted text-muted-foreground"
                     }`}
                   >
-                    {item.source}
+                    {displayAgentName(agentsList, item.source)}
                   </span>
                   <span className="tabular">{item.id}</span>
                   <span>{item.time}</span>
@@ -740,7 +740,7 @@ function AgentProgressCard({
       </div>
       <p className="mt-1 truncate text-muted-foreground">{agent.module || agent.latest_action}</p>
       <p className="mt-0.5 line-clamp-2 text-[10px] leading-relaxed text-muted-foreground">
-        {agent.latest_summary}
+        {displayAgentText(agents, agent.latest_summary)}
       </p>
     </div>
   );
@@ -1018,4 +1018,12 @@ function displayAgentName(agents: Agent[], actorName: string) {
       analysis_run: "分析任务",
     }[actorName] ?? actorName
   );
+}
+
+function displayAgentText(agents: Agent[], text: string) {
+  return agents.reduce((result, agent) => {
+    return [agent.runtimeName, agent.id]
+      .filter((name): name is string => Boolean(name && name !== agent.name))
+      .reduce((current, name) => current.split(name).join(agent.name), result);
+  }, text);
 }
