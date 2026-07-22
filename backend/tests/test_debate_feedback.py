@@ -285,6 +285,9 @@ def test_legacy_rejected_evidence_is_recovered_only_from_real_chunks(
     )
 
     class FakeIndexer:
+        def __init__(self, *, ensure=True):
+            assert ensure is False
+
         def list_document_chunks(self, document_id):
             assert document_id == "doc-real"
             return [chunk]

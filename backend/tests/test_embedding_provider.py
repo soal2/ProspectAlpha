@@ -1,6 +1,5 @@
 import os
 import sys
-from http import HTTPStatus
 from types import SimpleNamespace
 
 import pytest

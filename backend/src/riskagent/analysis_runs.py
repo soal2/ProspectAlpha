@@ -12,6 +12,7 @@ import threading
 import uuid
 from collections.abc import AsyncIterator
 from datetime import date, datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Literal
 
@@ -3740,5 +3741,6 @@ def _seed_agent_specs() -> list[AgentSpec]:
     ]
 
 
+@lru_cache(maxsize=1)
 def get_default_analysis_repository() -> AnalysisRunRepository:
     return AnalysisRunRepository()

@@ -841,9 +841,9 @@ async function responseError(response: Response) {
   if (!text) return `Request failed: ${response.status}`;
   try {
     const parsed = JSON.parse(text) as { detail?: string };
-    return parsed.detail || text;
+    return `Request failed (${response.status}): ${parsed.detail || text}`;
   } catch {
-    return text;
+    return `Request failed (${response.status}): ${text}`;
   }
 }
 

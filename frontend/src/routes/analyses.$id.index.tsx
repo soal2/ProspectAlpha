@@ -508,7 +508,7 @@ function RealtimeStream() {
         <section className="flex min-w-0 flex-col overflow-hidden">
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border bg-card/40 px-6 py-3 text-xs">
             <span className="inline-flex items-center gap-1.5 font-medium">
-              <Wand2 className="size-3.5 text-primary" /> 实时协作思维流
+              <Wand2 className="size-3.5 text-primary" /> 专家分析汇报
             </span>
             <span className="text-muted-foreground">
               已收到 <span className="tabular text-foreground">{eventBubbles.length}</span>{" "}
@@ -923,7 +923,7 @@ function eventToBubble(event: AnalysisRunEvent, runCreatedAt: string, index: num
 }
 
 function isExecutionReportEvent(event: AnalysisRunEvent) {
-  return event.event_type === "agent_reported" || event.event_type === "stage_failed";
+  return event.event_type === "agent_reported";
 }
 
 function moduleResultBubbles(run: AnalysisRun): Bubble[] {
