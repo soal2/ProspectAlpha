@@ -103,6 +103,7 @@ class AnalysisRunCreate(BaseModel):
     analysis_depth: Literal["quick", "standard", "deep"] = "standard"
     structured_data: dict[str, Any] = Field(default_factory=dict)
     max_findings: int = 30
+    data_cutoff_date: str | None = None
 
 
 class AnalysisRunInputPatch(BaseModel):
