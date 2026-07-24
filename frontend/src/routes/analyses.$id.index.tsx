@@ -1,4 +1,4 @@
-import { createFileRoute, getRouteApi, Link } from "@tanstack/react-router";
+import { createFileRoute, getRouteApi, Link, useNavigate } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
@@ -30,8 +30,19 @@ import {
 import { type Agent } from "@/lib/types";
 import { PdfViewer } from "@/components/pdf-viewer";
 import { motion, AnimatePresence } from "framer-motion";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 
 export const Route = createFileRoute("/analyses/$id/")({
+  shouldReload: true,
   loader: async ({ params }) => {
     const [agentsList, run, trace, feed] = await Promise.all([
       getAgents(),
@@ -87,6 +98,7 @@ function RealtimeStream() {
   const api = getRouteApi("/analyses/$id");
   const { analysis } = api.useLoaderData();
   const { id } = api.useParams();
+  const navigate = useNavigate();
   const {
     agents: agentsList,
     run: initialRun,
@@ -108,11 +120,13 @@ function RealtimeStream() {
   const [starting, setStarting] = useState(false);
   const [filter, setFilter] = useState("");
   const [viewerEvidence, setViewerEvidence] = useState<EvidenceFeedItem | null>(null);
+  const [reportReadyOpen, setReportReadyOpen] = useState(false);
   const startedRunRef = useRef<string | null>(null);
   const liveEventsRef = useRef<AnalysisRunEvent[]>(initialRun.events ?? []);
   const durableCursorRef = useRef(initialRun.events?.length ?? 0);
   const pendingEventsRef = useRef<AnalysisRunEvent[]>([]);
   const animationFrameRef = useRef<number | null>(null);
+  const completionPromptShownRef = useRef(initialRun.status === "completed");
 
   const queueLiveEvent = useCallback((event: AnalysisRunEvent) => {
     pendingEventsRef.current.push(event);
@@ -265,12 +279,23 @@ function RealtimeStream() {
     };
   }, [id, run.status]);
 
+  useEffect(() => {
+    if (run.status !== "completed" || completionPromptShownRef.current) return;
+    completionPromptShownRef.current = true;
+    setReportReadyOpen(true);
+  }, [run.status]);
+
   const stages = trace?.stages?.length ? trace.stages : fallbackStages(run);
   const eventBubbles = useMemo(() => {
-    const traceFlow = trace?.flow ?? [];
-    const eventFlow = liveEvents.map((event, index) => eventToBubble(event, run.created_at, index));
-    return mergeBubbles(traceFlow, eventFlow);
-  }, [liveEvents, run.created_at, trace]);
+    const reportEvents = liveEvents.filter(isExecutionReportEvent);
+    const eventFlow = reportEvents.map((event, index) =>
+      eventToBubble(event, run.created_at, index),
+    );
+    const legacyReports = reportEvents.some((event) => event.event_type === "agent_reported")
+      ? []
+      : moduleResultBubbles(run);
+    return mergeBubbles(legacyReports, eventFlow);
+  }, [liveEvents, run]);
   const liveEvidenceFeed = useMemo(
     () => mergeEvidenceFeed(evidenceFeed, liveEvents),
     [evidenceFeed, liveEvents],
@@ -282,7 +307,7 @@ function RealtimeStream() {
     (item) => item.scoreKind === "retrieval",
   ).length;
   const filteredLiveEvidence = liveEvidenceFeed.filter((item) =>
-    `${item.source} ${item.title} ${item.id} ${item.snippet ?? ""}`
+    `${displayAgentName(agentsList, item.source)} ${item.title} ${item.id} ${item.snippet ?? ""}`
       .toLowerCase()
       .includes(filter.toLowerCase()),
   );
@@ -294,7 +319,10 @@ function RealtimeStream() {
     ...(run.analysis_config.selected_agents?.map((agent) => agent.agent_name) ?? []),
   ]);
   const selectedAgentMeta = agentsList.filter(
-    (agent) => selectedAgentNames.has(agent.id) || selectedAgentNames.has(agent.name),
+    (agent) =>
+      selectedAgentNames.has(agent.id) ||
+      selectedAgentNames.has(agent.name) ||
+      Boolean(agent.runtimeName && selectedAgentNames.has(agent.runtimeName)),
   );
   const visibleAgents = selectedAgentMeta.length
     ? selectedAgentMeta
@@ -421,7 +449,9 @@ function RealtimeStream() {
                 </span>
                 <div className="rounded-md px-2 py-1 text-xs">
                   <div className="font-medium leading-snug">{stage.label}</div>
-                  <div className="text-[11px] text-muted-foreground">{stage.owner}</div>
+                  <div className="text-[11px] text-muted-foreground">
+                    {displayAgentName(agentsList, stage.owner)}
+                  </div>
                 </div>
                 {index < stages.length - 1 && (
                   <span className="absolute left-2 top-7 h-6 w-px bg-border" />
@@ -479,11 +509,11 @@ function RealtimeStream() {
         <section className="flex min-w-0 flex-col overflow-hidden">
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border bg-card/40 px-6 py-3 text-xs">
             <span className="inline-flex items-center gap-1.5 font-medium">
-              <Wand2 className="size-3.5 text-primary" /> 实时协作思维流
+              <Wand2 className="size-3.5 text-primary" /> 专家分析汇报
             </span>
             <span className="text-muted-foreground">
-              累计事件 <span className="tabular text-foreground">{liveEvents.length}</span> · Agent
-              调用流
+              已收到 <span className="tabular text-foreground">{eventBubbles.length}</span>{" "}
+              份专家汇报
             </span>
           </div>
           <div className="flex-1 overflow-y-auto px-6 py-5">
@@ -511,12 +541,14 @@ function RealtimeStream() {
                         >
                           {kindLabel[kind]}
                         </span>
-                        <span className="font-medium">{agent?.name ?? bubble.who}</span>
+                        <span className="font-medium">
+                          {agent?.name ?? displayAgentName(agentsList, bubble.who)}
+                        </span>
                         <span className="text-muted-foreground">{agent?.role ?? "Agent 专家"}</span>
                         <span className="ml-auto text-muted-foreground tabular">+{bubble.t}</span>
                       </div>
                       <div className="mt-1 rounded-xl rounded-tl-sm border border-border bg-card px-3 py-2 text-sm leading-relaxed shadow-sm">
-                        {bubble.text}
+                        {displayAgentText(agentsList, bubble.text)}
                       </div>
                     </div>
                   </motion.div>
@@ -529,8 +561,13 @@ function RealtimeStream() {
                   className="inline-flex items-center gap-2 text-xs text-muted-foreground"
                 >
                   <span className="size-1.5 rounded-full bg-primary" />
-                  {collaborationStatusText(progressSnapshot, liveEvents)}
+                  {collaborationStatusText(progressSnapshot, liveEvents, agentsList)}
                 </motion.div>
+              ) : null}
+              {!eventBubbles.length && terminalStatuses.has(run.status) ? (
+                <div className="mt-12 text-center text-xs text-muted-foreground">
+                  本次执行未保存专家模块汇报。
+                </div>
               ) : null}
             </AnimatePresence>
           </div>
@@ -563,7 +600,7 @@ function RealtimeStream() {
                         : "bg-muted text-muted-foreground"
                     }`}
                   >
-                    {item.source}
+                    {displayAgentName(agentsList, item.source)}
                   </span>
                   <span className="tabular">{item.id}</span>
                   <span>{item.time}</span>
@@ -620,12 +657,25 @@ function RealtimeStream() {
           title={`证据 ${viewerEvidence.id} · ${viewerEvidence.title}`}
         />
       ) : null}
-      <FloatingTracePanel
-        run={run}
-        stages={stages}
-        events={liveEvents}
-        activeAgents={activeAgentCount}
-      />
+      <AlertDialog open={reportReadyOpen} onOpenChange={setReportReadyOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>分析报告已生成</AlertDialogTitle>
+            <AlertDialogDescription>
+              {run.company_name || analysis.name}{" "}
+              的专家分析与证据校验已完成，是否现在进入报告查看页面？
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>留在当前页</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => navigate({ to: "/analyses/$id/report", params: { id } })}
+            >
+              查看报告
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
@@ -668,7 +718,10 @@ function AgentProgressCard({
   agents: Agent[];
 }) {
   const profile = agents.find(
-    (item) => item.id === agent.agent_name || item.name === agent.agent_name,
+    (item) =>
+      item.id === agent.agent_name ||
+      item.name === agent.agent_name ||
+      item.runtimeName === agent.agent_name,
   );
   return (
     <div className="rounded-md border border-border/80 p-2">
@@ -688,7 +741,7 @@ function AgentProgressCard({
       </div>
       <p className="mt-1 truncate text-muted-foreground">{agent.module || agent.latest_action}</p>
       <p className="mt-0.5 line-clamp-2 text-[10px] leading-relaxed text-muted-foreground">
-        {agent.latest_summary}
+        {displayAgentText(agents, agent.latest_summary)}
       </p>
     </div>
   );
@@ -715,13 +768,19 @@ function agentStatusClass(status: string) {
   return "bg-primary/10 text-primary";
 }
 
-function collaborationStatusText(snapshot: AnalysisProgress | null, events: AnalysisRunEvent[]) {
+function collaborationStatusText(
+  snapshot: AnalysisProgress | null,
+  events: AnalysisRunEvent[],
+  agents: Agent[],
+) {
   const active = snapshot?.agents.find(
     (agent) => !["completed", "failed", "queued"].includes(agent.status),
   );
-  if (active) return `${active.agent_name} · ${active.latest_action}`;
-  const latest = events.at(-1);
-  return latest ? `${latest.actor_name} · ${latest.action_label ?? latest.title}` : "等待任务事件";
+  if (active) return `${displayAgentName(agents, active.agent_name)}正在分析，等待提交汇报`;
+  const latestReport = [...events].reverse().find(isExecutionReportEvent);
+  return latestReport
+    ? `${displayAgentName(agents, latestReport.actor_name)}已提交最新汇报`
+    : "等待首位专家提交分析汇报";
 }
 
 function fallbackStages(run: AnalysisRun) {
@@ -730,7 +789,6 @@ function fallbackStages(run: AnalysisRun) {
     ["parsing", "PDF 解析", "解析服务"],
     ["indexing", "检索索引", "检索服务"],
     ["orchestra_planning", "动态规划", "战略层 Agent"],
-    ["spawning_experts", "线程与邮箱初始化", "A2A Runtime"],
   ];
   const tail = [
     ["verifying", "证据门禁", "Verifier"],
@@ -851,108 +909,6 @@ function formatClock(value: string) {
   return hkt.toISOString().slice(11, 19);
 }
 
-function FloatingTracePanel({
-  run,
-  stages,
-  events,
-  activeAgents,
-}: {
-  run: AnalysisRun;
-  stages: { key: string; label: string; owner: string; status: string; cost?: string }[];
-  events: AnalysisRunEvent[];
-  activeAgents: number;
-}) {
-  const [open, setOpen] = useState(true);
-  const [visible, setVisible] = useState(true);
-  const [pos, setPos] = useState({ x: 24, y: 84 });
-  const dragging = useRef<{ dx: number; dy: number } | null>(null);
-  if (!visible) return null;
-  const currentStage = stages.find((stage) => stage.status === "running") ?? stages.at(-1);
-  const toolCalls = events.filter((event) => event.event_type.startsWith("tool_")).length;
-  const recent = events.slice(-4).reverse();
-  return (
-    <div
-      className="fixed z-40 w-80 rounded-lg border border-border bg-card/95 shadow-xl backdrop-blur"
-      style={{ right: pos.x, top: pos.y }}
-    >
-      <div
-        className="flex cursor-move items-center justify-between border-b border-border px-3 py-2 text-xs"
-        onMouseDown={(event) => {
-          dragging.current = { dx: event.clientX + pos.x, dy: event.clientY - pos.y };
-          const move = (moveEvent: MouseEvent) => {
-            if (!dragging.current) return;
-            setPos({
-              x: Math.max(12, dragging.current.dx - moveEvent.clientX),
-              y: Math.max(56, moveEvent.clientY - dragging.current.dy),
-            });
-          };
-          const up = () => {
-            dragging.current = null;
-            window.removeEventListener("mousemove", move);
-            window.removeEventListener("mouseup", up);
-          };
-          window.addEventListener("mousemove", move);
-          window.addEventListener("mouseup", up);
-        }}
-      >
-        <span className="font-medium">Agent Trace</span>
-        <div className="flex items-center gap-1">
-          <button
-            onClick={() => setOpen((v) => !v)}
-            className="rounded px-1 text-muted-foreground hover:bg-muted"
-          >
-            {open ? "收起" : "展开"}
-          </button>
-          <button
-            onClick={() => setVisible(false)}
-            className="rounded px-1 text-muted-foreground hover:bg-muted"
-          >
-            关闭
-          </button>
-        </div>
-      </div>
-      {open ? (
-        <div className="space-y-3 p-3 text-[11px]">
-          <div className="grid grid-cols-3 gap-2 text-center">
-            <div className="rounded bg-muted/60 p-2">
-              <div className="text-muted-foreground">工具调用</div>
-              <div className="tabular text-sm font-semibold">{toolCalls}</div>
-            </div>
-            <div className="rounded bg-muted/60 p-2">
-              <div className="text-muted-foreground">活跃专家</div>
-              <div className="tabular text-sm font-semibold">{activeAgents}</div>
-            </div>
-            <div className="rounded bg-muted/60 p-2">
-              <div className="text-muted-foreground">Token</div>
-              <div className="tabular text-sm font-semibold">未上报</div>
-            </div>
-          </div>
-          <div>
-            <div className="text-muted-foreground">当前执行步骤</div>
-            <div className="mt-1 rounded border border-border bg-background px-2 py-1.5">
-              {currentStage?.label ?? run.current_stage} · {run.status}
-            </div>
-          </div>
-          <div>
-            <div className="text-muted-foreground">最近事件</div>
-            <div className="mt-1 space-y-1">
-              {recent.map((event, index) => (
-                <div
-                  key={`${event.created_at}-${index}`}
-                  className="rounded bg-background px-2 py-1"
-                >
-                  <span className="font-medium">{event.action_label ?? event.event_type}</span>
-                  <span className="ml-1 text-muted-foreground">{event.title}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
 function eventToBubble(event: AnalysisRunEvent, runCreatedAt: string, index: number): Bubble {
   const modelMeta = event.model
     ? `（${event.model}${event.duration_ms ? ` · ${event.duration_ms}ms` : ""}）`
@@ -965,6 +921,25 @@ function eventToBubble(event: AnalysisRunEvent, runCreatedAt: string, index: num
       : event.title,
     t: relativeTime(runCreatedAt, event.created_at, index),
   };
+}
+
+function isExecutionReportEvent(event: AnalysisRunEvent) {
+  return event.event_type === "agent_reported";
+}
+
+function moduleResultBubbles(run: AnalysisRun): Bubble[] {
+  return (run.module_results ?? []).flatMap((module, index) => {
+    const summary = String(module.summary ?? "").trim();
+    if (!summary) return [];
+    return [
+      {
+        who: String(module.agent_name ?? "Agent 专家"),
+        kind: "discover",
+        text: `${String(module.module ?? "分析模块")}汇报：${summary}`,
+        t: relativeTime(run.created_at, run.completed_at ?? undefined, index),
+      },
+    ];
+  });
 }
 
 function mergeLiveEvent(current: AnalysisRunEvent[], event: AnalysisRunEvent): AnalysisRunEvent[] {
@@ -1023,7 +998,33 @@ function agentForBubble(agents: Agent[], bubble: Bubble) {
   return (
     agents.find((agent) => agent.name === bubble.who) ??
     agents.find((agent) => agent.id === bubble.who) ??
+    agents.find((agent) => agent.runtimeName === bubble.who) ??
     agents.find((agent) => bubble.who.includes(agent.name)) ??
     agents.find((agent) => agent.role.includes(bubble.who))
   );
+}
+
+function displayAgentName(agents: Agent[], actorName: string) {
+  const profile =
+    agents.find((agent) => agent.name === actorName) ??
+    agents.find((agent) => agent.id === actorName) ??
+    agents.find((agent) => agent.runtimeName === actorName);
+  if (profile) return profile.name;
+  return (
+    {
+      orchestrator: "沈北辰",
+      strategic_agent: "沈北辰",
+      verifier: "萧则明",
+      quality_reviewer: "萧则明",
+      analysis_run: "分析任务",
+    }[actorName] ?? actorName
+  );
+}
+
+function displayAgentText(agents: Agent[], text: string) {
+  return agents.reduce((result, agent) => {
+    return [agent.runtimeName, agent.id]
+      .filter((name): name is string => Boolean(name && name !== agent.name))
+      .reduce((current, name) => current.split(name).join(agent.name), result);
+  }, text);
 }

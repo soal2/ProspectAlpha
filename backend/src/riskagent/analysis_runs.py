@@ -12,12 +12,13 @@ import threading
 import uuid
 from collections.abc import AsyncIterator
 from datetime import date, datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import sessionmaker
 
 from riskagent.agent_experts import AgentSpec
@@ -631,6 +632,59 @@ class AnalysisRunRepository:
                 rows = session.scalars(select(AnalysisRunRow).order_by(AnalysisRunRow.created_at.desc())).all()
                 return [AnalysisRun.model_validate(row.payload) for row in rows]
         return [AnalysisRun.model_validate(item) for item in self._load_all().values()]
+
+    def delete_run(self, run_id: str) -> None:
+        """Delete a saved analysis and its derived report/evidence records.
+
+        Source documents are intentionally retained because they are independent
+        knowledge assets and may be referenced by other analyses.
+        """
+
+        run = self.get(run_id)
+        deletable_statuses = {
+            "ready",
+            "clarifying",
+            "awaiting_expert_selection",
+            "awaiting_human_review",
+            "completed",
+            "failed",
+        }
+        if run.status not in deletable_statuses:
+            raise ValueError("A running analysis cannot be deleted.")
+
+        if self.use_database:
+            with self.session_factory() as session:
+                row = session.get(AnalysisRunRow, run_id)
+                if row is None:
+                    raise KeyError(run_id)
+                session.execute(
+                    delete(ReportLibraryRow).where(ReportLibraryRow.source_run_id == run_id)
+                )
+                session.execute(
+                    delete(EvidenceLibraryRow).where(EvidenceLibraryRow.source_run_id == run_id)
+                )
+                session.delete(row)
+                session.commit()
+        else:
+            with _path_lock(self.path):
+                data = _read_yaml_unlocked(self.path, {})
+                if run_id not in data:
+                    raise KeyError(run_id)
+                del data[run_id]
+                _write_yaml_atomic_unlocked(self.path, data)
+            with _path_lock(self.evidence_library_path):
+                evidence = _read_yaml_unlocked(self.evidence_library_path, [])
+                retained = [
+                    item for item in evidence if str(item.get("source_run_id") or "") != run_id
+                ]
+                _write_yaml_atomic_unlocked(self.evidence_library_path, retained)
+            with self.session_factory() as session:
+                session.execute(
+                    delete(ReportLibraryRow).where(ReportLibraryRow.source_run_id == run_id)
+                )
+                session.commit()
+
+        self._published_event_counts.pop(run_id, None)
 
     def events(self, run_id: str, after: int = 0) -> list[dict[str, Any]]:
         return self.get(run_id).events[after:]
@@ -3374,7 +3428,11 @@ def _build_trace_view(run: AnalysisRun) -> AnalysisTrace:
         TraceStage(key=key, label=label, owner=owner, status=_stage_status(run, key))
         for key, label, owner in PIPELINE_STAGES
     ]
-    flow = [_trace_event(run.created_at, event) for event in run.events]
+    flow = [
+        _trace_event(run.created_at, event)
+        for event in run.events
+        if _is_execution_report_event(event)
+    ]
     evidence = [
         TraceEvidenceItem(
             id=item.evidence_id,
@@ -3390,6 +3448,26 @@ def _build_trace_view(run: AnalysisRun) -> AnalysisTrace:
         for item in run.evidence[:20]
     ]
     return AnalysisTrace(stages=stages, seed=flow[:8], flow=flow, evidenceFeed=evidence)
+
+
+def _is_execution_report_event(event: dict[str, Any]) -> bool:
+    """Keep user-facing execution history focused on conclusions, not runtime state."""
+
+    event_type = str(event.get("event_type") or "")
+    return event_type in {
+        "agent_reported",
+        "risk_finding_created",
+        "risk_finding_verified",
+        "critique_created",
+        "finding_revised",
+        "arbitration_completed",
+        "debate_completed",
+        "report_section_generated",
+        "qa_issue_found",
+        "qa_passed",
+        "run_completed",
+        "stage_failed",
+    }
 
 
 def _build_analysis_progress(run: AnalysisRun) -> AnalysisProgress:
@@ -3663,5 +3741,6 @@ def _seed_agent_specs() -> list[AgentSpec]:
     ]
 
 
+@lru_cache(maxsize=1)
 def get_default_analysis_repository() -> AnalysisRunRepository:
     return AnalysisRunRepository()

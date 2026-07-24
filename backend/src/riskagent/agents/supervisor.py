@@ -573,9 +573,18 @@ class AgentTeamSupervisor:
                     failures.append((assignment, str(item.get("error") or "expert failed")))
                 else:
                     try:
-                        result_payloads[assignment.module_id] = _validate_expert_output(
+                        validated_output = _validate_expert_output(
                             item.get("result"),
                             assignment,
+                        )
+                        result_payloads[assignment.module_id] = validated_output
+                        self._record_runtime_event(
+                            state["run_id"],
+                            _expert_report_event(
+                                assignment=assignment,
+                                result=validated_output,
+                                display_name=specs[assignment.agent_name].display_name,
+                            ),
                         )
                     except Exception as exc:
                         validation_error = f"invalid expert output: {exc}"
@@ -684,11 +693,18 @@ class AgentTeamSupervisor:
                         replacement_history.append(record)
                         if replacement_result.get("status") == "completed":
                             try:
-                                result_payloads[failed_assignment.module_id] = (
-                                    _validate_expert_output(
-                                        replacement_result.get("result"),
-                                        replacement_assignment,
-                                    )
+                                validated_output = _validate_expert_output(
+                                    replacement_result.get("result"),
+                                    replacement_assignment,
+                                )
+                                result_payloads[failed_assignment.module_id] = validated_output
+                                self._record_runtime_event(
+                                    state["run_id"],
+                                    _expert_report_event(
+                                        assignment=replacement_assignment,
+                                        result=validated_output,
+                                        display_name=replacement_spec.display_name,
+                                    ),
                                 )
                                 resolved = True
                                 break
@@ -1403,9 +1419,11 @@ class AgentTeamSupervisor:
                     "module_id": assignment.module_id,
                     "agent_name": spec.name,
                     "module": assignment.module,
-                    "summary": (
-                        f"完成 {assignment.module} 分析，读取 {len(selected_rules)} 条规则，"
-                        f"形成 {len(triggered)} 条候选风险判断。"
+                    "summary": _expert_report_summary(
+                        assignment=assignment,
+                        triggered=triggered,
+                        rules_read=len(selected_rules),
+                        retrieval_failure=retrieval_failure,
                     ),
                     "status": "completed",
                     "rule_ids": [item.rule_id for item in triggered],
@@ -1511,6 +1529,56 @@ def _runtime_event_to_event(item: dict[str, Any]) -> dict[str, Any]:
         str(item.get("title") or event_type.replace("_", " ")),
         str(item.get("summary") or item.get("error") or "A2A runtime state changed."),
         payload=item,
+    )
+
+
+def _expert_report_event(
+    *,
+    assignment: StrategyAssignment,
+    result: dict[str, Any],
+    display_name: str,
+) -> dict[str, Any]:
+    module_result = dict(result.get("module_result") or {})
+    agent_name = str(module_result.get("agent_name") or assignment.agent_name)
+    real_name = display_name.strip() or agent_name
+    return _event(
+        "agent_reported",
+        agent_name,
+        f"{real_name}提交《{assignment.module}》分析汇报",
+        str(module_result.get("summary") or "本模块分析已完成。"),
+        payload={
+            "module_id": assignment.module_id,
+            "module": assignment.module,
+            "agent_name": agent_name,
+            "display_name": real_name,
+            "rule_ids": list(module_result.get("rule_ids") or []),
+            "rules_read": int(module_result.get("rules_read") or 0),
+            "limitations": list(module_result.get("limitations") or []),
+        },
+    )
+
+
+def _expert_report_summary(
+    *,
+    assignment: StrategyAssignment,
+    triggered: list[RuleEvaluation],
+    rules_read: int,
+    retrieval_failure: str | None,
+) -> str:
+    if triggered:
+        findings = "；".join(
+            f"{item.title}（{item.reasoning_summary}）" for item in triggered[:3]
+        )
+        suffix = f"；另有 {len(triggered) - 3} 条候选判断" if len(triggered) > 3 else ""
+        return (
+            f"汇报结论：核查 {rules_read} 条规则，识别 {len(triggered)} 条候选风险。"
+            f"重点为：{findings}{suffix}。"
+        )
+    if retrieval_failure:
+        return f"汇报结论：{assignment.module} 未形成可验证风险判断。限制：{retrieval_failure}"
+    return (
+        f"汇报结论：已核查 {rules_read} 条规则，{assignment.module} "
+        "暂未发现达到证据门槛的候选风险。"
     )
 
 def _resolve(value: Any) -> Any:

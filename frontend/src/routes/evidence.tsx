@@ -5,8 +5,6 @@ import { getKnowledgeData } from "@/lib/data-service";
 import { PdfViewer } from "@/components/pdf-viewer";
 import type { KnowledgeData, KnowledgeEvidence } from "@/lib/types";
 
-type SortBy = "time" | "relevance";
-
 export const Route = createFileRoute("/evidence")({
   head: () => ({
     meta: [
@@ -20,7 +18,7 @@ export const Route = createFileRoute("/evidence")({
   component: EvidencePage,
 });
 
-const CONFIDENCE_BUCKETS = ["全部", "≥ 0.9 高", "0.7–0.9 中", "< 0.7 低"] as const;
+const CONFIDENCE_BUCKETS = ["全部", "≥ 0.9 高", "0.7–0.9 中", "< 0.7 低", "未核验"] as const;
 
 function matchConfidence(bucket: string, conf: number) {
   if (bucket === "≥ 0.9 高") return conf >= 0.9;
@@ -29,9 +27,13 @@ function matchConfidence(bucket: string, conf: number) {
   return true;
 }
 
+function matchesConfidenceBucket(bucket: string, item: KnowledgeEvidence) {
+  if (bucket === "未核验") return item.scoreKind !== "relevance";
+  return item.scoreKind === "relevance" && matchConfidence(bucket, item.conf);
+}
+
 function EvidencePage() {
   const [data, setData] = useState<KnowledgeData | null>(null);
-  const [sortBy, setSortBy] = useState<SortBy>("relevance");
   const [keyword, setKeyword] = useState("");
   const [company, setCompany] = useState("全部");
   const [section, setSection] = useState("全部");
@@ -53,57 +55,44 @@ function EvidencePage() {
   }, []);
 
   const filtered = useMemo(() => {
-    const items = (data?.evidence ?? []).filter((item) => {
-      if (company !== "全部" && item.name !== company) return false;
-      if (section !== "全部" && item.section !== section) return false;
-      if (risk !== "全部" && item.risk !== risk) return false;
-      if (
-        confidence !== "全部" &&
-        (item.scoreKind !== "relevance" || !matchConfidence(confidence, item.conf))
-      )
-        return false;
-      if (keyword.trim()) {
-        const query = keyword.trim().toLowerCase();
-        const haystack = `${item.snippet} ${item.section} ${item.name} ${item.risk}`.toLowerCase();
-        if (!haystack.includes(query)) return false;
-      }
-      return true;
+    const items = filterEvidence(data?.evidence ?? [], {
+      company,
+      section,
+      risk,
+      confidence,
+      keyword,
     });
-    return items.sort((a, b) =>
-      sortBy === "confidence"
-        ? b.conf - a.conf
-        : (b.createdAt ?? "").localeCompare(a.createdAt ?? ""),
-    );
-  }, [data, company, section, risk, confidence, keyword, sortBy]);
+    return items.sort((a, b) => b.conf - a.conf);
+  }, [data, company, section, risk, confidence, keyword]);
 
   const facetGroups = useMemo(() => {
     const evidence = data?.evidence ?? [];
-    const countBy = (fn: (item: KnowledgeEvidence) => string) => {
-      const counts = new Map<string, number>();
-      for (const item of evidence) {
-        const key = fn(item);
-        if (key) counts.set(key, (counts.get(key) ?? 0) + 1);
-      }
-      return counts;
-    };
+    const filters = { company, section, risk, confidence, keyword };
+    const companyEvidence = filterEvidence(evidence, filters, "company");
+    const sectionEvidence = filterEvidence(evidence, filters, "section");
+    const riskEvidence = filterEvidence(evidence, filters, "risk");
+    const confidenceEvidence = filterEvidence(evidence, filters, "confidence");
     return [
       {
         label: "公司",
         value: company,
         set: setCompany,
-        counts: countBy((item) => item.name),
+        counts: countByFor(companyEvidence, (item) => item.name),
+        total: companyEvidence.length,
       },
       {
         label: "招股书章节",
         value: section,
         set: setSection,
-        counts: countBy((item) => item.section),
+        counts: countByFor(sectionEvidence, (item) => item.section),
+        total: sectionEvidence.length,
       },
       {
         label: "风险类别",
         value: risk,
         set: setRisk,
-        counts: countBy((item) => item.risk),
+        counts: countByFor(riskEvidence, (item) => item.risk),
+        total: riskEvidence.length,
       },
       {
         label: "证据相关性",
@@ -112,14 +101,13 @@ function EvidencePage() {
         counts: new Map(
           CONFIDENCE_BUCKETS.filter((bucket) => bucket !== "全部").map((bucket) => [
             bucket,
-            evidence.filter(
-              (item) => item.scoreKind === "relevance" && matchConfidence(bucket, item.conf),
-            ).length,
+            confidenceEvidence.filter((item) => matchesConfidenceBucket(bucket, item)).length,
           ]),
         ),
+        total: confidenceEvidence.length,
       },
     ];
-  }, [data, company, section, risk, confidence]);
+  }, [data, company, section, risk, confidence, keyword]);
 
   return (
     <div className="grid h-[calc(100vh-3.5rem)] grid-cols-[240px_minmax(360px,1fr)_minmax(460px,40vw)]">
@@ -157,9 +145,7 @@ function EvidencePage() {
                     >
                       <span className="truncate">{item}</span>
                       <span className="text-[10px] tabular">
-                        {item === "全部"
-                          ? (data?.evidence.length ?? 0)
-                          : (facet.counts.get(item) ?? 0)}
+                        {item === "全部" ? facet.total : (facet.counts.get(item) ?? 0)}
                       </span>
                     </button>
                   </li>
@@ -176,31 +162,8 @@ function EvidencePage() {
           <div>
             <h3 className="font-serif text-xl font-semibold">最近沉淀的证据</h3>
             <p className="mt-1 text-xs text-muted-foreground">
-              {filtered.length} / {data?.stats.totalEvidence ?? 0} 条 · 按
-              {sortBy === "time" ? "时间" : "证据相关性"}排序
+              {filtered.length} / {data?.evidence.length ?? 0} 条 · 按证据相关性排序
             </p>
-          </div>
-          <div className="flex gap-2 text-xs">
-            <button
-              onClick={() => setSortBy("time")}
-              className={`rounded-full px-3 py-1.5 ${
-                sortBy === "time"
-                  ? "bg-primary text-primary-foreground"
-                  : "border border-border bg-card hover:bg-accent"
-              }`}
-            >
-              按时间
-            </button>
-            <button
-              onClick={() => setSortBy("relevance")}
-              className={`rounded-full px-3 py-1.5 ${
-                sortBy === "relevance"
-                  ? "bg-primary text-primary-foreground"
-                  : "border border-border bg-card hover:bg-accent"
-              }`}
-            >
-              按相关性
-            </button>
           </div>
         </div>
         <div className="mt-5 space-y-3">
@@ -309,4 +272,48 @@ function EvidencePage() {
       </aside>
     </div>
   );
+}
+
+type EvidenceFilters = {
+  company: string;
+  section: string;
+  risk: string;
+  confidence: string;
+  keyword: string;
+};
+
+function filterEvidence(
+  evidence: KnowledgeEvidence[],
+  filters: EvidenceFilters,
+  skip?: keyof Omit<EvidenceFilters, "keyword">,
+) {
+  const query = filters.keyword.trim().toLowerCase();
+  return evidence.filter((item) => {
+    if (skip !== "company" && filters.company !== "全部" && item.name !== filters.company)
+      return false;
+    if (skip !== "section" && filters.section !== "全部" && item.section !== filters.section)
+      return false;
+    if (skip !== "risk" && filters.risk !== "全部" && item.risk !== filters.risk) return false;
+    if (
+      skip !== "confidence" &&
+      filters.confidence !== "全部" &&
+      !matchesConfidenceBucket(filters.confidence, item)
+    ) {
+      return false;
+    }
+    if (query) {
+      const haystack = `${item.snippet} ${item.section} ${item.name} ${item.risk}`.toLowerCase();
+      if (!haystack.includes(query)) return false;
+    }
+    return true;
+  });
+}
+
+function countByFor(evidence: KnowledgeEvidence[], keyFor: (item: KnowledgeEvidence) => string) {
+  const counts = new Map<string, number>();
+  for (const item of evidence) {
+    const key = keyFor(item);
+    if (key) counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return counts;
 }

@@ -117,7 +117,9 @@ export function OrchestraFlow({
 }: OrchestraFlowProps) {
   const { nodes, edges } = useMemo(() => {
     const agentByName = (name: string) =>
-      agentsList.find((agent) => agent.name === name || agent.id === name);
+      agentsList.find(
+        (agent) => agent.name === name || agent.id === name || agent.runtimeName === name,
+      );
     const stateByAgent = new Map(teamState.map((state) => [state.agent_name, state]));
     const stateByModule = new Map(
       teamState

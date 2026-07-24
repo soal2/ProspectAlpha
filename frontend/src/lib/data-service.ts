@@ -330,7 +330,17 @@ async function fetchAnalysis(id: string): Promise<AnalysisSummary | null> {
 }
 
 async function fetchAgents(): Promise<Agent[]> {
-  return apiRequest<BackendAgent[]>("/agents");
+  const [agents, options] = await Promise.all([
+    apiRequest<BackendAgent[]>("/agents"),
+    apiRequest<AnalysisOptions>("/analysis-options"),
+  ]);
+  const runtimeNameByPersona = new Map(
+    options.agents.map((option) => [option.persona_id, option.agent_name]),
+  );
+  return agents.map((agent) => ({
+    ...agent,
+    runtimeName: runtimeNameByPersona.get(agent.id),
+  }));
 }
 
 async function fetchBacktests(): Promise<BacktestSummary[]> {
@@ -504,7 +514,7 @@ async function fetchKnowledgeData(): Promise<KnowledgeData> {
       createdAt: run.created_at,
     }));
   });
-  const companies = [...new Set(runs.map((run) => run.company_name).filter(Boolean))];
+  const companies = [...new Set(evidence.map((item) => item.name).filter(Boolean))];
   const sections = [...new Set(evidence.map((item) => item.section).filter(Boolean))];
   const risks = [...new Set(evidence.map((item) => item.risk).filter(Boolean))];
   const preview = evidence[0];
@@ -513,7 +523,10 @@ async function fetchKnowledgeData(): Promise<KnowledgeData> {
       { label: "公司", items: ["全部", ...companies] },
       { label: "招股书章节", items: ["全部", ...sections] },
       { label: "风险类别", items: ["全部", ...risks] },
-      { label: "证据相关性", items: ["全部", "≥ 0.9 高", "0.7–0.9 中", "< 0.7 低"] },
+      {
+        label: "证据相关性",
+        items: ["全部", "≥ 0.9 高", "0.7–0.9 中", "< 0.7 低", "未核验"],
+      },
     ],
     evidence,
     stats: { totalEvidence: evidence.length, totalCompanies: companies.length },
@@ -609,6 +622,10 @@ export async function getAnalysis(id: string) {
 
 export async function getAnalysisRun(id: string) {
   return apiRequest<AnalysisRun>(`/analysis-runs/${id}`);
+}
+
+export async function deleteAnalysisRun(id: string) {
+  return apiRequest<void>(`/analysis-runs/${id}`, { method: "DELETE" });
 }
 
 export async function getAnalysisProgress(id: string) {
@@ -827,9 +844,9 @@ async function responseError(response: Response) {
   if (!text) return `Request failed: ${response.status}`;
   try {
     const parsed = JSON.parse(text) as { detail?: string };
-    return parsed.detail || text;
+    return `Request failed (${response.status}): ${parsed.detail || text}`;
   } catch {
-    return text;
+    return `Request failed (${response.status}): ${text}`;
   }
 }
 
@@ -1020,10 +1037,6 @@ function toAnalysisSummary(run: AnalysisRun, evidenceCountOverride?: number): An
     evidenceCountOverride ??
     run.findings.reduce((total, finding) => total + finding.evidence_snippets.length, 0);
   const highConfidence = run.findings.filter((finding) => finding.confidence >= 0.75).length;
-  const riskScore = scoreRun(run);
-  const hasAdmittedFinding = run.findings.some((finding) =>
-    ["supported", "weakly_supported"].includes(finding.verification_status ?? ""),
-  );
   return {
     id: run.run_id,
     code: String(structured.code ?? structured.ticker ?? "IPO"),
@@ -1032,15 +1045,7 @@ function toAnalysisSummary(run: AnalysisRun, evidenceCountOverride?: number): An
     listingDate: String(structured.listing_date ?? run.data_cutoff_date),
     offerPrice: Number(structured.offer_price ?? 0),
     offerSize: String(structured.offer_size ?? "待确认"),
-    riskLevel:
-      run.status === "completed" && !hasAdmittedFinding
-        ? "unrated"
-        : riskScore >= 70
-          ? "high"
-          : riskScore >= 40
-            ? "mid"
-            : "low",
-    riskScore,
+    riskLevel: rateRun(run),
     evidenceCount,
     highConfidence,
     mode: "expert",
@@ -1074,13 +1079,15 @@ async function pollAnalysisRun(runId: string) {
   return latest;
 }
 
-function scoreRun(run: AnalysisRun) {
-  if (!run.findings.length) return 0;
-  const total = run.findings.reduce((sum, finding) => {
-    const severity = finding.severity === "high" ? 24 : finding.severity === "medium" ? 14 : 7;
-    return sum + severity * finding.confidence;
-  }, 0);
-  return Math.min(95, Math.max(10, Math.round(total)));
+function rateRun(run: AnalysisRun): AnalysisSummary["riskLevel"] {
+  const admitted = run.findings.filter((finding) =>
+    ["supported", "weakly_supported"].includes(finding.verification_status ?? ""),
+  );
+  if (!admitted.length) return "unrated";
+  if (admitted.some((finding) => finding.severity === "high" && !finding.requires_human_review)) {
+    return "high";
+  }
+  return admitted.length >= 3 ? "mid" : "low";
 }
 
 function toReportData(run: AnalysisRun, report: BackendReport): ReportData {

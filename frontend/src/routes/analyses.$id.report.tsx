@@ -90,8 +90,8 @@ function ReportPage() {
           <div className="mt-5 grid gap-3 sm:grid-cols-4">
             <HeroStat
               icon={ShieldAlert}
-              label="风险评分"
-              value={analysis.riskLevel === "unrated" ? "未评级" : analysis.riskScore}
+              label="风险评级"
+              value={riskRatingLabel(analysis.riskLevel)}
             />
             <HeroStat icon={FileBadge} label="证据" value={analysis.evidenceCount} />
             <HeroStat icon={Network} label="专家" value={analysis.experts} />
@@ -116,6 +116,10 @@ function ReportPage() {
       </section>
     </div>
   );
+}
+
+function riskRatingLabel(level: "high" | "mid" | "low" | "unrated") {
+  return { high: "高风险", mid: "中风险", low: "低风险", unrated: "未评级" }[level];
 }
 
 function exportMarkdown(companyName: string, runId: string, markdown?: string) {

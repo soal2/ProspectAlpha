@@ -9,7 +9,7 @@ export const Route = createFileRoute("/analyses/$id/trace")({
     return { trace, agents };
   },
   component: TracePage,
-  head: () => ({ meta: [{ title: "Agent Trace · ProspectAlpha" }] }),
+  head: () => ({ meta: [{ title: "专家汇报与裁定记录 · ProspectAlpha" }] }),
 });
 
 const kindMeta: Record<string, { label: string; cls: string }> = {
@@ -36,7 +36,6 @@ function TracePage() {
   const stages = trace?.stages ?? [];
   const flow = trace?.flow ?? [];
   const evidence = trace?.evidenceFeed ?? [];
-  const toolCalls = flow.filter((event) => event.kind === "execute").length;
   const activeAgents = new Set(flow.map((event) => event.who).filter(Boolean)).size;
 
   return (
@@ -61,7 +60,9 @@ function TracePage() {
               </span>
               <div className="rounded-md px-2 py-1 text-xs">
                 <div className="font-medium leading-snug">{stage.label}</div>
-                <div className="text-[11px] text-muted-foreground">{stage.owner}</div>
+                <div className="text-[11px] text-muted-foreground">
+                  {displayTraceActor(agents, stage.owner)}
+                </div>
               </div>
               {index < stages.length - 1 ? (
                 <span className="absolute left-2 top-7 h-5 w-px bg-border" />
@@ -74,10 +75,10 @@ function TracePage() {
       <section className="flex min-w-0 flex-col overflow-hidden">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-6 py-3 text-xs">
           <span className="inline-flex items-center gap-1.5 font-medium">
-            <Zap className="size-3.5 text-primary" /> 结构化执行 Trace
+            <Zap className="size-3.5 text-primary" /> 专家汇报与裁定记录
           </span>
           <span className="text-muted-foreground">
-            {analysis.id} · {toolCalls} 次执行事件 · {activeAgents} 个参与者 · token 未上报
+            {analysis.id} · {flow.length} 条有效记录 · {activeAgents} 位参与者
           </span>
         </div>
         <div className="flex-1 overflow-y-auto px-6 py-5">
@@ -98,7 +99,9 @@ function TracePage() {
                       <span className={`rounded-full px-1.5 py-0.5 font-medium ${meta.cls}`}>
                         {meta.label}
                       </span>
-                      <span className="font-medium">{agent?.name ?? event.who}</span>
+                      <span className="font-medium">
+                        {agent?.name ?? displayTraceActor(agents, event.who)}
+                      </span>
                       <span className="text-muted-foreground">{agent?.role ?? "系统事件"}</span>
                       <span className="ml-auto tabular text-muted-foreground">+{event.t}</span>
                     </div>
@@ -112,7 +115,7 @@ function TracePage() {
             {!flow.length ? (
               <div className="mt-16 text-center text-xs text-muted-foreground">
                 <Search className="mx-auto mb-2 size-6 text-primary/50" />
-                Trace 尚未生成，请先启动分析任务。
+                尚未收到专家汇报，请先启动分析任务。
               </div>
             ) : null}
           </div>
@@ -154,7 +157,22 @@ function agentForTrace(agents: Agent[], who: string) {
   return (
     agents.find((agent) => agent.name === who) ??
     agents.find((agent) => agent.id === who) ??
+    agents.find((agent) => agent.runtimeName === who) ??
     agents.find((agent) => who.includes(agent.name)) ??
     agents.find((agent) => agent.role.includes(who))
+  );
+}
+
+function displayTraceActor(agents: Agent[], who: string) {
+  const agent = agentForTrace(agents, who);
+  if (agent) return agent.name;
+  return (
+    {
+      orchestrator: "沈北辰",
+      strategic_agent: "沈北辰",
+      verifier: "萧则明",
+      quality_reviewer: "萧则明",
+      analysis_run: "分析任务",
+    }[who] ?? who
   );
 }

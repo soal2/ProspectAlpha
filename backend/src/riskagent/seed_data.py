@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
 from sqlalchemy import delete, func, inspect, select, text
@@ -17,6 +18,7 @@ BACKEND_ROOT = Path(__file__).resolve().parents[2]
 RISK_RULE_SEED_PATH = BACKEND_ROOT / "configs" / "hk_ipo_risk_rules_v1.json"
 
 logger = logging.getLogger(__name__)
+_REFERENCE_DATA_LOCK = Lock()
 
 
 AGENT_EXPERTS: list[dict[str, Any]] = [
@@ -312,19 +314,23 @@ AGENT_NAME_ALIASES: dict[str, str] = {
 
 
 def seed_reference_data(session_factory: sessionmaker) -> None:
-    with session_factory() as session:
-        if not session.scalar(select(func.count()).select_from(AgentExpertRow)):
-            for display_order, item in enumerate(AGENT_EXPERTS, start=1):
-                session.add(AgentExpertRow(**item, display_order=display_order))
+    # The first frontend load requests agents and analysis options concurrently.
+    # Serialize the check-and-seed transaction so both requests cannot observe an
+    # empty database and insert the same reference rows at the same time.
+    with _REFERENCE_DATA_LOCK:
+        with session_factory() as session:
+            if not session.scalar(select(func.count()).select_from(AgentExpertRow)):
+                for display_order, item in enumerate(AGENT_EXPERTS, start=1):
+                    session.add(AgentExpertRow(**item, display_order=display_order))
 
-        _refresh_agent_specs_if_stale(session)
+            _refresh_agent_specs_if_stale(session)
 
-        if not session.scalar(select(func.count()).select_from(RiskRuleSetRow)):
-            seed_risk_rules(session)
-        else:
-            verify_risk_rule_seed(session)
+            if not session.scalar(select(func.count()).select_from(RiskRuleSetRow)):
+                seed_risk_rules(session)
+            else:
+                verify_risk_rule_seed(session)
 
-        session.commit()
+            session.commit()
 
 
 def verify_risk_rule_seed(session) -> None:
