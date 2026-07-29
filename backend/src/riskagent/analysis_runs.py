@@ -103,7 +103,6 @@ class AnalysisRunCreate(BaseModel):
     analysis_depth: Literal["quick", "standard", "deep"] = "standard"
     structured_data: dict[str, Any] = Field(default_factory=dict)
     max_findings: int = 30
-    data_cutoff_date: str | None = None
 
 
 class AnalysisRunInputPatch(BaseModel):
@@ -335,11 +334,17 @@ class AnalysisRun(BaseModel):
         if not isinstance(value, dict):
             return value
         legacy_payload = value.get("input_payload")
-        if not isinstance(legacy_payload, dict) or "selected_agent_names" not in legacy_payload:
+        if not isinstance(legacy_payload, dict):
+            return value
+        extras_to_drop = {
+            key for key in ("selected_agent_names", "data_cutoff_date") if key in legacy_payload
+        }
+        if not extras_to_drop:
             return value
         normalized = dict(value)
         normalized_payload = dict(legacy_payload)
-        normalized_payload.pop("selected_agent_names")
+        for key in extras_to_drop:
+            normalized_payload.pop(key)
         normalized["input_payload"] = normalized_payload
         return normalized
 
@@ -2511,7 +2516,9 @@ class AnalysisRunRepository:
 
     def _save_run(self, run: AnalysisRun) -> None:
         dumped = run.model_dump()
-        dumped["input_payload"] = _payload_from_run(run).model_dump()
+        input_payload_dump = _payload_from_run(run).model_dump()
+        input_payload_dump.pop("data_cutoff_date", None)
+        dumped["input_payload"] = input_payload_dump
         dumped["frozen_rule_snapshot"] = run.frozen_rule_snapshot
         dumped["evidence"] = [item.model_dump() for item in run.evidence]
         dumped["verification_results"] = [item.model_dump() for item in run.verification_results]

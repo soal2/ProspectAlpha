@@ -7,6 +7,8 @@ Desktop.ini
 # Data directories
 backend/data/
 @backend/data/
+.obsidian/
+**/.vercel/
 
 # Local environment
 .env
@@ -39,6 +41,7 @@ coverage.xml
 htmlcov/
 .venv/
 venv/
+doc/
 env/
 .ipynb_checkpoints/
 dist/
