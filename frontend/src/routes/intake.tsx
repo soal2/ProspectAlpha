@@ -69,6 +69,7 @@ function IntakePage() {
   } | null>(null);
   const [options, setOptions] = useState<AnalysisOptions | null>(null);
   const [companyName, setCompanyName] = useState("宁德时代 · A1 申请稿");
+  const [stockCode, setStockCode] = useState("");
   const [documentText, setDocumentText] = useState(sampleText);
   const [structuredDataText, setStructuredDataText] = useState(sampleStructuredData);
   const [analysisRun, setAnalysisRun] = useState<AnalysisRun | null>(null);
@@ -240,12 +241,21 @@ function IntakePage() {
                 </p>
               </div>
             </div>
-            <div className="mt-5 flex flex-col gap-3 sm:flex-row">
+            <div className="mt-5 grid gap-3 sm:grid-cols-[1fr_12rem_auto]">
               <input
                 value={companyName}
                 onChange={(event) => setCompanyName(event.target.value)}
                 className="h-10 flex-1 rounded-md border border-border bg-background px-3 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
                 aria-label="分析标的"
+              />
+              <input
+                value={stockCode}
+                onChange={(event) => setStockCode(event.target.value)}
+                placeholder="港股代码，如 0700.HK"
+                pattern="[0-9]{4,5}([.][Hh][Kk])?"
+                required
+                className="h-10 rounded-md border border-border bg-background px-3 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                aria-label="港股代码"
               />
               <button
                 onClick={() => void handleMatchTarget()}
@@ -654,6 +664,7 @@ function IntakePage() {
             disabled={
               analyzing ||
               pdfProcessing ||
+              !stockCode.trim() ||
               (!documentText.trim() && !uploadedDocument) ||
               Boolean(uploadedDocument && !uploadedDocument.block_count)
             }
@@ -690,6 +701,17 @@ function IntakePage() {
                       type="text"
                       value={confirmEdits.company_name ?? ""}
                       onChange={(event) => patchConfirmField("company_name", event.target.value)}
+                      className="mt-1 h-9 w-full rounded-md border border-border bg-background px-3 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                    />
+                  </label>
+                  <label className="block text-[11px] font-medium text-muted-foreground">
+                    港股代码
+                    <input
+                      type="text"
+                      value={confirmEdits.stock_code ?? ""}
+                      onChange={(event) => patchConfirmField("stock_code", event.target.value)}
+                      pattern="[0-9]{4,5}([.][Hh][Kk])?"
+                      required
                       className="mt-1 h-9 w-full rounded-md border border-border bg-background px-3 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
                     />
                   </label>
@@ -782,7 +804,11 @@ function IntakePage() {
               <button
                 type="button"
                 onClick={() => void startConfirmedDraft()}
-                disabled={analyzing || draftRun.status !== "ready"}
+                disabled={
+                  analyzing ||
+                  draftRun.status !== "ready" ||
+                  !String(confirmEdits.stock_code ?? "").trim()
+                }
                 className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {analyzing ? (
@@ -1005,6 +1031,7 @@ function IntakePage() {
   function initializeConfirmEdits(run: AnalysisRun) {
     setConfirmEdits({
       company_name: run.understood?.company_name ?? run.company_name ?? companyName,
+      stock_code: run.stock_code ?? stockCode,
       risk_rule_set_id: run.rule_snapshot?.rule_set_id ?? selectedRuleSetId,
       analysis_depth: run.analysis_config?.analysis_depth ?? analysisDepth,
       structured_data: run.input_summary?.structured_data_keys
@@ -1017,6 +1044,7 @@ function IntakePage() {
 
   function syncTopLevelStateFromEdits(edits: AnalysisRunInputPatch) {
     if (typeof edits.company_name === "string") setCompanyName(edits.company_name);
+    if (typeof edits.stock_code === "string") setStockCode(edits.stock_code);
     if (typeof edits.risk_rule_set_id === "string") setSelectedRuleSetId(edits.risk_rule_set_id);
     if (edits.analysis_depth) setAnalysisDepth(edits.analysis_depth);
     if (edits.structured_data) {
@@ -1039,6 +1067,7 @@ function IntakePage() {
   function buildPayload() {
     return {
       company_name: companyName,
+      stock_code: stockCode.trim(),
       document_text: uploadedDocument ? "" : documentText,
       document_id: uploadedDocument?.document_id,
       risk_rule_set_id: selectedRuleSetId,

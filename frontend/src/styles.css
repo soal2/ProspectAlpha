@@ -43,9 +43,13 @@
   --color-sage: var(--gold);
   --color-sage-soft: var(--gold-soft);
   --color-amber-soft: var(--gold-soft);
+  --color-risk-very-high: var(--risk-very-high);
   --color-risk-high: var(--risk-high);
-  --color-risk-mid: var(--risk-mid);
+  --color-risk-medium: var(--risk-medium);
   --color-risk-low: var(--risk-low);
+  --color-risk-very-low: var(--risk-very-low);
+  /* Legacy aliases */
+  --color-risk-mid: var(--risk-medium);
   --color-ink: var(--ink);
   --color-paper: var(--paper);
 
@@ -100,9 +104,13 @@
   --destructive: #b42318;
   --destructive-foreground: #ffffff;
 
+  --risk-very-high: #7a271a;
   --risk-high: #b42318;
-  --risk-mid: #b54708;
+  --risk-medium: #b54708;
   --risk-low: #027a48;
+  --risk-very-low: #12b76a;
+  /* Legacy aliases */
+  --risk-mid: var(--risk-medium);
 
   --border: #e4e7ec;
   --input: #e4e7ec;

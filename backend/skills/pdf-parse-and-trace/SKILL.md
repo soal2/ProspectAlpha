@@ -1,6 +1,10 @@
 ---
 name: pdf-parse-and-trace
+version: 1.0.0
 description: 解析港股 IPO 招股书 PDF 并建立可溯源的结构化文本块。当需要将 PDF 原文转为带页码、章节路径、bbox 坐标与内容哈希的分析素材，或需要把任一结论回溯到 PDF 原文精确位置时使用。
+owners: [evidence]
+execution: prompt_only
+failure_policy: required
 ---
 
 # PDF 解析与溯源

@@ -42,12 +42,10 @@ function BacktestIndex() {
             对历史港股 IPO 案例进行风险预警回测 · 评估模型稳定性、预测准确率与业务价值
           </p>
         </div>
-        <Link
-          to="/backtest/new"
-          className="inline-flex items-center gap-1.5 rounded-full bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow-sm hover:bg-primary/90"
-        >
-          <Plus className="size-4" /> 发起新回测
-        </Link>
+        <div className="flex gap-2">
+          <Link to="/backtest/admin" className="inline-flex items-center rounded-full border border-border px-4 py-2 text-sm hover:bg-accent">市场数据管理</Link>
+          <Link to="/backtest/new" className="inline-flex items-center gap-1.5 rounded-full bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow-sm hover:bg-primary/90"><Plus className="size-4" /> 发起新回测</Link>
+        </div>
       </div>
 
       <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">

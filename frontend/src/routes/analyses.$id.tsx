@@ -1,6 +1,7 @@
 import { createFileRoute, Link, Outlet, useRouterState, notFound } from "@tanstack/react-router";
 import { ArrowLeft, FileText, Network, Database, PlayCircle } from "lucide-react";
 import { getAnalysis } from "@/lib/data-service";
+import { type RiskLevel } from "@/lib/types";
 import { RiskBadge } from "@/components/risk-badge";
 
 export const Route = createFileRoute("/analyses/$id")({
@@ -28,7 +29,7 @@ const tabs: {
   exact?: boolean;
 }[] = [
   { to: "/analyses/$id", label: "实时流", icon: PlayCircle, exact: true },
-  { to: "/analyses/$id/report", label: "IPO 风险报告", icon: FileText },
+  { to: "/analyses/$id/report", label: "风险穿透预警报告", icon: FileText },
   { to: "/analyses/$id/trace", label: "决策链路", icon: Network },
   { to: "/analyses/$id/evidence", label: "证据库", icon: Database },
 ];
@@ -74,7 +75,7 @@ function AnalysisShell() {
               </span>
             </div>
             <h1 className="mt-2 font-serif text-2xl font-semibold leading-tight">
-              {analysis.name} · IPO 风险报告
+              {analysis.name} · 港股IPO风险穿透预警报告
             </h1>
             <p className="mt-1 text-xs text-muted-foreground">
               {analysis.industry} · 上市 {analysis.listingDate} · 发行价 HK$ {analysis.offerPrice} ·
@@ -107,8 +108,15 @@ function AnalysisShell() {
   );
 }
 
-function Rating({ level }: { level: "high" | "mid" | "low" | "unrated" }) {
-  const labels = { high: "高风险", mid: "中风险", low: "低风险", unrated: "未评级" };
+function Rating({ level }: { level: RiskLevel }) {
+  const labels: Record<RiskLevel, string> = {
+    very_high: "极高风险",
+    high: "高风险",
+    medium: "中风险",
+    low: "低风险",
+    very_low: "极低风险",
+    unrated: "未评级",
+  };
   return (
     <div className="rounded-lg border border-border bg-background px-4 py-2 text-center">
       <div className="text-[10px] uppercase tracking-wider text-muted-foreground">风险评级</div>

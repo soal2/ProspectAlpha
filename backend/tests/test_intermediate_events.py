@@ -15,9 +15,6 @@ from riskagent.analysis_runs import (
     AnalysisRunCreate,
     AnalysisRunRepository,
     RiskFinding,
-    RunEvidence,
-    VerificationResult,
-    _build_report_streaming,
 )
 from riskagent.risk_rules import RiskRuleRepository
 from riskagent.runtime_events import EventBroker
@@ -199,145 +196,9 @@ def test_run_debate_stage_emits_llm_call_failed_on_exception(
     assert failed["payload"] == {"phase": "debate", "error": "simulated debate failure"}
 
 
-class _StreamingLLM:
-    async def chat_stream(self, *_args: Any, **_kwargs: Any):
-        yield "LLM 正文"
-
-
 class _PeerContext:
     message_type = MessageType.TASK
     available_peers: list[dict[str, Any]] = []
-
-
-def _report_run() -> AnalysisRun:
-    return AnalysisRun(
-        run_id="run_report_intermediate",
-        company_name="报告测试 IPO",
-        status="completed",
-        current_stage="report_generation",
-        created_at="2026-07-13T00:00:00Z",
-        completed_at="2026-07-13T00:01:00Z",
-        data_cutoff_date="2026-07-13",
-        rule_snapshot={"rule_set_id": "rs-1", "version": "v1"},
-        analysis_config={},
-        input_summary={},
-        findings=[
-            RiskFinding(
-                finding_id="finding-financial",
-                agent_name="financial_agent",
-                skill_id="financial_risk_skill",
-                rule_set_id="rs-1",
-                rule_version="v1",
-                rule_id="R-FIN",
-                dimension_code="financial",
-                rule_type="quantitative_financial",
-                category="经营风险",
-                title="现金流风险",
-                severity="high",
-                confidence=0.9,
-                trigger_condition="现金流为负",
-                evaluation_result="triggered",
-                reasoning_summary="现金流承压。",
-                evidence_ids=["evidence-financial"],
-                evidence_snippets=["经营活动现金流为负。"],
-                matched_terms=["现金流"],
-            ),
-            RiskFinding(
-                finding_id="finding-legal",
-                agent_name="legal_agent",
-                skill_id="legal_compliance_skill",
-                rule_set_id="rs-1",
-                rule_version="v1",
-                rule_id="R-LEGAL",
-                dimension_code="legal",
-                rule_type="qualitative",
-                category="关联交易",
-                title="关联交易风险",
-                severity="medium",
-                confidence=0.85,
-                trigger_condition="关联交易",
-                evaluation_result="triggered",
-                reasoning_summary="关联交易需核查。",
-                evidence_ids=["evidence-legal"],
-                evidence_snippets=["存在关联交易。"],
-                matched_terms=["关联交易"],
-            ),
-        ],
-        evidence=[
-            RunEvidence(
-                evidence_id="evidence-financial",
-                finding_id="finding-financial",
-                document_block_id="block-financial",
-                page_number=12,
-                section_path="风险因素/财务风险",
-                text="经营活动现金流为负。",
-                bbox=[0, 0, 10, 10],
-                source_hash="hash-financial",
-                relevance_score=0.86,
-                verifier_status="supported",
-            ),
-            RunEvidence(
-                evidence_id="evidence-legal",
-                finding_id="finding-legal",
-                document_block_id="block-legal",
-                page_number=18,
-                section_path="风险因素/合规风险",
-                text="存在关联交易。",
-                bbox=[0, 0, 10, 10],
-                source_hash="hash-legal",
-                relevance_score=0.82,
-                verifier_status="supported",
-            ),
-        ],
-        verification_results=[
-            VerificationResult(
-                finding_id="finding-financial",
-                status="supported",
-                checked_evidence_ids=["evidence-financial"],
-                reason="证据充分",
-                created_at="2026-07-13T00:00:10Z",
-            ),
-            VerificationResult(
-                finding_id="finding-legal",
-                status="weakly_supported",
-                checked_evidence_ids=["evidence-legal"],
-                reason="弱支持",
-                created_at="2026-07-13T00:00:11Z",
-            ),
-        ],
-    )
-
-
-async def _collect_report(run: AnalysisRun) -> str:
-    return "".join([chunk async for chunk in _build_report_streaming(run)])
-
-
-def test_build_report_streaming_emits_started_and_completed_for_each_llm_section(
-    monkeypatch,
-):
-    import riskagent.analysis_runs as analysis_runs_module
-    import riskagent.runtime_events as runtime_events
-
-    captured: list[dict[str, Any]] = []
-    broker = EventBroker()
-
-    async def publish_spy(run_id: str, event: dict[str, Any]) -> None:
-        captured.append(event)
-
-    monkeypatch.setattr(runtime_events, "get_event_broker", lambda: broker)
-    monkeypatch.setattr(broker, "publish", publish_spy)
-    monkeypatch.setattr(analysis_runs_module, "get_default_llm_client", lambda: _StreamingLLM())
-
-    body = asyncio.run(_collect_report(_report_run()))
-
-    assert "LLM 正文" in body
-    event_types = [event["event_type"] for event in captured]
-    assert event_types == [
-        "report_section_started",
-        "report_section_completed",
-        "report_section_started",
-        "report_section_completed",
-    ]
 
 
 def test_expert_handler_emits_llm_second_pass_started_and_completed(

@@ -44,18 +44,29 @@ langgraph:
 expert_debate:
   # Sits between risk_identification and cross_validation in PIPELINE_STAGES.
   # Two fixed rounds of peer critique + finding revision, then L3 red-team
-  # arbiter (周慎言 / zhou_shenyan_redteam_agent) issues an ArbiterRuling that
-  # decides whether the run may proceed.
+  # arbiter (周慎言 / zhou_shenyan_redteam_agent) issues an ArbiterRuling.
+  # When the arbiter rules request_supplement with flagged findings, an
+  # optional round 3 (focused debate) is triggered for contested findings only.
   position: between_risk_identification_and_cross_validation
+  max_rounds: 3   # 2 fixed + 1 conditional focused debate
   rounds:
     - round: 1
       kind: critique
+      round_type: critique
       shape: each_expert_critiques_each_peer_findings
       output: PeerCritique
     - round: 2
       kind: revision
+      round_type: revision
       shape: each_expert_revises_own_findings_based_on_critiques_received
       output: FindingRevision
+    - round: 3
+      kind: focused_debate
+      round_type: focused_debate
+      trigger: arbiter_decision == "request_supplement" and flagged_finding_ids non-empty
+      shape: targeted_exchange_on_contested_findings_only
+      participants: flagging_experts + flagged_experts
+      output: PeerCritique + FindingRevision (focused)
   arbiter:
     agent_name: zhou_shenyan_redteam_agent
     layer: L3
@@ -123,3 +134,19 @@ reporting:
   verifier_required: true
   require_all_modules: true
   final_synthesizer: orchestrator
+  cross_modal_resonance: true   # 基本面 × 市场情绪 跨模态共振分析
+
+# 新增专家 Agent 注册（ESG 与宏观经济）
+# 实际运行时由 seed_data.AGENT_SPECS 驱动，此处仅作架构文档。
+registered_experts:
+  - id: "esg_agent"
+    name: "林若清"
+    role: "ESG评估专家"
+    prompt_file: "esg_agent.md"
+    tier: "L1"
+
+  - id: "macro_economy_agent"
+    name: "赵宏远"
+    role: "宏观经济分析专家"
+    prompt_file: "macro_economy_agent.md"
+    tier: "L2"

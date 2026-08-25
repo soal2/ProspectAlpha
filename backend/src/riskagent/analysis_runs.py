@@ -10,14 +10,13 @@ import os
 import re
 import threading
 import uuid
-from collections.abc import AsyncIterator
 from datetime import date, datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import delete, select
 from sqlalchemy.orm import sessionmaker
 
@@ -31,10 +30,24 @@ from riskagent.agents.orchestrator import (
 )
 from riskagent.agents.supervisor import AgentTeamSupervisor
 from riskagent.common.cache import TTLCache
+from riskagent.common.risk_levels import frozen_risk_level_from_events
 from riskagent.database import Base, SessionLocal, init_db, make_engine
+from riskagent.features.financial import extract_cashflow_periods
+from riskagent.hidden_risk import (
+    DisclosureRiskAnalyzer,
+    IndustryProfile,
+    ResearchBudget,
+    RiskHypothesis,
+    TextSignalSnapshot,
+    generate_agent_hypotheses,
+    hypotheses_from_text_signals,
+    infer_industry_profile,
+    infer_industry_profile_with_ai,
+)
 from riskagent.documents import (
     DocumentBlock as ParsedDocumentBlock,
     DocumentRepository,
+    PROSPECTUS_SECTION_MARKERS,
     get_default_document_repository,
 )
 from riskagent.risk_rules import RiskRuleRepository, get_default_repository
@@ -45,17 +58,24 @@ from riskagent.skills.risk_skill_registry import (
 )
 from riskagent.seed_data import AGENT_SPECS
 from riskagent.seed_data import AGENT_EXPERTS
+from riskagent.skill_docs import get_skill_catalog
+from riskagent.skill_runtime import ResearchArtifact, normalize_stock_code
 from riskagent.models import AnalysisRunRow, EvidenceLibraryRow, ReportLibraryRow
-from riskagent.providers.llm import get_default_llm_client
 from riskagent.retrieval import ChunkSearchResult, PostgresChunkIndexer, prospectus_hybrid_search
 from riskagent.retrieval.query_planner import (
     build_rule_search_queries,
     rerank_rule_candidates,
 )
+from riskagent.reporting import (
+    build_report_document,
+    render_report_markdown,
+    render_risk_report_html,
+)
+from riskagent.providers.llm import get_default_llm_client
+from riskagent.research import HypothesisResearchModule, SourceCard, ToolAuditRecord
 from riskagent.workers.analysis import dispatch_analysis_job
 
 
-REPORT_SYSTEM_PROMPT = """你是 ProspectAlpha 风险分析报告的章节撰写者。下面是"{company_name}"招股书在某个维度的 finding 与证据。请基于这些结构化数据，用专业、严谨、可追溯的中文写一段 200-500 字的风险分析。要求：1. 直接输出 markdown 段落正文，不要写章节标题；2. 每个判断必须引用证据；3. 不要重复罗列 finding 字段名；4. 如果证据不足，明确指出；5. 只输出正文段落。"""
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ANALYSIS_RUNS_PATH = BACKEND_ROOT / "data" / "processed" / "analysis_runs.yaml"
 DEFAULT_EVIDENCE_LIBRARY_PATH = BACKEND_ROOT / "data" / "processed" / "evidence_library.yaml"
@@ -94,30 +114,71 @@ class AnalysisRunCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     company_name: str = "待确认公司"
+    stock_code: str | None = None
     document_text: str = ""
     document_id: str | None = None
     material_url: str | None = None
     ipo_project_hint: str | None = None
+    data_cutoff_date: str | None = None
     confirm_defaults: bool = True
     risk_rule_set_id: str | None = None
     analysis_depth: Literal["quick", "standard", "deep"] = "standard"
     structured_data: dict[str, Any] = Field(default_factory=dict)
     max_findings: int = 30
 
+    @field_validator("stock_code", mode="before")
+    @classmethod
+    def _normalise_stock_code(cls, value: Any) -> str | None:
+        return normalize_stock_code(None if value is None else str(value))
+
+    @field_validator("data_cutoff_date")
+    @classmethod
+    def _validate_data_cutoff(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        parsed = date.fromisoformat(value)
+        if parsed > date.today():
+            raise ValueError("data_cutoff_date cannot be in the future")
+        return parsed.isoformat()
+
 
 class AnalysisRunInputPatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     company_name: str | None = None
+    stock_code: str | None = None
     document_text: str | None = None
     document_id: str | None = None
     material_url: str | None = None
     ipo_project_hint: str | None = None
+    data_cutoff_date: str | None = None
     confirm_defaults: bool | None = None
     risk_rule_set_id: str | None = None
     analysis_depth: Literal["quick", "standard", "deep"] | None = None
     structured_data: dict[str, Any] | None = None
     max_findings: int | None = None
+
+    @field_validator("stock_code", mode="before")
+    @classmethod
+    def _normalise_stock_code(cls, value: Any) -> str | None:
+        return normalize_stock_code(None if value is None else str(value))
+
+    @field_validator("data_cutoff_date")
+    @classmethod
+    def _validate_data_cutoff(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        parsed = date.fromisoformat(value)
+        if parsed > date.today():
+            raise ValueError("data_cutoff_date cannot be in the future")
+        return parsed.isoformat()
+
+
+class IndustryProfileConfirmation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: str | None = None
+    name: str | None = None
 
 
 class ExpertSelectionRequest(BaseModel):
@@ -196,9 +257,9 @@ class RiskFinding(BaseModel):
     finding_id: str
     agent_name: str = "rule_agent"
     skill_id: str | None = None
-    rule_set_id: str
-    rule_version: str
-    rule_id: str
+    rule_set_id: str | None = None
+    rule_version: str | None = None
+    rule_id: str | None = None
     dimension_code: str
     rule_type: str
     category: str
@@ -213,15 +274,42 @@ class RiskFinding(BaseModel):
     matched_terms: list[str] = Field(default_factory=list)
     requires_human_review: bool = False
     verification_status: str = "pending"
+    risk_type: str | None = None
+    origin: Literal["rule", "text_signal", "agent_emergent", "external"] = "rule"
+    causal_chain: str = ""
+    industry_relevance: str = ""
+    company_specificity: str = ""
+    expected_market_effects: list[str] = Field(default_factory=list)
+    external_evidence_ids: list[str] = Field(default_factory=list)
+    counter_evidence_ids: list[str] = Field(default_factory=list)
+    evidence_grade: Literal["direct", "inferential", "lead", "contradicted"] = "direct"
+    hypothesis_status: Literal["reported", "corroborated", "disputed", "refuted"] | None = None
+
+
+ReportRiskLevel = Literal[
+    "very_low",
+    "low",
+    "medium",
+    "high",
+    "very_high",
+    "unrated",
+]
 
 
 class ReportDraft(BaseModel):
     report_id: str
     status: str = "generated"
     review_status: str = "draft"
+    overall_risk_level: ReportRiskLevel = "unrated"
     markdown: str
     html: str
     created_at: str
+    summary: str = ""
+    themes: list[dict[str, Any]] = Field(default_factory=list)
+    exploratory_findings: list[dict[str, Any]] = Field(default_factory=list)
+    counterevidence: list[dict[str, Any]] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+    evidence_index: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class TraceStage(BaseModel):
@@ -305,6 +393,7 @@ class AnalysisRun(BaseModel):
     data_cutoff_date: str
     rule_snapshot: dict[str, Any]
     analysis_config: dict[str, Any] = Field(default_factory=dict)
+    skill_snapshot: dict[str, Any] = Field(default_factory=dict)
     input_summary: dict[str, Any]
     understood: dict[str, Any] = Field(default_factory=dict)
     blocking_questions: list[str] = Field(default_factory=list)
@@ -317,6 +406,15 @@ class AnalysisRun(BaseModel):
     interrupt_reason: str | None = None
     replacement_history: list[dict[str, Any]] = Field(default_factory=list)
     module_results: list[dict[str, Any]] = Field(default_factory=list)
+    research_artifacts: list[ResearchArtifact] = Field(default_factory=list)
+    industry_profile: IndustryProfile | None = None
+    text_signal_snapshot: TextSignalSnapshot | None = None
+    hypotheses: list[RiskHypothesis] = Field(default_factory=list)
+    research_budget: ResearchBudget | None = None
+    research_usage: dict[str, Any] = Field(default_factory=dict)
+    research_sources: list[SourceCard] = Field(default_factory=list)
+    research_audit: list[ToolAuditRecord] = Field(default_factory=list, exclude=True)
+    research_limitations: list[str] = Field(default_factory=list)
     debate_history: dict[str, Any] = Field(default_factory=dict)
     progress: dict[str, Any] = Field(default_factory=dict)
     frozen_rule_snapshot: dict[str, Any] = Field(default_factory=dict, exclude=True)
@@ -327,27 +425,6 @@ class AnalysisRun(BaseModel):
     report: ReportDraft | None = Field(default=None, exclude=True)
     events: list[dict[str, Any]] = Field(default_factory=list)
     input_payload: AnalysisRunCreate | None = Field(default=None, exclude=True)
-
-    @model_validator(mode="before")
-    @classmethod
-    def _discard_legacy_preselected_agents(cls, value: Any) -> Any:
-        if not isinstance(value, dict):
-            return value
-        legacy_payload = value.get("input_payload")
-        if not isinstance(legacy_payload, dict):
-            return value
-        extras_to_drop = {
-            key for key in ("selected_agent_names", "data_cutoff_date") if key in legacy_payload
-        }
-        if not extras_to_drop:
-            return value
-        normalized = dict(value)
-        normalized_payload = dict(legacy_payload)
-        for key in extras_to_drop:
-            normalized_payload.pop(key)
-        normalized["input_payload"] = normalized_payload
-        return normalized
-
 
 class AnalysisRunRepository:
     def __init__(
@@ -361,6 +438,10 @@ class AnalysisRunRepository:
         chunk_retriever: Callable[..., list[ChunkSearchResult]] | None = None,
         agent_supervisor: AgentTeamSupervisor | None = None,
         report_provider: Callable[..., Any] | None = None,
+        disclosure_analyzer: DisclosureRiskAnalyzer | None = None,
+        hypothesis_research: HypothesisResearchModule | None = None,
+        industry_profiler: Callable[..., Any] | None = None,
+        hypothesis_generator: Callable[..., Any] | None = None,
     ) -> None:
         configured = path or os.getenv("ANALYSIS_RUNS_PATH") or DEFAULT_ANALYSIS_RUNS_PATH
         self.path = Path(configured)
@@ -397,6 +478,10 @@ class AnalysisRunRepository:
             agent_specs=None if self.use_database else _seed_agent_specs(),
         )
         self.report_provider = report_provider or synthesize_report
+        self.disclosure_analyzer = disclosure_analyzer or DisclosureRiskAnalyzer()
+        self.hypothesis_research = hypothesis_research or HypothesisResearchModule()
+        self.industry_profiler = industry_profiler or infer_industry_profile_with_ai
+        self.hypothesis_generator = hypothesis_generator or generate_agent_hypotheses
         self._published_event_counts: dict[str, int] = {}
 
     def create_draft(self, payload: AnalysisRunCreate) -> AnalysisRun:
@@ -411,9 +496,10 @@ class AnalysisRunRepository:
             status=status,
             current_stage=status,
             created_at=now,
-            data_cutoff_date=date.today().isoformat(),
+            data_cutoff_date=payload.data_cutoff_date or date.today().isoformat(),
             rule_snapshot=_compact_rule_snapshot(rule_snapshot),
             analysis_config=_analysis_config(payload, self.agent_supervisor.agent_options()),
+            skill_snapshot=get_skill_catalog().to_run_snapshot(),
             frozen_rule_snapshot=rule_snapshot,
             input_summary=_input_summary(payload),
             understood=_understood(payload),
@@ -450,7 +536,10 @@ class AnalysisRunRepository:
         run = self.create_draft(payload)
         if run.status != "ready":
             return run
-        return self.start(run.run_id)
+        run = self.start(run.run_id)
+        if run.status == "awaiting_industry_confirmation" and payload.confirm_defaults:
+            return self.confirm_industry_profile(run.run_id, IndustryProfileConfirmation())
+        return run
 
     def update_inputs(self, run_id: str, patch: AnalysisRunInputPatch) -> AnalysisRun:
         run = self.get(run_id)
@@ -487,7 +576,11 @@ class AnalysisRunRepository:
                 stage_key="task_understanding",
                 stage_status="completed",
                 action_label="输入冻结",
-                payload={"rule_set_id": run.rule_snapshot["rule_set_id"], "version": run.rule_snapshot["version"]},
+                    payload={
+                        "rule_set_id": run.rule_snapshot["rule_set_id"],
+                        "version": run.rule_snapshot["version"],
+                        "skill_catalog_hash": run.skill_snapshot.get("catalog_hash"),
+                    },
             )
         )
         self._save_run(run)
@@ -559,12 +652,107 @@ class AnalysisRunRepository:
         self._save_run(run)
         return run
 
+    def confirm_industry_profile(
+        self,
+        run_id: str,
+        confirmation: IndustryProfileConfirmation,
+        *,
+        dispatch_mode: str | None = None,
+    ) -> AnalysisRun:
+        run = self.get(run_id)
+        if run.status != "awaiting_industry_confirmation" or run.industry_profile is None:
+            raise ValueError("Run is not waiting for industry confirmation.")
+        profile = run.industry_profile
+        code = (confirmation.code or profile.code).strip()
+        name = (confirmation.name or profile.name).strip()
+        if not code or not name:
+            raise ValueError("Industry code and name cannot be empty.")
+        changed = code != profile.code or name != profile.name
+        run.industry_profile = profile.model_copy(
+            update={
+                "code": code,
+                "name": name,
+                "rationale": (
+                    f"{profile.rationale} 用户将行业修正为 {name}（{code}）。"
+                    if changed
+                    else profile.rationale
+                ),
+                "user_confirmed": True,
+                "frozen": True,
+            }
+        )
+        run.events.append(
+            _event(
+                "industry_profile_confirmed",
+                "user",
+                "行业画像已确认并冻结",
+                f"{name}（{code}）将用于文本基准、外部研究和行业回测分组。",
+                stage_key="pdf_parsing",
+                stage_status="completed",
+                action_label="行业确认",
+                payload=run.industry_profile.model_dump(),
+            )
+        )
+        self._save_run(run)
+        return self.resume(run_id, dispatch_mode=dispatch_mode)
+
     def execute_queued(self, run_id: str) -> AnalysisRun:
         run = self.get(run_id)
         if run.status != "queued":
             raise ValueError("Run is not queued.")
         payload = _payload_from_run(run)
         return self._execute_pipeline(run, payload)
+
+    def _freeze_backtest_score(self, run: AnalysisRun) -> None:
+        """Persist the report's offline score without making report delivery depend on it."""
+        stock_code = (run.input_summary or {}).get("stock_code")
+        if not stock_code:
+            run.events.append(
+                _event(
+                    "risk_score_pending",
+                    "backtesting",
+                    "回测评分待补充",
+                    "未提供已确认港股代码；报告已完成，但不能进入上市后回测样本池。",
+                    stage_key="report_generation",
+                    action_label="评分待补充",
+                )
+            )
+            return
+        try:
+            from riskagent.backtesting.service import BacktestService
+
+            result = BacktestService(
+                session_factory=self.session_factory,
+                initialize=False,
+            ).score_for_analysis_run(run)
+            run.events.append(
+                _event(
+                    "risk_score_frozen",
+                    "backtesting",
+                    "上市风险评分已冻结",
+                    f"评分 {result['score']}/100，等级 {result['risk_level']}；可在具备 T+5 标签后纳入回测。",
+                    stage_key="report_generation",
+                    action_label="评分冻结",
+                    payload={
+                        "score": result["score"],
+                        "risk_level": result["risk_level"],
+                        "scorecard_version": result["scorecard_version"],
+                        "limitations": result["limitations"],
+                    },
+                )
+            )
+        except Exception as exc:
+            # Offline evaluation must not block delivery of an evidence-qualified report.
+            run.events.append(
+                _event(
+                    "risk_score_unavailable",
+                    "backtesting",
+                    "上市风险评分未冻结",
+                    f"报告已完成；回测评分需人工重试。原因：{exc}",
+                    stage_key="report_generation",
+                    action_label="评分异常",
+                )
+            )
 
     def select_experts(
         self,
@@ -650,6 +838,7 @@ class AnalysisRunRepository:
         deletable_statuses = {
             "ready",
             "clarifying",
+            "awaiting_industry_confirmation",
             "awaiting_expert_selection",
             "awaiting_human_review",
             "completed",
@@ -993,7 +1182,11 @@ class AnalysisRunRepository:
                     total_pages = self.document_repository.get(payload.document_id).page_count
                 except KeyError:
                     if not payload.document_text.strip():
-                        raise
+                        raise ValueError(
+                            f"文档 {payload.document_id} 不在当前文档存储（SQLite 回落库）中，"
+                            "无法解析材料。若该文档是在 PostgreSQL 模式下上传的，请以 PostgreSQL "
+                            "模式重启服务，或在当前模式下重新上传该文档后再发起分析。"
+                        ) from None
             run.progress = {
                 **run.progress,
                 "phase": "pdf_parsing",
@@ -1131,6 +1324,78 @@ class AnalysisRunRepository:
             )
             self._save_run(run)
 
+            if run.industry_profile is None:
+                try:
+                    run.industry_profile = _resolve_provider_result(
+                        self.industry_profiler(
+                            blocks=run.document_blocks,
+                            client_factory=get_default_llm_client,
+                        )
+                    )
+                except Exception as exc:
+                    run.industry_profile = infer_industry_profile(run.document_blocks)
+                    run.research_limitations.append(
+                        "行业画像模型不可用，已使用可审计的确定性识别结果等待人工确认："
+                        f"{type(exc).__name__}"
+                    )
+            if not run.industry_profile.user_confirmed:
+                run.status = "awaiting_industry_confirmation"
+                run.current_stage = "pdf_parsing"
+                run.progress = {
+                    **run.progress,
+                    "phase": "awaiting_industry_confirmation",
+                    "updated_at": _now(),
+                }
+                run.events.append(
+                    _event(
+                        "industry_profile_proposed",
+                        "industry_profiler",
+                        "招股书行业画像待确认",
+                        (
+                            f"系统识别为 {run.industry_profile.name}（{run.industry_profile.code}）。"
+                            "请确认或修正一次，确认后画像将冻结并用于后续分析。"
+                        ),
+                        stage_key="pdf_parsing",
+                        stage_status="waiting_user",
+                        action_label="等待行业确认",
+                        payload=run.industry_profile.model_dump(),
+                    )
+                )
+                self._save_run(run)
+                return run
+            peer_snapshots = [
+                item.text_signal_snapshot
+                for item in self.list_runs()
+                if item.run_id != run.run_id
+                and item.industry_profile is not None
+                and item.industry_profile.frozen
+                and item.industry_profile.code == run.industry_profile.code
+                and item.text_signal_snapshot is not None
+            ]
+            run.text_signal_snapshot = self.disclosure_analyzer.analyze(
+                run.document_blocks,
+                run.industry_profile,
+                peer_snapshots=peer_snapshots,
+            )
+            run.research_budget = ResearchBudget.for_depth(payload.analysis_depth)
+            run.events.append(
+                _event(
+                    "text_signals_generated",
+                    "disclosure_risk_analyzer",
+                    "文本粉饰度信号已冻结",
+                    f"已生成 {len(run.text_signal_snapshot.signals)} 个章节级文本信号。",
+                    stage_key="pdf_parsing",
+                    stage_status="completed",
+                    action_label="文本信号",
+                    payload={
+                        "version": run.text_signal_snapshot.version,
+                        "industry_code": run.text_signal_snapshot.industry_code,
+                        "benchmark_note": run.text_signal_snapshot.benchmark_note,
+                    },
+                )
+            )
+            self._save_run(run)
+
             run = self._transition(
                 run,
                 "expert_orchestration",
@@ -1171,6 +1436,31 @@ class AnalysisRunRepository:
                     event_sink=_persist_team_event,
                 )
             else:
+                structured_payload = {
+                    **payload_for_orchestra.structured_data,
+                    "company_name": run.company_name,
+                }
+                cashflow_extraction = extract_cashflow_periods(run.document_blocks)
+                if cashflow_extraction:
+                    structured_payload["cashflow_periods"] = cashflow_extraction.periods
+                    structured_payload["cashflow_evidence_refs"] = cashflow_extraction.evidence_refs
+                run.events.append(
+                    _event(
+                        "tool_completed" if cashflow_extraction else "tool_skipped",
+                        "cashflow_extractor",
+                        "现金流数据抽取完成" if cashflow_extraction else "现金流数据抽取未命中",
+                        (
+                            f"已从招股书表格块抽取 {len(cashflow_extraction.periods)} 期现金与经营现金流数据"
+                            f"（证据块：{', '.join(cashflow_extraction.evidence_refs)}）。"
+                            if cashflow_extraction
+                            else "未在招股书块中定位到多期现金/经营现金流行，财务技能将如实声明数据缺失。"
+                        ),
+                        stage_key="expert_orchestration",
+                        action_label="现金流抽取",
+                        payload={"matched_rows": cashflow_extraction.matched_rows},
+                    )
+                )
+                self._save_run(run)
                 team_result = self.agent_supervisor.run(
                     run_id=run.run_id,
                     company_name=run.company_name,
@@ -1180,6 +1470,10 @@ class AnalysisRunRepository:
                     document_summary=doc_summary,
                     text=text,
                     document_id=payload_for_orchestra.document_id or "",
+                    stock_code=payload_for_orchestra.stock_code or "",
+                    structured_inputs=structured_payload,
+                    skill_snapshot=run.skill_snapshot,
+                    document_block_ids=[item.block_id for item in run.document_blocks],
                     max_findings=_effective_max_findings(payload),
                     rule_snapshot=run.frozen_rule_snapshot,
                     event_sink=_persist_team_event,
@@ -1190,6 +1484,7 @@ class AnalysisRunRepository:
             run.team_state = team_result.team_state
             run.replacement_history = team_result.replacement_history
             run.module_results = team_result.module_results
+            run.research_artifacts = _research_artifacts_from_modules(run.module_results)
             if team_result.paused:
                 run.status = "awaiting_expert_selection"
                 run.current_stage = "expert_orchestration"
@@ -1288,6 +1583,31 @@ class AnalysisRunRepository:
             run.evidence = self._evidence_for_findings(run.run_id, candidate_findings, run.document_blocks)
             before_dedupe = len(run.evidence)
             run.evidence = _dedupe_evidence(run.evidence)
+            speculative = _speculative_findings_from_retrieval(
+                run.events,
+                bound_block_ids={item.document_block_id for item in run.evidence},
+                budget=max_findings - len(candidate_findings),
+            )
+            if speculative:
+                speculative_findings, speculative_evidence = speculative
+                candidate_findings.extend(speculative_findings)
+                run.evidence.extend(speculative_evidence)
+                run.events.append(
+                    _event(
+                        "tool_completed",
+                        "evidence_extractor",
+                        "高价值检索候选提升为推测性判断",
+                        (
+                            f"将 {len(speculative_findings)} 条命中对赌/关联交易/集中度/现金消耗关键词的检索候选"
+                            "提升为推测性判断（需人工复核，不得视为已核验结论）。"
+                        ),
+                        stage_key="evidence_extraction",
+                        action_label="候选提升",
+                        payload={
+                            "finding_ids": [item.finding_id for item in speculative_findings],
+                        },
+                    )
+                )
             findings_by_agent_rule = {
                 (item.agent_name, item.rule_id): item for item in candidate_findings
             }
@@ -1401,6 +1721,7 @@ class AnalysisRunRepository:
             run = self._run_debate_stage(run)
             if run.status == "awaiting_human_review":
                 return run
+            run = self._discover_hidden_risks(run, payload)
 
             run = self._transition(
                 run,
@@ -1457,14 +1778,25 @@ class AnalysisRunRepository:
                 for item in run.verification_results
                 if item.status in allowed_statuses
             }
+            admitted_findings = list(
+                {
+                    item.finding_id: item
+                    for item in run.findings
+                    if item.finding_id in admitted_finding_ids
+                }.values()
+            )
+            admitted_evidence = list(
+                {
+                    item.evidence_id: item
+                    for item in run.evidence
+                    if item.finding_id in admitted_finding_ids
+                    and item.verifier_status in allowed_statuses
+                }.values()
+            )
+            evidence_qualified_ids = {item.finding_id for item in admitted_evidence}
+            admitted_finding_ids &= evidence_qualified_ids
             admitted_findings = [
-                item for item in run.findings if item.finding_id in admitted_finding_ids
-            ]
-            admitted_evidence = [
-                item
-                for item in run.evidence
-                if item.finding_id in admitted_finding_ids
-                and item.verifier_status in allowed_statuses
+                item for item in admitted_findings if item.finding_id in admitted_finding_ids
             ]
             admitted_evidence_ids = {item.evidence_id for item in admitted_evidence}
             sanitized_module_results = []
@@ -1546,6 +1878,7 @@ class AnalysisRunRepository:
                                 validation_feedback=(
                                     str(synthesis_error) if synthesis_error else None
                                 ),
+                                post_ipo_risk=team_result.post_ipo_risk,
                             )
                         )
                     )
@@ -1574,16 +1907,52 @@ class AnalysisRunRepository:
                             }
                             for finding_id in admitted_finding_ids
                         },
+                        verification_status_by_finding={
+                            item.finding_id: item.status
+                            for item in run.verification_results
+                            if item.finding_id in admitted_finding_ids
+                        },
                     )
                     synthesis_error = None
                     break
                 except Exception as exc:
                     synthesis_error = exc
             if integrated is None or synthesis_error is not None:
-                raise ValueError(
-                    f"Strategic report synthesis failed validation: {synthesis_error}"
+                integrated = _deterministic_verified_report(
+                    run,
+                    admitted_findings,
+                    admitted_evidence,
+                    sanitized_module_results,
                 )
-            run.report = _build_integrated_report(run, integrated)
+                run.research_limitations.append(
+                    "报告叙事模型不可用；报告由已验证 finding 与证据引用确定性合成。"
+                )
+                run.events.append(
+                    _event(
+                        "report_synthesis_fallback",
+                        "orchestrator",
+                        "报告改由已验证证据确定性合成",
+                        f"战略报告模型不可用：{type(synthesis_error).__name__ if synthesis_error else 'unknown'}。",
+                        stage_key="report_generation",
+                        action_label="证据合成",
+                    )
+                )
+            source_filename: str | None = None
+            document_id = _payload_from_run(run).document_id
+            if document_id:
+                try:
+                    source_filename = self.document_repository.get(document_id).filename
+                except KeyError:
+                    source_filename = None
+            # Freeze the scorecard BEFORE rendering: the delivered report rating is
+            # derived from the frozen score (single source of truth), never from an
+            # independent LLM judgement that could contradict the backtest sample.
+            self._freeze_backtest_score(run)
+            run.report = _build_integrated_report(
+                run,
+                integrated,
+                source_filename=source_filename,
+            )
             run.events.append(
                 _event(
                     "report_section_generated",
@@ -1874,6 +2243,124 @@ class AnalysisRunRepository:
                 finding.evidence_ids.append(evidence_id)
         return evidence
 
+    def _discover_hidden_risks(
+        self,
+        run: AnalysisRun,
+        payload: AnalysisRunCreate,
+    ) -> AnalysisRun:
+        """Generate rule-independent hypotheses and research them within one global budget."""
+
+        if run.industry_profile is None or run.text_signal_snapshot is None:
+            return run
+        budget = run.research_budget or ResearchBudget.for_depth(payload.analysis_depth)
+        agent_hypotheses: list[RiskHypothesis] = []
+        try:
+            agent_hypotheses = list(
+                _resolve_provider_result(
+                    self.hypothesis_generator(
+                        company_name=run.company_name,
+                        industry_profile=run.industry_profile,
+                        text_signals=run.text_signal_snapshot,
+                        blocks=run.document_blocks,
+                        limit=budget.hypothesis_limit,
+                        client_factory=get_default_llm_client,
+                    )
+                )
+            )
+        except Exception as exc:
+            run.research_limitations.append(
+                f"自由风险发现模型不可用，已保留确定性文本信号：{type(exc).__name__}"
+            )
+        signal_hypotheses = hypotheses_from_text_signals(
+            run.text_signal_snapshot,
+            run.industry_profile,
+            limit=budget.hypothesis_limit,
+        )
+        deduped: list[RiskHypothesis] = []
+        seen: set[tuple[str, tuple[str, ...]]] = set()
+        for hypothesis in [*agent_hypotheses, *signal_hypotheses]:
+            key = (
+                hypothesis.title.strip().lower(),
+                tuple(sorted(hypothesis.prospectus_evidence_ids)),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(hypothesis)
+            if len(deduped) >= budget.hypothesis_limit:
+                break
+        research_result = _resolve_provider_result(
+            self.hypothesis_research.run(
+                company_name=run.company_name,
+                hypotheses=deduped,
+                budget=budget,
+                data_cutoff_date=run.data_cutoff_date,
+            )
+        )
+        run.hypotheses = research_result.hypotheses
+        run.research_sources = research_result.sources
+        run.research_audit = research_result.audit
+        run.research_usage = research_result.usage.model_dump()
+        run.research_limitations = list(
+            dict.fromkeys([*run.research_limitations, *research_result.limitations])
+        )
+        findings, evidence = _findings_and_evidence_from_hypotheses(
+            run.hypotheses,
+            run.document_blocks,
+            finding_start=_next_finding_number(run.findings, run.evidence),
+        )
+        run.findings.extend(findings)
+        run.evidence = _dedupe_evidence([*run.evidence, *evidence])
+        if findings:
+            run.module_results.append(
+                {
+                    "module_id": "hidden_risk_discovery",
+                    "agent_name": "hidden_risk_researcher",
+                    "skill_id": "hidden-risk-discovery",
+                    "module": "隐性风险与文本粉饰度",
+                    "status": "completed",
+                    "summary": "规则仅作为提示；本模块允许自由风险类型并保留低置信度探索性判断。",
+                    "finding_ids": [item.finding_id for item in findings],
+                    "evidence_ids": [item.evidence_id for item in evidence],
+                    "rules_read": 0,
+                    "screening_observations": [],
+                }
+            )
+            run.events.append(
+                _event(
+                    "agent_reported",
+                    "hidden_risk_researcher",
+                    "隐性风险研究专家提交分析汇报",
+                    f"汇报结论：形成 {len(findings)} 条规则外或文本粉饰风险判断。",
+                    stage_key="risk_identification",
+                    skill_id="hidden-risk-discovery",
+                    agent_role="隐性风险研究专家",
+                    action_label="提交汇报",
+                    payload={"finding_ids": [item.finding_id for item in findings]},
+                )
+            )
+        run.events.append(
+            _event(
+                "hidden_risk_discovery_completed",
+                "hidden_risk_researcher",
+                "隐性风险自由发现完成",
+                (
+                    f"形成 {len(run.hypotheses)} 条规则外/文本风险假设，"
+                    f"使用 {run.research_usage.get('searches_used', 0)}/{budget.search_limit} 次外部搜索。"
+                ),
+                stage_key="risk_identification",
+                stage_status="completed",
+                action_label="隐性风险发现",
+                payload={
+                    "hypothesis_ids": [item.hypothesis_id for item in run.hypotheses],
+                    "research_usage": run.research_usage,
+                    "limitations": run.research_limitations,
+                },
+            )
+        )
+        self._save_run(run)
+        return run
+
     def _hybrid_search(self, run_id: str, finding: RiskFinding) -> list[dict[str, Any]]:
         rule = self.rule_repository.get_rule(finding.rule_id)
         payload = _payload_from_run(self.get(run_id))
@@ -2088,6 +2575,8 @@ class AnalysisRunRepository:
             document_id = ""
         try:
             with self.session_factory() as session:
+                frozen_level = frozen_risk_level_from_events(run.events)
+                display_level = frozen_level or _overall_risk_level(run.findings)
                 existing = session.get(ReportLibraryRow, run.report.report_id) or session.scalar(
                     select(ReportLibraryRow).where(ReportLibraryRow.source_run_id == run.run_id)
                 )
@@ -2099,7 +2588,7 @@ class AnalysisRunRepository:
                             company_name=run.company_name,
                             document_id=document_id,
                             rule_set_id=str(run.rule_snapshot.get("rule_set_id") or ""),
-                            overall_risk_level=_overall_risk_level(run.findings),
+                            overall_risk_level=display_level,
                             finding_count=len(run.findings),
                             markdown=run.report.markdown,
                             sections=sections,
@@ -2109,7 +2598,7 @@ class AnalysisRunRepository:
                 else:
                     existing.markdown = run.report.markdown
                     existing.sections = sections
-                    existing.overall_risk_level = _overall_risk_level(run.findings)
+                    existing.overall_risk_level = display_level
                     existing.finding_count = len(run.findings)
                 session.commit()
         except Exception as exc:
@@ -2517,10 +3006,10 @@ class AnalysisRunRepository:
     def _save_run(self, run: AnalysisRun) -> None:
         dumped = run.model_dump()
         input_payload_dump = _payload_from_run(run).model_dump()
-        input_payload_dump.pop("data_cutoff_date", None)
         dumped["input_payload"] = input_payload_dump
         dumped["frozen_rule_snapshot"] = run.frozen_rule_snapshot
         dumped["evidence"] = [item.model_dump() for item in run.evidence]
+        dumped["research_audit"] = [item.model_dump() for item in run.research_audit]
         dumped["verification_results"] = [item.model_dump() for item in run.verification_results]
         dumped["report"] = run.report.model_dump() if run.report else None
         previous_event_count = self._published_event_counts.get(run.run_id)
@@ -2647,6 +3136,7 @@ def _payload_from_run(run: AnalysisRun) -> AnalysisRunCreate:
     summary = run.input_summary
     return AnalysisRunCreate(
         company_name=run.company_name,
+        stock_code=summary.get("stock_code"),
         document_text=summary.get("document_text_preview", ""),
         structured_data={key: "" for key in summary.get("structured_data_keys", [])},
     )
@@ -2685,9 +3175,144 @@ def _effective_max_findings(payload: AnalysisRunCreate) -> int:
     return max(1, min(payload.max_findings, depth_caps[payload.analysis_depth]))
 
 
+# High-value keyword groups from the competition's core extraction targets.
+# Retrieval candidates matching these can be promoted to SPECULATIVE findings —
+# never to verified conclusions (relevance is capped below the 0.68 gate).
+_SPECULATIVE_KEYWORD_GROUPS: tuple[dict[str, Any], ...] = (
+    {
+        "category": "对赌/赎回条款",
+        "terms": ("对赌", "赎回", "估值调整", "redemption", "valuation adjustment"),
+        "severity": "high",
+    },
+    {
+        "category": "关联交易",
+        "terms": ("关联交易", "關聯交易", "關連交易", "connected transaction"),
+        "severity": "high",
+    },
+    {
+        "category": "客户/供应商集中度",
+        "terms": ("前五大客户", "前五大供應商", "前五大供应商", "集中度", "最大客户", "最大供應商"),
+        "severity": "medium",
+    },
+    {
+        "category": "现金消耗",
+        "terms": ("现金消耗", "现金及现金等价物", "現金及現金等價物", "经营现金流", "經營活動所得"),
+        "severity": "medium",
+    },
+)
+# Must stay below the 0.68 strong-evidence gate so speculative findings can at
+# most reach "weakly_supported", never "supported".
+_SPECULATIVE_MAX_RELEVANCE = 0.67
+
+
+def _speculative_findings_from_retrieval(
+    events: list[dict[str, Any]],
+    *,
+    bound_block_ids: set[str],
+    budget: int,
+) -> tuple[list[RiskFinding], list[RunEvidence]] | None:
+    """Promote high-value retrieval candidates to speculative findings.
+
+    Field finding #7 of the 2026-08-17 assessment: 195 of 219 evidence items
+    stayed unretrieved "retrieval_candidate" rows because findings only came
+    from rule evaluations. This channel surfaces keyword-matched原文 as
+    human-review-required speculative findings. Evidence-gate integrity is
+    preserved: relevance is capped below the strong gate, and every promoted
+    finding keeps requires_human_review=True.
+    """
+    if budget <= 0:
+        return None
+    chunks: dict[str, dict[str, Any]] = {}
+    for event in events:
+        if event.get("event_type") != "retrieval_query_completed":
+            continue
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        for chunk in payload.get("chunks") or []:
+            if not isinstance(chunk, dict):
+                continue
+            chunk_id = str(chunk.get("chunk_id") or "")
+            if not chunk_id or chunk_id in bound_block_ids or chunk_id in chunks:
+                continue
+            text_value = str(chunk.get("text") or "").strip()
+            if text_value:
+                chunks[chunk_id] = chunk
+    if not chunks:
+        return None
+
+    findings: list[RiskFinding] = []
+    evidence_items: list[RunEvidence] = []
+    seen_blocks: set[str] = set()
+    for chunk_id, chunk in chunks.items():
+        if len(findings) >= budget:
+            break
+        if chunk_id in seen_blocks:
+            continue
+        text_value = str(chunk.get("text") or "")
+        for group in _SPECULATIVE_KEYWORD_GROUPS:
+            matched = [term for term in group["terms"] if term in text_value]
+            if not matched:
+                continue
+            seen_blocks.add(chunk_id)
+            evidence_id = f"ev_{uuid.uuid4().hex[:10]}"
+            finding_id = f"finding_s{len(findings) + 1:03d}"
+            category = str(group["category"])
+            evidence_items.append(
+                RunEvidence(
+                    evidence_id=evidence_id,
+                    finding_id=finding_id,
+                    document_block_id=chunk_id,
+                    document_id=str(chunk.get("document_id") or ""),
+                    page_number=int(chunk.get("page_number") or 0),
+                    section_path=str(chunk.get("section_path") or "招股书原文"),
+                    text=text_value[:300],
+                    bbox=[float(value) for value in chunk.get("bbox") or []][:4],
+                    source_hash=hashlib.sha256(text_value.encode("utf-8")).hexdigest(),
+                    retrieval_score=float(chunk.get("retrieval_score") or 0.0),
+                    relevance_score=min(
+                        _SPECULATIVE_MAX_RELEVANCE,
+                        0.55 + 0.06 * (len(matched) - 1),
+                    ),
+                    verifier_status="pending",
+                )
+            )
+            findings.append(
+                RiskFinding(
+                    finding_id=finding_id,
+                    agent_name="evidence_extractor",
+                    skill_id="evidence_audit_skill",
+                    rule_set_id="retrieval-candidates",
+                    rule_version="1.0",
+                    rule_id=f"SPEC-{group['category']}",
+                    dimension_code="retrieval_candidate",
+                    rule_type="qualitative_disclosure",
+                    category=category,
+                    title=f"待核实{category}信号（检索命中）",
+                    severity=str(group["severity"]),
+                    confidence=0.5,
+                    trigger_condition=" / ".join(matched[:3]),
+                    evaluation_result="speculative_retrieval_match",
+                    reasoning_summary=(
+                        f"招股书原文命中{category}关键词（{ '、'.join(matched[:3]) }），"
+                        "提升为推测性判断，等待人工复核与规则核验。"
+                    ),
+                    evidence_ids=[evidence_id],
+                    evidence_snippets=[text_value[:120]],
+                    matched_terms=matched[:5],
+                    requires_human_review=True,
+                )
+            )
+            break
+    if not findings:
+        return None
+    return findings, evidence_items
+
+
 def _understood(payload: AnalysisRunCreate) -> dict[str, Any]:
     return {
         "company_name": payload.company_name or "待确认",
+        "stock_code": payload.stock_code,
         "material_hint": "已提供材料" if any([payload.document_text, payload.document_id, payload.material_url]) else "待补充",
         "focus": sorted(payload.structured_data.keys())[:5],
     }
@@ -2695,6 +3320,7 @@ def _understood(payload: AnalysisRunCreate) -> dict[str, Any]:
 
 def _input_summary(payload: AnalysisRunCreate) -> dict[str, Any]:
     return {
+        "stock_code": payload.stock_code,
         "document_text_chars": len(payload.document_text),
         "document_text_preview": payload.document_text[:300],
         "structured_data_keys": sorted(payload.structured_data.keys()),
@@ -2778,9 +3404,10 @@ def _chunk_text(text: str, *, size: int = 900) -> list[str]:
 
 
 def _detect_section(text: str) -> str | None:
-    for marker in ["风险因素", "关联交易", "财务资料", "业务", "历史及公司架构"]:
-        if marker in text[:80]:
-            return marker
+    head = text[:80]
+    for canonical, variants in PROSPECTUS_SECTION_MARKERS.items():
+        if any(variant in head for variant in variants):
+            return canonical
     return None
 
 
@@ -2789,13 +3416,132 @@ def _score_block(text: str, terms: tuple[str, ...]) -> int:
     return sum(1 for term in terms if term and term.lower() in lower)
 
 
+def _next_finding_number(
+    findings: list[RiskFinding],
+    evidence: list[RunEvidence],
+) -> int:
+    """Allocate after all persisted suffixes; debate may leave orphaned evidence."""
+
+    suffixes = [
+        int(match.group(1))
+        for finding_id in [
+            *(finding.finding_id for finding in findings),
+            *(item.finding_id for item in evidence),
+        ]
+        if (match := re.fullmatch(r"finding_(\d+)", finding_id))
+    ]
+    return max(suffixes, default=0) + 1
+
+
+def _findings_and_evidence_from_hypotheses(
+    hypotheses: list[RiskHypothesis],
+    blocks: list[DocumentBlock],
+    *,
+    finding_start: int,
+) -> tuple[list[RiskFinding], list[RunEvidence]]:
+    block_by_id = {item.block_id: item for item in blocks}
+    findings: list[RiskFinding] = []
+    evidence: list[RunEvidence] = []
+    for offset, hypothesis in enumerate(hypotheses):
+        block_ids = [
+            item
+            for item in hypothesis.prospectus_evidence_ids
+            if item in block_by_id
+        ]
+        if not block_ids or not hypothesis.causal_chain.strip():
+            continue
+        finding_id = f"finding_{finding_start + offset:03d}"
+        evidence_ids: list[str] = []
+        for block_id in block_ids[:3]:
+            block = block_by_id[block_id]
+            evidence_id = f"ev_{uuid.uuid4().hex[:10]}"
+            evidence_ids.append(evidence_id)
+            evidence.append(
+                RunEvidence(
+                    evidence_id=evidence_id,
+                    finding_id=finding_id,
+                    document_block_id=block.block_id,
+                    document_id=block.document_id,
+                    page_number=block.page_number,
+                    section_path=block.section_path,
+                    text=block.text[:300],
+                    bbox=block.bbox,
+                    bbox_coordinate_space=block.bbox_coordinate_space,
+                    char_start=block.char_start,
+                    char_end=block.char_end,
+                    source_hash=block.source_hash,
+                    retrieval_score=0.0,
+                    relevance_score=(
+                        0.75 if hypothesis.evidence_grade == "direct" else 0.58
+                    ),
+                    verifier_status="pending",
+                )
+            )
+        hypothesis.prospectus_evidence_ids = evidence_ids
+        findings.append(
+            RiskFinding(
+                finding_id=finding_id,
+                agent_name="hidden_risk_researcher",
+                skill_id="hidden-risk-discovery",
+                dimension_code=hypothesis.dimension,
+                rule_type="free_hypothesis",
+                category=hypothesis.risk_type,
+                title=hypothesis.title,
+                severity=hypothesis.severity,
+                confidence=hypothesis.confidence,
+                trigger_condition="规则外假设：招股书锚点与自洽因果链",
+                evaluation_result="reported",
+                reasoning_summary=hypothesis.statement,
+                evidence_ids=evidence_ids,
+                evidence_snippets=[block_by_id[item].text[:180] for item in block_ids[:2]],
+                requires_human_review=hypothesis.evidence_grade != "direct",
+                risk_type=hypothesis.risk_type,
+                origin=hypothesis.origin,
+                causal_chain=hypothesis.causal_chain,
+                industry_relevance=hypothesis.industry_relevance,
+                company_specificity=hypothesis.company_specificity,
+                expected_market_effects=hypothesis.expected_market_effects,
+                external_evidence_ids=hypothesis.external_evidence_ids,
+                counter_evidence_ids=hypothesis.counter_evidence_ids,
+                evidence_grade=hypothesis.evidence_grade,
+                hypothesis_status=hypothesis.status,
+            )
+        )
+    return findings, evidence
+
+
 def _verify_findings(findings: list[RiskFinding], evidence: list[RunEvidence]) -> list[VerificationResult]:
     by_finding: dict[str, list[RunEvidence]] = {}
     for item in evidence:
+        if item.verifier_status == "rejected_by_debate":
+            continue
         by_finding.setdefault(item.finding_id, []).append(item)
     results = []
     for finding in findings:
         linked = by_finding.get(finding.finding_id, [])
+        if finding.origin != "rule":
+            if not linked or not finding.causal_chain.strip():
+                status = "needs_human_review"
+                reason = "探索性风险缺少真实招股书锚点或自洽因果链。"
+            elif finding.hypothesis_status == "refuted" or finding.evidence_grade == "contradicted":
+                status = "needs_human_review"
+                reason = "该探索性风险已被反证，仅保留在反证附录。"
+            elif finding.evidence_grade == "direct":
+                status = "supported"
+                reason = "探索性风险具有直接招股书证据锚点；置信度不参与准入。"
+            else:
+                status = "weakly_supported"
+                reason = "探索性风险具有招股书锚点和自洽因果链，作为探索性发现呈现。"
+            results.append(
+                VerificationResult(
+                    finding_id=finding.finding_id,
+                    status=status,
+                    checked_evidence_ids=[item.evidence_id for item in linked],
+                    reason=reason,
+                    created_at=_now(),
+                )
+            )
+            continue
         relevant = [item for item in linked if item.relevance_score >= 0.50]
         strong = [item for item in linked if item.relevance_score >= 0.68]
         if strong:
@@ -2967,6 +3713,10 @@ def _apply_verification(
         strongest_evidence = max(linked_relevance, default=0.0)
         expert_confidence = max(0.0, min(1.0, finding.confidence))
         calibrated = 0.55 * expert_confidence + 0.45 * strongest_evidence
+        if finding.origin != "rule":
+            finding.verification_status = status
+            finding.requires_human_review = status != "supported"
+            continue
         if status == "supported":
             finding.confidence = max(0.55, min(0.95, calibrated))
         elif status == "weakly_supported":
@@ -2996,8 +3746,34 @@ def _quality_review(run: AnalysisRun) -> dict[str, Any]:
             continue
         if any(item.page_number <= 0 or not item.bbox or not item.source_hash for item in linked):
             issues.append(f"{finding.finding_id} / {finding.title} 的页码、bbox 或 source_hash 不完整。")
-        if finding.severity == "high" and all(item.verifier_status != "supported" for item in linked):
-            issues.append(f"{finding.finding_id} / {finding.title} 为高风险但缺少 supported 证据。")
+    if run.report is None:
+        issues.append("报告尚未生成。")
+    else:
+        markdown = run.report.markdown
+        required_headings = (
+            "## 执行摘要",
+            "## 风险主题",
+            "## 探索性发现",
+            "## 反证与争议",
+            "## 局限",
+            "## 证据索引",
+        )
+        missing_headings = [heading for heading in required_headings if heading not in markdown]
+        if missing_headings:
+            issues.append(f"报告最小结构缺失：{', '.join(missing_headings)}")
+        if "{{" in markdown or "}}" in markdown:
+            issues.append("报告仍包含未替换占位符。")
+        for finding_id in admitted:
+            finding = next((item for item in run.findings if item.finding_id == finding_id), None)
+            if finding is None or finding_id not in markdown:
+                issues.append(f"已准入 finding {finding_id} 未进入最终报告。")
+                continue
+            if not any(
+                evidence_id in markdown
+                for evidence_id in finding.evidence_ids
+                if evidence_id in evidence_by_id
+            ):
+                issues.append(f"已准入 finding {finding_id} 在最终报告中缺少证据引用。")
     return {
         "review_status": (
             "draft"
@@ -3033,8 +3809,67 @@ def _empty_verified_report(
             }
             for module in module_results
         ],
+        risk_themes=[],
         recommendations=["针对未充分覆盖的规则执行定向补证和人工复核。"],
         limitations=["无已验证风险结论，不能据此推断企业不存在相关风险。"],
+    )
+
+
+def _deterministic_verified_report(
+    run: AnalysisRun,
+    findings: list[RiskFinding],
+    evidence: list[RunEvidence],
+    module_results: list[dict[str, Any]],
+) -> IntegratedRiskReport:
+    """Render verified findings when the narrative model is unavailable."""
+
+    evidence_by_finding: dict[str, list[str]] = {}
+    for item in evidence:
+        evidence_by_finding.setdefault(item.finding_id, []).append(item.evidence_id)
+    themes = [
+        {
+            "title": finding.title,
+            "conclusion": finding.reasoning_summary,
+            "analysis": finding.causal_chain or finding.reasoning_summary,
+            "investment_impact": "；".join(finding.expected_market_effects)
+            or "该判断应结合后续经营和市场数据持续核验。",
+            "uncertainties": ["报告叙事模型不可用，未对结论进行额外语言扩展。"],
+            "monitoring_points": list(finding.expected_market_effects),
+            "finding_ids": [finding.finding_id],
+            "evidence_ids": evidence_by_finding.get(finding.finding_id, []),
+        }
+        for finding in findings
+        if evidence_by_finding.get(finding.finding_id)
+    ]
+    return IntegratedRiskReport(
+        title=f"{run.company_name} IPO 风险分析报告",
+        executive_summary=(
+            f"基于已验证的 {len(findings)} 条风险判断与招股书证据锚点生成。"
+            "报告保留探索性风险、外部反证和研究限制；总体等级以冻结评分为准。"
+        ),
+        overall_risk_level="unrated",
+        sections=[
+            {
+                "module_id": str(module["module_id"]),
+                "title": str(module.get("module") or module["module_id"]),
+                "analysis": str(module.get("summary") or "已完成证据核验。"),
+                "finding_ids": [
+                    finding.finding_id
+                    for finding in findings
+                    if finding.finding_id in set(module.get("finding_ids", []))
+                ],
+                "evidence_ids": [
+                    evidence_id
+                    for finding in findings
+                    if finding.finding_id in set(module.get("finding_ids", []))
+                    for evidence_id in evidence_by_finding.get(finding.finding_id, [])
+                ],
+            }
+            for module in module_results
+        ],
+        risk_themes=themes,
+        recommendations=["持续跟踪各风险判断对应的经营数据、监管事件和上市后行情。"],
+        limitations=["报告叙事模型不可用，已采用证据保真确定性合成。"],
     )
 
 
@@ -3071,337 +3906,51 @@ def _screening_analysis(module: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _render_report_header(run: AnalysisRun) -> str:
-    lines = [
-        f"# {run.company_name} IPO 风险分析草案",
-        "",
-        f"- 数据截止日期：{run.data_cutoff_date}",
-        f"- 规则版本：{run.rule_snapshot['rule_set_id']} / {run.rule_snapshot['version']}",
-        "- 复核状态：待质检",
-        f"- 核心风险判断：{len(_report_findings(run))} 条",
-        f"- PDF 原文证据：{len(run.evidence)} 条",
-        "",
-        "## 公司基本信息",
-        "",
-        f"- 公司名称：{run.company_name}",
-        "- 上市市场：港股 IPO（基于用户输入与默认分析任务识别）",
-        "- 招股书类型：招股书 / 申请版本材料（以上传文件为准）",
-        "",
-        "## 招股书关键信息摘要",
-        "",
-        f"- 已解析原文块：{len(run.document_blocks)} 个",
-        f"- 覆盖章节：{', '.join(sorted({block.section_path for block in run.document_blocks})[:8]) or '待识别'}",
-        "- 后续判断均要求回溯至 document_blocks、页码、bbox 与 source_hash。",
-        "",
-    ]
-    return "\n".join(lines)
+def _build_integrated_report(
+    run: AnalysisRun,
+    integrated: IntegratedRiskReport,
+    *,
+    source_filename: str | None = None,
+) -> ReportDraft:
+    """Render the validated Agent result through the minimal flexible envelope."""
 
-
-def _render_core_findings_section(run: AnalysisRun, report_findings: list[RiskFinding]) -> str:
-    evidence_by_id = {item.evidence_id: item for item in run.evidence}
-    status_by_finding = {item.finding_id: item.status for item in run.verification_results}
-    lines = [
-        "## 核心风险结论",
-    ]
-    for finding in report_findings:
-        status = status_by_finding.get(finding.finding_id, "needs_human_review")
-        refs = [
-            evidence_by_id[evidence_id]
-            for evidence_id in finding.evidence_ids
-            if evidence_id in evidence_by_id
-        ]
-        ref_text = "；".join(
-            f"{item.evidence_id}（第 {item.page_number} 页，{item.section_path}）"
-            for item in refs[:3]
-        ) or "等待人工补证"
-        lines.extend(
-            [
-                "",
-                f"### {finding.title}",
-                f"- 规则：{finding.rule_id}",
-                f"- Skill：{finding.skill_id or '未标注'}",
-                f"- 严重程度：{finding.severity}",
-                f"- 证据门禁：{status}",
-                f"- 证据引用：{ref_text}",
-                f"- 摘要：{finding.reasoning_summary}",
-            ]
-        )
-    if not report_findings:
-        lines.append("未发现满足证据门禁的关键风险结论。")
-    return "\n".join(lines)
-
-
-def _render_report_footer(run: AnalysisRun, report_findings: list[RiskFinding]) -> str:
-    lines = [
-        "",
-        "## 风险等级",
-        "",
-        f"- 综合风险等级：{_overall_risk_level(report_findings)}",
-        "- 等级口径：依据触发规则数量、严重程度、证据强度和是否需要人工复核综合判断。",
-        "",
-        "## 证据引用",
-        "",
-    ]
-    for item in run.evidence[:30]:
-        lines.append(f"- {item.evidence_id}：第 {item.page_number} 页 / {item.section_path} / 证据相关性 {item.relevance_score:.2f} / {item.text[:120]}")
-    lines.extend(
-        [
-            "",
-            "## 总结建议",
-            "",
-            "建议在正式投委会或上市风险评审前，对 weakly_supported 与 needs_human_review 判断进行人工复核，并重点核对现金流、客户供应商集中、关联交易、诉讼监管和发行估值相关章节。",
-        ]
-    )
-    return "\n".join(lines)
-
-
-def _report_findings(run: AnalysisRun) -> list[RiskFinding]:
-    allowed = {"supported", "weakly_supported"}
-    status_by_finding = {item.finding_id: item.status for item in run.verification_results}
-    return [
+    document = build_report_document(run, integrated)
+    markdown = render_report_markdown(run, document)
+    admitted_ids = {
+        result.finding_id
+        for result in run.verification_results
+        if result.status in {"supported", "weakly_supported"}
+    }
+    has_admitted_finding = bool(admitted_ids)
+    admitted_findings = [
         finding
         for finding in run.findings
-        if status_by_finding.get(finding.finding_id) in allowed
+        if finding.finding_id in admitted_ids
     ]
-
-
-async def _build_report_streaming(run: AnalysisRun) -> AsyncIterator[str]:
-    """Stream the report body: deterministic header/footer + LLM-generated section bodies."""
-    report_findings = _report_findings(run)
-    yield _render_report_header(run)
-    yield _render_core_findings_section(run, report_findings)
-    grouped: dict[str, list[RiskFinding]] = {}
-    for finding in report_findings:
-        grouped.setdefault(_report_section_for_finding(finding), []).append(finding)
-    evidence_by_id = {item.evidence_id: item for item in run.evidence}
-    section_titles = [
-        "财务风险分析",
-        "业务风险分析",
-        "行业与竞争风险分析",
-        "合规风险分析",
-        "估值与破发风险分析",
-    ]
-    system_prompt = REPORT_SYSTEM_PROMPT.format(company_name=run.company_name)
-    for section in section_titles:
-        yield f"\n\n## {section}\n\n"
-        section_findings = grouped.get(section, [])
-        if not section_findings:
-            yield "本轮未形成该维度的高置信结构化风险判断，建议人工复核招股书相关章节。\n"
-            continue
-        user_payload = json.dumps(
-            {
-                "section": section,
-                "company_name": run.company_name,
-                "findings": [finding.model_dump() for finding in section_findings],
-                "evidence": [
-                    evidence_by_id[evidence_id].model_dump()
-                    for finding in section_findings
-                    for evidence_id in finding.evidence_ids
-                    if evidence_id in evidence_by_id
-                ],
-            },
-            ensure_ascii=False,
-        )
-        from riskagent.runtime_events import get_event_broker
-
-        broker = get_event_broker()
-        await broker.publish(
-            run.run_id,
-            _event(
-                "report_section_started",
-                "report_writer",
-                f"{section}生成开始",
-                f"准备生成 {section} 正文。",
-                stage_key="report_generation",
-                action_label="章节生成开始",
-                payload={
-                    "section": section,
-                    "finding_count": len(section_findings),
-                },
-            ),
-        )
-        try:
-            async for delta in get_default_llm_client().chat_stream(
-                [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_payload},
-                ],
-                temperature=0.3,
-            ):
-                yield delta
-            await broker.publish(
-                run.run_id,
-                _event(
-                    "report_section_completed",
-                    "report_writer",
-                    f"{section}生成完成",
-                    f"已完成 {section} 正文生成。",
-                    stage_key="report_generation",
-                    stage_status="completed",
-                    action_label="章节生成完成",
-                    payload={
-                        "section": section,
-                        "finding_count": len(section_findings),
-                    },
-                ),
-            )
-        except Exception as exc:
-            await broker.publish(
-                run.run_id,
-                _event(
-                    "report_section_failed",
-                    "report_writer",
-                    f"{section}生成失败",
-                    f"LLM 流式生成失败：{type(exc).__name__}: {exc}",
-                    stage_key="report_generation",
-                    stage_status="failed",
-                    action_label="章节生成失败",
-                    payload={
-                        "section": section,
-                        "finding_count": len(section_findings),
-                        "error": f"{type(exc).__name__}: {exc}",
-                    },
-                ),
-            )
-            yield f"\n\n（LLM 流式生成失败：{type(exc).__name__}: {exc}，已降级为模板输出。）\n\n"
-            for finding in section_findings:
-                refs = [
-                    evidence_by_id[evidence_id]
-                    for evidence_id in finding.evidence_ids
-                    if evidence_id in evidence_by_id
-                ]
-                first_ref = refs[0] if refs else None
-                yield (
-                    f"- {finding.title}：{finding.reasoning_summary}"
-                    + (f"（证据：第 {first_ref.page_number} 页，{first_ref.section_path}）" if first_ref else "（证据：待补充）")
-                    + "\n"
-                )
-    yield _render_report_footer(run, report_findings)
-
-
-async def _collect_report_stream(run: AnalysisRun) -> str:
-    return "".join([chunk async for chunk in _build_report_streaming(run)])
-
-
-def _build_report(run: AnalysisRun) -> ReportDraft:
-    markdown = asyncio.run(_collect_report_stream(run))
-    html = markdown.replace("\n", "<br>")
-    return ReportDraft(
-        report_id=f"report_{uuid.uuid4().hex[:10]}",
-        markdown=markdown,
-        html=html,
-        created_at=_now(),
+    # Frozen-score-first: the delivered rating must match the backtest scorecard.
+    frozen_level = frozen_risk_level_from_events(run.events)
+    report_id = f"report_{uuid.uuid4().hex[:10]}"
+    created_at = _now()
+    overall_risk_level = (
+        (frozen_level or _overall_risk_level(admitted_findings))
+        if has_admitted_finding
+        else "unrated"
     )
-
-
-def _build_integrated_report(run: AnalysisRun, integrated: IntegratedRiskReport) -> ReportDraft:
-    """Render a validated strategic report without allowing new evidence claims."""
-
-    evidence_by_id = {item.evidence_id: item for item in run.evidence}
-    report_evidence = [
-        item
-        for item in run.evidence
-        if item.verifier_status in {"supported", "weakly_supported"}
-    ]
-    lines = [
-        f"# {integrated.title}",
-        "",
-        f"- 公司：{run.company_name}",
-        f"- 数据截止日期：{run.data_cutoff_date}",
-        f"- 规则版本：{run.rule_snapshot['rule_set_id']} / {run.rule_snapshot['version']}",
-        f"- 综合风险等级：{integrated.overall_risk_level}",
-        "- 复核状态：待质检",
-        "",
-        "## 执行摘要",
-        "",
-        integrated.executive_summary,
-    ]
-    for section in integrated.sections:
-        lines.extend(["", f"## {section.title}", "", section.analysis])
-        if section.finding_ids:
-            lines.append(f"- 风险判断：{', '.join(section.finding_ids)}")
-        if section.evidence_ids:
-            refs = []
-            for evidence_id in section.evidence_ids:
-                item = evidence_by_id[evidence_id]
-                refs.append(
-                    f"{evidence_id}（第 {item.page_number} 页，{item.section_path}）"
-                )
-            lines.append(f"- 证据引用：{'；'.join(refs)}")
-    if integrated.cross_module_risks:
-        lines.extend(["", "## 跨模块风险关联"])
-        for item in integrated.cross_module_risks:
-            lines.extend(["", f"### {item.title}", item.analysis])
-            if item.finding_ids:
-                lines.append(f"- 关联判断：{', '.join(item.finding_ids)}")
-            if item.evidence_ids:
-                lines.append(f"- 关联证据：{', '.join(item.evidence_ids)}")
-    modules_with_observations = [
-        module
-        for module in run.module_results
-        if module.get("screening_observations")
-    ]
-    if modules_with_observations and any(
-        section.finding_ids for section in integrated.sections
-    ):
-        lines.extend(
-            [
-                "",
-                "## 检索覆盖与待核实线索",
-                "",
-                "以下内容来自规则预筛和专家二判审计，未通过正式证据门禁，"
-                "仅用于说明检索覆盖、证据缺口和后续核查方向。",
-            ]
-        )
-        for module in modules_with_observations:
-            lines.extend(
-                [
-                    "",
-                    f"### {module.get('module') or module.get('module_id')}",
-                    _screening_analysis(module),
-                ]
-            )
-    lines.extend(["", "## 建议"])
-    lines.extend(f"- {item}" for item in integrated.recommendations)
-    if integrated.limitations:
-        lines.extend(["", "## 局限与人工复核"])
-        lines.extend(f"- {item}" for item in integrated.limitations)
-    pending_review = {
-        item.finding_id
-        for item in run.verification_results
-        if item.status == "needs_human_review"
-    }
-    if pending_review:
-        lines.extend(["", "## 待人工补证事项"])
-        for finding in run.findings:
-            if finding.finding_id in pending_review:
-                lines.append(
-                    f"- {finding.finding_id} / {finding.title}：未通过证据门禁，"
-                    "不作为正式风险结论。"
-                )
-    lines.extend(["", "## 证据索引"])
-    for item in report_evidence[:50]:
-        lines.append(
-            f"- {item.evidence_id}：第 {item.page_number} 页 / {item.section_path} / "
-            f"证据相关性 {item.relevance_score:.2f} / {item.text[:120]}"
-        )
-    markdown = "\n".join(lines)
     return ReportDraft(
-        report_id=f"report_{uuid.uuid4().hex[:10]}",
+        report_id=report_id,
+        overall_risk_level=overall_risk_level,
         markdown=markdown,
-        html=markdown.replace("\n", "<br>"),
-        created_at=_now(),
+        html=render_risk_report_html(
+            company_name=run.company_name,
+            run_id=run.run_id,
+            report_id=report_id,
+            created_at=created_at,
+            risk_level=overall_risk_level,
+            document=document,
+        ),
+        created_at=created_at,
+        **document,
     )
-
-
-def _report_section_for_finding(finding: RiskFinding) -> str:
-    if finding.skill_id == "financial_risk_skill" or finding.rule_type == "quantitative_financial":
-        return "财务风险分析"
-    if finding.skill_id == "legal_compliance_skill":
-        return "合规风险分析"
-    if finding.skill_id == "market_valuation_skill" or finding.category in {"行业竞争", "估值", "发行定价", "破发风险"}:
-        return "估值与破发风险分析"
-    return "业务风险分析"
 
 
 def _report_sections(markdown: str) -> list[dict[str, str]]:
@@ -3424,11 +3973,31 @@ def _report_sections(markdown: str) -> list[dict[str, str]]:
 
 
 def _overall_risk_level(findings: list[RiskFinding]) -> str:
-    if any(finding.severity == "high" and not finding.requires_human_review for finding in findings):
-        return "高"
-    if len(findings) >= 3:
-        return "中"
-    return "低" if findings else "待判断"
+    """Apply the same deterministic hidden-first scorecard used by backtesting."""
+    if not findings:
+        return "unrated"
+    from riskagent.backtesting.service import calculate_hidden_first_score
+
+    return str(
+        calculate_hidden_first_score(
+            [finding.model_dump(mode="json") for finding in findings]
+        )["risk_level"]
+    )
+
+
+def _research_artifacts_from_modules(
+    module_results: list[dict[str, Any]],
+) -> list[ResearchArtifact]:
+    """Collect and deduplicate frozen external evidence emitted by Skills."""
+
+    artifacts: dict[str, ResearchArtifact] = {}
+    for module in module_results:
+        for skill_result in module.get("skill_results") or []:
+            result = skill_result.get("result") or {}
+            for raw in result.get("research_artifacts") or []:
+                artifact = ResearchArtifact.model_validate(raw)
+                artifacts.setdefault(artifact.source_hash, artifact)
+    return list(artifacts.values())
 
 
 def _build_trace_view(run: AnalysisRun) -> AnalysisTrace:

@@ -11,7 +11,7 @@ const labels: Record<string, string> = {
   "risk-rules": "风险体系配置",
   backtest: "回测中心",
   monitor: "风险监控中心",
-  report: "IPO 风险报告",
+  report: "港股IPO风险穿透预警报告",
   trace: "决策链路回溯",
   new: "新建回测",
 };

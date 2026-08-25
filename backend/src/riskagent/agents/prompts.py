@@ -27,6 +27,7 @@ EXPERT_OUTPUT_CONTRACT = """
 请对每条候选做严谨的二次判断，只输出一个 JSON 对象，格式：
 {"items":[{"rule_id":str,"evaluation_result":"triggered"|"not_triggered"|"insufficient_evidence","severity":"low"|"medium"|"high","confidence":0.0-1.0,"reasoning_summary":str,"needs_more_evidence":bool}]}
 evaluation_result=triggered 仅表示原文直接满足规则触发条件；原文直接否定触发条件时必须返回 not_triggered，不能因为 confidence 较高而判为 triggered；无法验证时返回 insufficient_evidence 且 needs_more_evidence=true。
+允许基于多段相关原文形成推测性研判，但推测必须保留在 reasoning_summary 中，并返回 insufficient_evidence + needs_more_evidence=true，明确已知依据、推断链条与缺失的确认材料；不得把间接线索升级为 triggered。
 reasoning_summary 为 80-200 字，必须引用页码/章节或证据片段原文。
 不得输出 JSON 之外的任何内容。
 """
@@ -46,7 +47,13 @@ def load_agent_prompt(agent_name: str) -> str | None:
     return text or None
 
 
-def render_expert_prompt(spec_payload: dict[str, Any], *, skills_digest: str = "") -> str:
+def render_expert_prompt(
+    spec_payload: dict[str, Any],
+    *,
+    skills_digest: str = "",
+    assigned_skill_ids: list[str] | None = None,
+    skill_snapshot: dict[str, Any] | None = None,
+) -> str:
     """Build the full system prompt for one expert from its capability payload.
 
     Falls back to a generic persona derived from the payload when the agent
@@ -73,41 +80,81 @@ def render_expert_prompt(spec_payload: dict[str, Any], *, skills_digest: str = "
     if skills_digest.strip():
         sections.append(f"【可用技能】\n{skills_digest.strip()}")
     else:
-        skills_section = _skills_section(agent_name)
+        skills_section = _skills_section(
+            agent_name,
+            assigned_skill_ids=assigned_skill_ids,
+            skill_snapshot=skill_snapshot,
+        )
         if skills_section:
             sections.append(skills_section)
     sections.append(EXPERT_OUTPUT_CONTRACT.strip())
     return "\n\n".join(sections)
 
 
-def _skills_section(agent_name: str) -> str:
-    """Digest of all backend/skills docs + this role's mapped skill bodies.
-
-    Read fresh per render so skill edits reach every agent's next run; any
-    loader failure degrades to no skills section rather than breaking prompts.
-    """
+def _skills_section(
+    agent_name: str,
+    *,
+    assigned_skill_ids: list[str] | None = None,
+    skill_snapshot: dict[str, Any] | None = None,
+) -> str:
+    """Render only Skill bodies assigned to this expert for this run."""
 
     try:
         from riskagent.skill_docs import render_skills_section
 
-        return render_skills_section(agent_name)
+        return render_skills_section(
+            agent_name,
+            assigned_skill_ids=assigned_skill_ids,
+            snapshot=skill_snapshot,
+        )
     except Exception:
         return ""
 
 
-def orchestrator_skills_digest() -> str:
-    """One-line skill catalog appended to strategy/report/arbiter prompts."""
+def orchestrator_skills_digest(skill_snapshot: dict[str, Any] | None = None) -> str:
+    """Append the runtime catalog plus the controller's governance documents."""
 
     try:
-        from riskagent.skill_docs import skills_digest
+        if skill_snapshot is None:
+            from riskagent.skill_docs import get_skill_catalog, skills_digest
 
-        digest = skills_digest()
+            digest = skills_digest()
+            source = {
+                name: definition.document
+                for name, definition in get_skill_catalog().definitions.items()
+            }
+        else:
+            digest = "\n".join(
+                f"- {name}@{item.get('version')}：{item.get('description', '')}"
+                f"（owners={','.join(item.get('owners') or [])}；available={str(item.get('available', False)).lower()}）"
+                for name, item in (skill_snapshot.get("skills") or {}).items()
+                if item.get("execution") != "offline"
+            )
+            source = skill_snapshot.get("skills") or {}
     except Exception:
         return ""
-    return f"\n\n【技能目录】\n{digest}" if digest else ""
+    sections = [f"【技能目录】\n{digest}"] if digest else []
+    for skill_id in (
+        "orchestration",
+        "risk-rule-screening",
+        "report-generation-and-archive",
+    ):
+        item = source.get(skill_id)
+        if item is None:
+            continue
+        version = item.version if hasattr(item, "version") else item.get("version")
+        body = item.body if hasattr(item, "body") else item.get("body")
+        if body:
+            sections.append(f"【总控技能：{skill_id}@{version}】\n{body}")
+    return "\n\n" + "\n\n".join(sections) if sections else ""
 
 
-def render_orchestrator_prompt(name: str, fallback: str) -> str:
+def render_orchestrator_prompt(
+    name: str,
+    fallback: str,
+    *,
+    skill_snapshot: dict[str, Any] | None = None,
+) -> str:
     """Return a strategy/report/arbiter system prompt body, preferring the file."""
 
-    return (load_agent_prompt(name) or fallback) + orchestrator_skills_digest()
+    return (load_agent_prompt(name) or fallback) + orchestrator_skills_digest(skill_snapshot)

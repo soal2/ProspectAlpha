@@ -12,6 +12,8 @@ import {
   AlertCircle,
   Users,
   Sparkles,
+  Eye,
+  X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -50,6 +52,18 @@ export const Route = createFileRoute("/")({
   }),
   component: WorkspacePage,
 });
+
+/** Common HK IPO company names for autocomplete suggestions */
+const COMPANY_SUGGESTIONS = [
+  "腾讯控股", "阿里巴巴", "美团", "小米集团", "京东集团",
+  "百度集团", "网易", "哔哩哔哩", "快手", "商汤科技",
+  "理想汽车", "蔚来汽车", "小鹏汽车", "华为技术", "比亚迪",
+  "中国平安", "招商银行", "建设银行", "工商银行", "中国银行",
+  "中国人寿", "太平洋保险", "恒大集团", "碧桂园", "万科企业",
+  "联想集团", "中兴通讯", "海尔智家", "格力电器", "蒙牛乳业",
+  "农夫山泉", "海底捞", "安踏体育", "李宁", "申洲国际",
+  "药明生物", "百济神州", "信达生物", "君实生物", "金蝶国际",
+];
 
 function inferCompanyName(text: string, document?: UploadedDocument | null) {
   const trimmed = text.trim();
@@ -129,6 +143,11 @@ function WorkspacePage() {
   const [flowError, setFlowError] = useState<string | null>(null);
   const [blockingQuestions, setBlockingQuestions] = useState<string[]>([]);
   const [sessionId, setSessionId] = useState("#IPO-DESK");
+  const [companyNameOverride, setCompanyNameOverride] = useState("");
+  const [stockCode, setStockCode] = useState("");
+  const [showCompanySuggestions, setShowCompanySuggestions] = useState(false);
+  const [parsingPreviewOpen, setParsingPreviewOpen] = useState(false);
+  const companyInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     setSessionId(createSessionId());
@@ -165,9 +184,14 @@ function WorkspacePage() {
 
   const featured = analyses.slice(0, 3);
   const companyName = useMemo(
-    () => inferCompanyName(requestText, uploadedDocument),
-    [requestText, uploadedDocument],
+    () => companyNameOverride.trim() || inferCompanyName(requestText, uploadedDocument),
+    [companyNameOverride, requestText, uploadedDocument],
   );
+  const filteredCompanySuggestions = useMemo(() => {
+    const query = (companyNameOverride || inferCompanyName(requestText, uploadedDocument)).toLowerCase();
+    if (!query) return COMPANY_SUGGESTIONS.slice(0, 8);
+    return COMPANY_SUGGESTIONS.filter((name) => name.toLowerCase().includes(query)).slice(0, 8);
+  }, [companyNameOverride, requestText, uploadedDocument]);
   const focusDisplay = useMemo(() => inferFocus(requestText), [requestText]);
   const activeRuleSet =
     options?.risk_rule_sets.find((item) => item.active) ?? options?.risk_rule_sets[0];
@@ -249,6 +273,66 @@ function WorkspacePage() {
               </span>
             </div>
 
+          {/* Company name autocomplete */}
+          <div className="relative border-b border-border/80 px-5 py-3">
+            <label className="mb-1 block text-[11px] font-medium text-muted-foreground">
+              分析对象（公司名）
+            </label>
+            <div className="relative">
+              <input
+                ref={companyInputRef}
+                type="text"
+                value={companyNameOverride}
+                onChange={(e) => {
+                  setCompanyNameOverride(e.target.value);
+                  setShowCompanySuggestions(true);
+                }}
+                onFocus={() => setShowCompanySuggestions(true)}
+                onBlur={() => setTimeout(() => setShowCompanySuggestions(false), 200)}
+                placeholder={companyName || "输入公司名，自动补全建议…"}
+                className="h-9 w-full rounded-sm border border-border bg-background px-3 pr-8 text-[13px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+              />
+              {companyNameOverride && (
+                <button
+                  type="button"
+                  onClick={() => { setCompanyNameOverride(""); companyInputRef.current?.focus(); }}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                >
+                  <X className="size-3.5" />
+                </button>
+              )}
+            </div>
+            {showCompanySuggestions && filteredCompanySuggestions.length > 0 && (
+              <div className="absolute left-5 right-5 top-full z-20 mt-1 max-h-48 overflow-auto rounded-md border border-border bg-white shadow-lg">
+                {filteredCompanySuggestions.map((name) => (
+                  <button
+                    key={name}
+                    type="button"
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      setCompanyNameOverride(name);
+                      setShowCompanySuggestions(false);
+                    }}
+                    className="block w-full px-3 py-1.5 text-left text-[12.5px] text-foreground hover:bg-muted"
+                  >
+                    {name}
+                  </button>
+                ))}
+              </div>
+            )}
+            <label className="mb-1 mt-3 block text-[11px] font-medium text-muted-foreground">
+              港股代码（必填）
+            </label>
+            <input
+              type="text"
+              value={stockCode}
+              onChange={(event) => setStockCode(event.target.value.toUpperCase())}
+              placeholder="例如 0700.HK"
+              pattern="[0-9]{4,5}(\\.HK)?"
+              className="h-9 w-full rounded-sm border border-border bg-background px-3 text-[13px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+            />
+          </div>
+
             <textarea
               value={requestText}
               onChange={(event) => setRequestText(event.target.value)}
@@ -289,6 +373,15 @@ function WorkspacePage() {
                     <CheckCircle2 className="size-4 shrink-0 text-[color:var(--risk-low)]" />
                   ) : (
                     <Loader2 className="size-4 shrink-0 animate-spin text-[color:var(--gold)]" />
+                  )}
+                  {uploadedDocument.block_count > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setParsingPreviewOpen(true)}
+                      className="ml-1 inline-flex items-center gap-1 rounded-sm border border-border px-2 py-0.5 text-[10px] text-muted-foreground hover:bg-muted hover:text-foreground"
+                    >
+                      <Eye className="size-3" /> 解析质量
+                    </button>
                   )}
                 </div>
               ) : null}
@@ -462,11 +555,15 @@ function WorkspacePage() {
                   className="block h-[3px] w-full"
                   style={{
                     background:
-                      a.riskLevel === "high"
-                        ? "var(--risk-high)"
-                        : a.riskLevel === "mid"
-                          ? "var(--risk-mid)"
-                          : "var(--risk-low)",
+                      a.riskLevel === "very_high"
+                        ? "var(--risk-very-high)"
+                        : a.riskLevel === "high"
+                          ? "var(--risk-high)"
+                          : a.riskLevel === "medium"
+                            ? "var(--risk-medium)"
+                            : a.riskLevel === "low"
+                              ? "var(--risk-low)"
+                              : "var(--risk-very-low)",
                   }}
                 />
                 <div className="p-4">
@@ -475,7 +572,8 @@ function WorkspacePage() {
                     <span className="tabular">{a.createdAt}</span>
                   </div>
                   <div className="mt-2 text-[14px] font-semibold leading-snug text-[color:var(--navy)]">
-                    {a.name} <span className="text-muted-foreground">· IPO 风险报告</span>
+                    {a.name}{" "}
+                    <span className="text-muted-foreground">· 港股IPO风险穿透预警报告</span>
                   </div>
                   <div className="mt-1 text-[11.5px] text-muted-foreground">
                     {a.industry} · {a.experts} 位专家 ·{" "}
@@ -500,6 +598,97 @@ function WorkspacePage() {
           </div>
         </div>
       </div>
+
+      {/* Parsing quality preview dialog */}
+      <Dialog open={parsingPreviewOpen} onOpenChange={setParsingPreviewOpen}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="font-serif text-xl">PDF 解析质量预览</DialogTitle>
+            <DialogDescription>
+              在启动分析前，查看 MinerU 对招股书的解析结果概览。
+            </DialogDescription>
+          </DialogHeader>
+          {uploadedDocument && (
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 gap-3">
+                <ConfirmItem icon={FileText} label="文件名" value={uploadedDocument.filename} />
+                <ConfirmItem icon={Building2} label="分析对象" value={companyName} />
+                <ConfirmItem
+                  icon={CheckCircle2}
+                  label="页数"
+                  value={`${uploadedDocument.page_count || "--"} 页`}
+                />
+                <ConfirmItem
+                  icon={LineChart}
+                  label="提取字符数"
+                  value={`${uploadedDocument.text_chars?.toLocaleString() ?? "--"} 字符`}
+                />
+                <ConfirmItem
+                  icon={ShieldAlert}
+                  label="检索块数"
+                  value={`${uploadedDocument.block_count} 个块已入库`}
+                />
+                <ConfirmItem
+                  icon={Sparkles}
+                  label="文件大小"
+                  value={formatBytes(uploadedDocument.file_size_bytes)}
+                />
+              </div>
+              <div className="rounded-md border border-border bg-muted/35 p-3">
+                <div className="text-[11px] font-medium text-muted-foreground">解析质量评估</div>
+                <div className="mt-2 space-y-1.5">
+                  {(() => {
+                    const charsPerPage = uploadedDocument.page_count
+                      ? Math.round(uploadedDocument.text_chars / uploadedDocument.page_count)
+                      : 0;
+                    const qualityItems = [
+                      {
+                        label: "页数完整性",
+                        ok: (uploadedDocument.page_count ?? 0) > 10,
+                        detail: `${uploadedDocument.page_count || "--"} 页`,
+                      },
+                      {
+                        label: "文本提取密度",
+                        ok: charsPerPage > 200,
+                        detail: `${charsPerPage} 字符/页${charsPerPage <= 200 ? "（偏低，可能含大量扫描图）" : ""}`,
+                      },
+                      {
+                        label: "检索块入库",
+                        ok: uploadedDocument.block_count > 20,
+                        detail: `${uploadedDocument.block_count} 个检索块${uploadedDocument.block_count <= 20 ? "（偏少，部分章节可能未被解析）" : ""}`,
+                      },
+                    ];
+                    return qualityItems.map((item) => (
+                      <div key={item.label} className="flex items-center gap-2 text-[12px]">
+                        {item.ok ? (
+                          <CheckCircle2 className="size-3.5 text-[color:var(--risk-low)]" />
+                        ) : (
+                          <AlertCircle className="size-3.5 text-[color:var(--risk-mid)]" />
+                        )}
+                        <span className="font-medium text-foreground">{item.label}</span>
+                        <span className="text-muted-foreground">— {item.detail}</span>
+                      </div>
+                    ));
+                  })()}
+                </div>
+              </div>
+              <p className="text-[11px] text-muted-foreground">
+                {/* TODO: 深度解析质量预览（如章节覆盖率、表格识别率、图表 OCR 准确度）需要后端提供 /documents/{id}/parse-quality API 支持 */}
+                以上为基于已解析元数据的快速评估。如需更详细的章节覆盖率或表格识别率分析，可在启动分析后由 Agent 专家团进行深度审核。
+              </p>
+            </div>
+          )}
+          <DialogFooter>
+            <button
+              type="button"
+              onClick={() => setParsingPreviewOpen(false)}
+              className="inline-flex h-9 items-center justify-center rounded-sm border border-border bg-background px-4 text-sm font-medium hover:bg-muted"
+            >
+              关闭
+            </button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
         <DialogContent className="max-w-2xl">
@@ -576,7 +765,7 @@ function WorkspacePage() {
             <button
               type="button"
               onClick={() => void handleCreateDraft()}
-              disabled={dispatching || !uploadedDocument}
+              disabled={dispatching || !uploadedDocument || !stockCode.trim()}
               className="inline-flex h-9 items-center justify-center gap-2 rounded-sm bg-[color:var(--navy)] px-4 text-sm font-semibold text-white hover:bg-[color:var(--navy-deep)] disabled:cursor-not-allowed disabled:opacity-60"
             >
               {dispatching ? (
@@ -672,6 +861,7 @@ function WorkspacePage() {
     try {
       const run = await createAnalysisDraft({
         company_name: companyName,
+        stock_code: stockCode.trim(),
         document_text: "",
         document_id: uploadedDocument.document_id,
         ipo_project_hint: requestText.trim(),

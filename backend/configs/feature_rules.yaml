@@ -1,3 +1,1180 @@
-# Feature rules placeholder.
-# TODO: Define feature sources, thresholds, risk levels, and evidence requirements.
-features: []
+# Feature Rules for HK IPO Risk Analysis
+# Maps risk rules to computable features from prospectus data
+# Version: 1.0
+# Total features: 59 across 6 groups
+# Covers all 164 risk rules (HKIPO-001 to HKIPO-164)
+
+feature_groups:
+  # ============================================================
+  # Group 1: Financial Features (20 features)
+  # ============================================================
+  - id: "FG_FINANCIAL"
+    name: "财务特征组"
+    description: "从招股书财务报表中提取的定量特征，覆盖盈利能力、偿债能力、营运能力、现金流、盈利质量、成长能力和资本结构"
+    features:
+      # --- Profitability ---
+      - id: "F001"
+        name: "毛利率"
+        name_en: "gross_profit_margin"
+        source_sections: ["综合损益表", "财务资料", "管理层讨论与分析"]
+        source_keywords: ["毛利率", "gross profit margin", "毛利", "营业成本"]
+        calculation: "(营业收入 - 营业成本) / 营业收入 × 100%"
+        data_type: "float"
+        unit: "percent"
+        thresholds:
+          - condition: "< 10%"
+            risk_level: "high"
+          - condition: "10% - 20%"
+            risk_level: "medium"
+          - condition: "20% - 40%"
+            risk_level: "low"
+          - condition: "> 40%"
+            risk_level: "low"
+            note: "需结合行业特征判断"
+        mapped_rules: ["HKIPO-001"]
+
+      - id: "F002"
+        name: "净利率"
+        name_en: "net_profit_margin"
+        source_sections: ["综合损益表", "管理层讨论与分析"]
+        source_keywords: ["净利率", "net profit margin", "净利润"]
+        calculation: "净利润 / 营业收入 × 100%"
+        data_type: "float"
+        unit: "percent"
+        thresholds:
+          - condition: "< 0%"
+            risk_level: "high"
+          - condition: "0% - 5%"
+            risk_level: "medium"
+          - condition: "5% - 15%"
+            risk_level: "low"
+          - condition: "> 15%"
+            risk_level: "low"
+            note: "需与行业可比公司中位数对比"
+        mapped_rules: ["HKIPO-002"]
+
+      - id: "F003"
+        name: "净资产收益率(ROE)"
+        name_en: "return_on_equity"
+        source_sections: ["综合损益表", "资产负债表", "财务资料"]
+        source_keywords: ["ROE", "净资产收益率", "return on equity"]
+        calculation: "归母净利润 / 平均归母净资产 × 100%"
+        data_type: "float"
+        unit: "percent"
+        thresholds:
+          - condition: "< 5%"
+            risk_level: "high"
+          - condition: "5% - 8%"
+            risk_level: "medium"
+          - condition: "8% - 15%"
+            risk_level: "low"
+          - condition: "> 15%"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-003"]
+
+      - id: "F004"
+        name: "总资产收益率(ROA)"
+        name_en: "return_on_assets"
+        source_sections: ["综合损益表", "资产负债表", "财务资料"]
+        source_keywords: ["ROA", "总资产收益率", "return on assets"]
+        calculation: "净利润 / 平均总资产 × 100%"
+        data_type: "float"
+        unit: "percent"
+        thresholds:
+          - condition: "< 3%"
+            risk_level: "high"
+          - condition: "3% - 5%"
+            risk_level: "medium"
+          - condition: "5% - 10%"
+            risk_level: "low"
+          - condition: "> 10%"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-004"]
+
+      - id: "F005"
+        name: "营业利润率"
+        name_en: "operating_profit_margin"
+        source_sections: ["综合损益表", "财务资料"]
+        source_keywords: ["营业利润率", "operating profit", "营业利润"]
+        calculation: "营业利润 / 营业收入 × 100%"
+        data_type: "float"
+        unit: "percent"
+        thresholds:
+          - condition: "< 0% 且连续2期以上"
+            risk_level: "high"
+          - condition: "< 0%"
+            risk_level: "high"
+          - condition: "0% - 10%"
+            risk_level: "medium"
+          - condition: "> 10%"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-005"]
+
+      - id: "F006"
+        name: "EBITDA利润率"
+        name_en: "ebitda_margin"
+        source_sections: ["综合损益表附注", "管理层讨论与分析"]
+        source_keywords: ["EBITDA", "息税折旧摊销前利润", "ebitda margin"]
+        calculation: "EBITDA / 营业收入 × 100%"
+        data_type: "float"
+        unit: "percent"
+        thresholds:
+          - condition: "|EBITDA利润率 - 行业中位数| > 15个百分点"
+            risk_level: "high"
+          - condition: "|偏差| 10-15个百分点"
+            risk_level: "medium"
+          - condition: "|偏差| < 10个百分点"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-006"]
+
+      - id: "F007"
+        name: "每股收益(EPS)趋势"
+        name_en: "eps_trend"
+        source_sections: ["综合损益表", "财务摘要"]
+        source_keywords: ["每股收益", "EPS", "earnings per share"]
+        calculation: "归母净利润 / 加权平均普通股股数；统计连续期间变化方向"
+        data_type: "float"
+        unit: "currency"
+        thresholds:
+          - condition: "EPS < 0"
+            risk_level: "high"
+          - condition: "EPS连续3期下降"
+            risk_level: "high"
+          - condition: "EPS连续2期下降"
+            risk_level: "medium"
+          - condition: "EPS稳定或上升"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-008"]
+
+      # --- Solvency ---
+      - id: "F008"
+        name: "流动比率"
+        name_en: "current_ratio"
+        source_sections: ["资产负债表", "财务资料"]
+        source_keywords: ["流动比率", "current ratio", "流动资产", "流动负债"]
+        calculation: "流动资产 / 流动负债"
+        data_type: "float"
+        unit: "ratio"
+        thresholds:
+          - condition: "< 0.7"
+            risk_level: "high"
+          - condition: "0.7 - 1.0"
+            risk_level: "medium"
+          - condition: "1.0 - 2.0"
+            risk_level: "low"
+          - condition: "> 2.0"
+            risk_level: "low"
+            note: "过高可能暗示资产利用效率低"
+        mapped_rules: ["HKIPO-009"]
+
+      - id: "F009"
+        name: "速动比率"
+        name_en: "quick_ratio"
+        source_sections: ["资产负债表", "财务资料"]
+        source_keywords: ["速动比率", "quick ratio", "速动资产"]
+        calculation: "(流动资产 - 存货) / 流动负债"
+        data_type: "float"
+        unit: "ratio"
+        thresholds:
+          - condition: "< 0.5"
+            risk_level: "high"
+          - condition: "0.5 - 0.7"
+            risk_level: "medium"
+          - condition: "0.7 - 1.5"
+            risk_level: "low"
+          - condition: "> 1.5"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-010"]
+
+      - id: "F010"
+        name: "资产负债率"
+        name_en: "debt_to_asset_ratio"
+        source_sections: ["资产负债表", "财务资料"]
+        source_keywords: ["资产负债率", "leverage", "总负债", "总资产"]
+        calculation: "总负债 / 总资产 × 100%"
+        data_type: "float"
+        unit: "percent"
+        thresholds:
+          - condition: "> 80%"
+            risk_level: "high"
+          - condition: "70% - 80%"
+            risk_level: "high"
+          - condition: "50% - 70%"
+            risk_level: "medium"
+          - condition: "< 50%"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-011", "HKIPO-013", "HKIPO-014", "HKIPO-045"]
+
+      - id: "F011"
+        name: "利息保障倍数"
+        name_en: "interest_coverage_ratio"
+        source_sections: ["综合损益表", "附注", "财务资料"]
+        source_keywords: ["利息保障倍数", "interest coverage", "EBIT", "利息费用"]
+        calculation: "EBIT / 利息费用"
+        data_type: "float"
+        unit: "ratio"
+        thresholds:
+          - condition: "< 1.5"
+            risk_level: "high"
+          - condition: "1.5 - 2.0"
+            risk_level: "medium"
+          - condition: "2.0 - 5.0"
+            risk_level: "low"
+          - condition: "> 5.0"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-012"]
+
+      - id: "F012"
+        name: "现金短债比"
+        name_en: "cash_to_short_term_debt_ratio"
+        source_sections: ["资产负债表", "财务资料"]
+        source_keywords: ["现金短债比", "货币资金", "短期借款"]
+        calculation: "(货币资金 + 交易性金融资产) / 短期借款"
+        data_type: "float"
+        unit: "ratio"
+        thresholds:
+          - condition: "< 0.3"
+            risk_level: "high"
+          - condition: "0.3 - 0.5"
+            risk_level: "high"
+          - condition: "0.5 - 1.0"
+            risk_level: "medium"
+          - condition: "> 1.0"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-015", "HKIPO-016", "HKIPO-014"]
+
+      # --- Cash Flow ---
+      - id: "F013"
+        name: "经营活动现金流净额"
+        name_en: "operating_cash_flow"
+        source_sections: ["现金流量表", "财务资料"]
+        source_keywords: ["经营活动现金流", "operating cash flow", "经营性现金流净额"]
+        calculation: "直接从现金流量表读取；判断连续期间正负及趋势"
+        data_type: "float"
+        unit: "currency"
+        thresholds:
+          - condition: "< 0 且连续2期以上"
+            risk_level: "high"
+          - condition: "< 0"
+            risk_level: "high"
+          - condition: "> 0 但低于净利润"
+            risk_level: "medium"
+          - condition: "> 0 且 ≥ 净利润"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-024", "HKIPO-025", "HKIPO-028", "HKIPO-029"]
+
+      - id: "F014"
+        name: "自由现金流(FCF)"
+        name_en: "free_cash_flow"
+        source_sections: ["现金流量表", "财务资料"]
+        source_keywords: ["自由现金流", "free cash flow", "FCF", "资本性支出"]
+        calculation: "经营性现金流净额 - 资本性支出"
+        data_type: "float"
+        unit: "currency"
+        thresholds:
+          - condition: "< 0 且连续3期以上"
+            risk_level: "high"
+          - condition: "< 0"
+            risk_level: "medium"
+          - condition: "> 0"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-026", "HKIPO-027", "HKIPO-028"]
+
+      - id: "F015"
+        name: "现金消耗率(Burn Rate)"
+        name_en: "cash_burn_rate"
+        source_sections: ["现金流量表", "管理层讨论与分析"]
+        source_keywords: ["现金消耗率", "burn rate", "现金跑道", "cash runway"]
+        calculation: "月度现金消耗率 = |经营性现金流净额| / 12；现金跑道 = (现金+短期投资) / 月度消耗率"
+        data_type: "float"
+        unit: "months"
+        thresholds:
+          - condition: "现金跑道 < 6个月"
+            risk_level: "high"
+          - condition: "6 - 12个月"
+            risk_level: "high"
+          - condition: "12 - 24个月"
+            risk_level: "medium"
+          - condition: "> 24个月"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-030"]
+
+      - id: "F016"
+        name: "现金流利润比"
+        name_en: "cash_flow_to_profit_ratio"
+        source_sections: ["现金流量表", "综合损益表", "财务资料"]
+        source_keywords: ["现金流利润比", "盈余质量", "accrual ratio"]
+        calculation: "经营活动现金流净额 / 净利润"
+        data_type: "float"
+        unit: "ratio"
+        thresholds:
+          - condition: "< 0.3 且连续2期"
+            risk_level: "high"
+          - condition: "0.3 - 0.5"
+            risk_level: "medium"
+          - condition: "0.5 - 1.2"
+            risk_level: "low"
+          - condition: "> 1.2"
+            risk_level: "low"
+            note: "过高可能有一次性因素"
+        mapped_rules: ["HKIPO-025"]
+
+      # --- Quality ---
+      - id: "F017"
+        name: "非经常性损益占比"
+        name_en: "non_recurring_pnl_ratio"
+        source_sections: ["综合损益表附注", "财务资料"]
+        source_keywords: ["非经常性损益", "non-recurring", "一次性收益"]
+        calculation: "|非经常性损益| / |净利润| × 100%"
+        data_type: "float"
+        unit: "percent"
+        thresholds:
+          - condition: "> 80%"
+            risk_level: "high"
+          - condition: "50% - 80%"
+            risk_level: "high"
+          - condition: "30% - 50%"
+            risk_level: "medium"
+          - condition: "< 30%"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-007", "HKIPO-031", "HKIPO-033", "HKIPO-034", "HKIPO-035"]
+
+      - id: "F018"
+        name: "政府补贴依赖度"
+        name_en: "government_subsidy_dependency"
+        source_sections: ["综合损益表附注", "其他收入明细"]
+        source_keywords: ["政府补贴", "government grant", "政府补助", "财政补贴"]
+        calculation: "政府补贴收入 / 净利润 × 100%"
+        data_type: "float"
+        unit: "percent"
+        thresholds:
+          - condition: "> 50%"
+            risk_level: "high"
+          - condition: "30% - 50%"
+            risk_level: "high"
+          - condition: "15% - 30%"
+            risk_level: "medium"
+          - condition: "< 15%"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-032"]
+
+      - id: "F019"
+        name: "研发资本化率"
+        name_en: "rd_capitalization_rate"
+        source_sections: ["综合损益表附注", "无形资产附注"]
+        source_keywords: ["资本化率", "capitalization rate", "研发支出", "开发支出"]
+        calculation: "资本化研发支出 / 研发总投入 × 100%"
+        data_type: "float"
+        unit: "percent"
+        thresholds:
+          - condition: "> 50%"
+            risk_level: "high"
+          - condition: "> 行业均值×1.5"
+            risk_level: "high"
+          - condition: "30% - 50%"
+            risk_level: "medium"
+          - condition: "< 30%"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-036"]
+
+      # --- Growth ---
+      - id: "F020"
+        name: "营业收入增长率"
+        name_en: "revenue_growth_rate"
+        source_sections: ["综合损益表", "管理层讨论与分析"]
+        source_keywords: ["营收增长", "revenue growth", "营业收入同比"]
+        calculation: "(本期营收 - 上期营收) / |上期营收| × 100%"
+        data_type: "float"
+        unit: "percent"
+        thresholds:
+          - condition: "< 0% 或连续3期递减"
+            risk_level: "high"
+          - condition: "0% - 10%"
+            risk_level: "medium"
+          - condition: "10% - 30%"
+            risk_level: "low"
+          - condition: "> 30%"
+            risk_level: "low"
+            note: "需验证可持续性"
+        mapped_rules: ["HKIPO-038", "HKIPO-039", "HKIPO-040", "HKIPO-041", "HKIPO-042", "HKIPO-043"]
+
+  # ============================================================
+  # Group 2: Non-Standard Features (15 features)
+  # ============================================================
+  - id: "FG_NON_STANDARD"
+    name: "非标特征组"
+    description: "从招股书定性披露中提取的非标风险特征，覆盖客户/供应商依赖、关联交易、对赌条款、诉讼、VIE架构、IPO结构等"
+    features:
+      - id: "F021"
+        name: "前五大客户集中度"
+        name_en: "top5_customer_concentration"
+        source_sections: ["业务章节", "主要客户"]
+        source_keywords: ["客户集中度", "前五大客户", "top customer", "主要客户"]
+        calculation: "前五大客户合计收入 / 总收入 × 100%；同时记录单一最大客户占比"
+        data_type: "float"
+        unit: "percent"
+        thresholds:
+          - condition: "> 70% 或单一客户 > 30%"
+            risk_level: "high"
+          - condition: "50% - 70%"
+            risk_level: "high"
+          - condition: "30% - 50%"
+            risk_level: "medium"
+          - condition: "< 30%"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-049", "HKIPO-052", "HKIPO-082"]
+
+      - id: "F022"
+        name: "前五大供应商集中度"
+        name_en: "top5_supplier_concentration"
+        source_sections: ["业务章节", "主要供应商"]
+        source_keywords: ["供应商集中度", "前五大供应商", "top supplier", "主要供应商"]
+        calculation: "前五大供应商合计采购额 / 总采购额 × 100%"
+        data_type: "float"
+        unit: "percent"
+        thresholds:
+          - condition: "> 70% 或单一供应商 > 30%"
+            risk_level: "high"
+          - condition: "50% - 70%"
+            risk_level: "high"
+          - condition: "30% - 50%"
+            risk_level: "medium"
+          - condition: "< 30%"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-050"]
+
+      - id: "F023"
+        name: "客户供应商重叠度"
+        name_en: "customer_supplier_overlap"
+        source_sections: ["业务章节", "主要客户及供应商"]
+        source_keywords: ["客户与供应商重叠", "既是客户又是供应商", "overlap"]
+        calculation: "同时位列前五大客户和前五大供应商的实体数量"
+        data_type: "integer"
+        unit: "count"
+        thresholds:
+          - condition: "≥ 3个重叠实体"
+            risk_level: "high"
+          - condition: "1-2个重叠实体"
+            risk_level: "high"
+          - condition: "0个"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-051", "HKIPO-053"]
+
+      - id: "F024"
+        name: "关联交易占比"
+        name_en: "connected_transaction_ratio"
+        source_sections: ["关联交易章节", "与关联人士的交易"]
+        source_keywords: ["关联交易", "connected transaction", "关联方", "关连交易"]
+        calculation: "关联交易收入 / 总收入 × 100%；关联采购 / 总采购 × 100%；取较高值"
+        data_type: "float"
+        unit: "percent"
+        thresholds:
+          - condition: "> 30%"
+            risk_level: "high"
+          - condition: "15% - 30%"
+            risk_level: "high"
+          - condition: "5% - 15%"
+            risk_level: "medium"
+          - condition: "< 5%"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-054", "HKIPO-055", "HKIPO-056", "HKIPO-057", "HKIPO-058", "HKIPO-059"]
+
+      - id: "F025"
+        name: "特殊股东条款数量"
+        name_en: "special_shareholder_rights_count"
+        source_sections: ["历史与发展", "过往重大投资", "与控股股东关系"]
+        source_keywords: ["对赌", "赎回", "反稀释", "一票否决", "优先清算", "bet-on", "VAM"]
+        calculation: "统计招股书中披露的对赌协议、估值调整机制、强制回购条款及特殊股东优先权条款数量"
+        data_type: "integer"
+        unit: "count"
+        thresholds:
+          - condition: "≥ 4项特殊条款"
+            risk_level: "high"
+          - condition: "2-3项"
+            risk_level: "medium"
+          - condition: "1项"
+            risk_level: "medium"
+          - condition: "0项"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-060", "HKIPO-061", "HKIPO-062", "HKIPO-063", "HKIPO-064"]
+
+      - id: "F026"
+        name: "未决诉讼风险敞口"
+        name_en: "pending_litigation_exposure"
+        source_sections: ["法律诉讼", "风险因素", "或有事项"]
+        source_keywords: ["诉讼", "litigation", "未决诉讼", "仲裁", "纠纷"]
+        calculation: "公司为被告的未决诉讼涉案金额合计 / 归母净资产 × 100%；同时统计案件数量"
+        data_type: "float"
+        unit: "percent"
+        thresholds:
+          - condition: "> 30% 或涉及核心技术诉讼"
+            risk_level: "high"
+          - condition: "10% - 30%"
+            risk_level: "high"
+          - condition: "5% - 10%"
+            risk_level: "medium"
+          - condition: "< 5%"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-072", "HKIPO-073", "HKIPO-074", "HKIPO-075", "HKIPO-076"]
+
+      - id: "F027"
+        name: "VIE架构存在性与复杂度"
+        name_en: "vie_structure_presence"
+        source_sections: ["合约安排", "监管概览", "风险因素"]
+        source_keywords: ["VIE", "可变利益实体", "合约安排", "协议控制"]
+        calculation: "布尔值：是否存在VIE架构；若存在，统计VIE实体数量和所涉业务线数"
+        data_type: "boolean"
+        unit: "flag"
+        thresholds:
+          - condition: "存在VIE且主营在负面清单内"
+            risk_level: "high"
+          - condition: "存在VIE但不在负面清单"
+            risk_level: "medium"
+          - condition: "不存在VIE"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-067"]
+
+      - id: "F028"
+        name: "大股东股权质押比例"
+        name_en: "controlling_shareholder_pledge_ratio"
+        source_sections: ["股本及股东资料", "与控股股东关系"]
+        source_keywords: ["股权质押", "pledge", "质押", "控股股东"]
+        calculation: "控股股东已质押股份数 / 控股股东总持股数 × 100%"
+        data_type: "float"
+        unit: "percent"
+        thresholds:
+          - condition: "> 80%"
+            risk_level: "high"
+          - condition: "50% - 80%"
+            risk_level: "high"
+          - condition: "20% - 50%"
+            risk_level: "medium"
+          - condition: "< 20%"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-077", "HKIPO-078", "HKIPO-079"]
+
+      - id: "F029"
+        name: "受限制资产比例"
+        name_en: "restricted_assets_ratio"
+        source_sections: ["资产抵押附注", "财务资料"]
+        source_keywords: ["受限资产", "抵押", "质押", "restricted assets"]
+        calculation: "(抵押资产 + 质押资产 + 受限货币资金) / 总资产 × 100%"
+        data_type: "float"
+        unit: "percent"
+        thresholds:
+          - condition: "> 50%"
+            risk_level: "high"
+          - condition: "30% - 50%"
+            risk_level: "high"
+          - condition: "10% - 30%"
+            risk_level: "medium"
+          - condition: "< 10%"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-078"]
+
+      - id: "F030"
+        name: "核心技术外部授权依赖度"
+        name_en: "external_ip_dependency"
+        source_sections: ["业务", "知识产权", "风险因素"]
+        source_keywords: ["License-in", "外部授权", "第三方许可", "license agreement"]
+        calculation: "依赖外部授权技术的核心产品收入占比；是否存在可终止条款"
+        data_type: "float"
+        unit: "percent"
+        thresholds:
+          - condition: "> 50%且有可终止条款"
+            risk_level: "high"
+          - condition: "> 50%"
+            risk_level: "high"
+          - condition: "20% - 50%"
+            risk_level: "medium"
+          - condition: "< 20%"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-086", "HKIPO-087", "HKIPO-088", "HKIPO-089", "HKIPO-147"]
+
+      - id: "F031"
+        name: "管理层稳定性指数"
+        name_en: "management_turnover_index"
+        source_sections: ["董事、监事及高级管理人员"]
+        source_keywords: ["管理层变动", "董事变更", "高管离职", "management change"]
+        calculation: "报告期内CEO/CFO/CTO等关键岗位变动总次数"
+        data_type: "integer"
+        unit: "count"
+        thresholds:
+          - condition: "≥ 3次关键岗位变动"
+            risk_level: "high"
+          - condition: "2次"
+            risk_level: "medium"
+          - condition: "1次"
+            risk_level: "low"
+          - condition: "0次"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-091", "HKIPO-092", "HKIPO-095"]
+
+      - id: "F032"
+        name: "独立董事占比"
+        name_en: "independent_director_ratio"
+        source_sections: ["董事、监事及高级管理人员"]
+        source_keywords: ["独立非执行董事", "独立董事", "independent director", "INED"]
+        calculation: "独立非执行董事人数 / 董事会总人数 × 100%"
+        data_type: "float"
+        unit: "percent"
+        thresholds:
+          - condition: "< 3人 或 < 1/3"
+            risk_level: "high"
+          - condition: "恰好满足最低要求"
+            risk_level: "medium"
+          - condition: "> 1/3"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-093", "HKIPO-094", "HKIPO-096"]
+
+      - id: "F033"
+        name: "有效税率(ETR)"
+        name_en: "effective_tax_rate"
+        source_sections: ["综合损益表", "所得税附注"]
+        source_keywords: ["有效税率", "effective tax rate", "ETR", "所得税费用"]
+        calculation: "所得税费用 / 税前利润 × 100%"
+        data_type: "float"
+        unit: "percent"
+        thresholds:
+          - condition: "< 法定税率×0.5"
+            risk_level: "high"
+          - condition: "< 法定税率×0.6"
+            risk_level: "high"
+          - condition: "法定税率×0.6 - 0.8"
+            risk_level: "medium"
+          - condition: "≥ 法定税率×0.8"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-101", "HKIPO-102", "HKIPO-103", "HKIPO-104"]
+
+      - id: "F034"
+        name: "Pre-IPO融资轮次数"
+        name_en: "pre_ipo_funding_rounds"
+        source_sections: ["历史与发展", "过往重大投资"]
+        source_keywords: ["融资轮次", "funding round", "Pre-IPO", "A轮", "B轮"]
+        calculation: "统计招股书中披露的融资轮次数量"
+        data_type: "integer"
+        unit: "count"
+        thresholds:
+          - condition: "≥ 5轮"
+            risk_level: "high"
+          - condition: "3-4轮"
+            risk_level: "medium"
+          - condition: "1-2轮"
+            risk_level: "low"
+          - condition: "0轮"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-048"]
+
+      - id: "F035"
+        name: "累计亏损率"
+        name_en: "accumulated_loss_ratio"
+        source_sections: ["资产负债表", "财务资料"]
+        source_keywords: ["累计亏损", "未弥补亏损", "accumulated deficit", "未分配利润"]
+        calculation: "未分配利润(负数)的绝对值 / 归母净资产 × 100%"
+        data_type: "float"
+        unit: "percent"
+        thresholds:
+          - condition: "> 100%"
+            risk_level: "high"
+          - condition: "50% - 100%"
+            risk_level: "high"
+          - condition: "20% - 50%"
+            risk_level: "medium"
+          - condition: "< 20%"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-080", "HKIPO-081", "HKIPO-083", "HKIPO-084", "HKIPO-085"]
+
+      - id: "F036"
+        name: "制裁合规与反洗钱风险"
+        name_en: "sanctions_compliance_and_aml_risk"
+        source_sections: ["业务", "风险因素", "监管概览", "内部控制"]
+        source_keywords: ["制裁", "sanctions", "OFAC", "反洗钱", "AML", "出口管制", "政治敏感", "PEP"]
+        calculation: "综合评估：是否涉及制裁名单实体(0-1) + 政治敏感人物关联(0-1) + 可疑交易模式指标(0-1) + 反洗钱内控完善度(0-1) + 出口管制合规(0-1)"
+        data_type: "float"
+        unit: "index"
+        thresholds:
+          - condition: "涉及制裁名单 或 存在政治敏感人物关联 或 反洗钱内控重大缺陷"
+            risk_level: "high"
+          - condition: "存在可疑交易模式 或 出口管制合规存疑"
+            risk_level: "medium"
+          - condition: "合规体系完善且无上述风险"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-160", "HKIPO-161", "HKIPO-162", "HKIPO-163", "HKIPO-164"]
+
+  # ============================================================
+  # Group 3: Textual Analysis Features (8 features)
+  # ============================================================
+  - id: "FG_TEXTUAL"
+    name: "文本分析特征组"
+    description: "通过NLP分析从招股书文本中提取的特征，覆盖可读性、情感倾向、披露完整性、语言模糊性和免责声明密度"
+    features:
+      - id: "F037"
+        name: "风险因素章节情感得分"
+        name_en: "risk_factor_sentiment_score"
+        source_sections: ["风险因素"]
+        source_keywords: ["情感分析", "sentiment", "正面词汇", "负面词汇"]
+        calculation: "使用金融情感词典计算风险因素章节的净情感得分 = (正面词频 - 负面词频) / 总词数"
+        data_type: "float"
+        unit: "score"
+        thresholds:
+          - condition: "正面词汇占比 > 3%（风险章节不应乐观）"
+            risk_level: "high"
+          - condition: "净情感得分 > 0.05"
+            risk_level: "medium"
+          - condition: "-0.05 - 0.05"
+            risk_level: "low"
+          - condition: "< -0.05"
+            risk_level: "low"
+            note: "适度负面是正常风险披露"
+        mapped_rules: ["HKIPO-110", "HKIPO-111", "HKIPO-112", "HKIPO-113"]
+
+      - id: "F038"
+        name: "文本模糊化指数"
+        name_en: "text_obfuscation_index"
+        source_sections: ["风险因素", "管理层讨论与分析", "合约安排"]
+        source_keywords: ["模糊限定词", "可能", "或", "某些", "一定程度的", "qualifier"]
+        calculation: "综合指标：模糊限定词密度×0.3 + 被动语态占比×0.2 + 平均句长标准化×0.2 + 双重否定密度×0.3"
+        data_type: "float"
+        unit: "index"
+        thresholds:
+          - condition: "指数 > 0.7"
+            risk_level: "high"
+          - condition: "0.5 - 0.7"
+            risk_level: "high"
+          - condition: "0.3 - 0.5"
+            risk_level: "medium"
+          - condition: "< 0.3"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-105", "HKIPO-106", "HKIPO-109", "HKIPO-136", "HKIPO-137", "HKIPO-138"]
+
+      - id: "F039"
+        name: "正面/负面词汇比(风险章节)"
+        name_en: "positive_negative_word_ratio_risk"
+        source_sections: ["风险因素"]
+        source_keywords: ["正面词", "负面词", "positive word", "negative word"]
+        calculation: "风险因素章节中正面词汇频次 / 负面词汇频次"
+        data_type: "float"
+        unit: "ratio"
+        thresholds:
+          - condition: "> 0.15"
+            risk_level: "high"
+          - condition: "0.05 - 0.15"
+            risk_level: "medium"
+          - condition: "< 0.05"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-111", "HKIPO-114", "HKIPO-144", "HKIPO-145", "HKIPO-146"]
+
+      - id: "F040"
+        name: "前瞻性陈述数量"
+        name_en: "forward_looking_statement_count"
+        source_sections: ["未来计划与前景", "管理层讨论与分析", "概要"]
+        source_keywords: ["预计", "预期", "将", "计划", "目标", "forecast", "expect", "projected"]
+        calculation: "统计招股书中含前瞻性语义的句子数量；区分有数据支撑和无数据支撑的"
+        data_type: "integer"
+        unit: "count"
+        thresholds:
+          - condition: "> 50句且无数据支撑占比 > 60%"
+            risk_level: "high"
+          - condition: "> 30句"
+            risk_level: "medium"
+          - condition: "10-30句"
+            risk_level: "low"
+          - condition: "< 10句"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-128", "HKIPO-129", "HKIPO-131", "HKIPO-141"]
+
+      - id: "F041"
+        name: "模板化语言比例"
+        name_en: "boilerplate_language_ratio"
+        source_sections: ["风险因素", "全文跨章节比对"]
+        source_keywords: ["模板", "boilerplate", "重复", "冗余", "standard language"]
+        calculation: "与同行业招股书通用模板文本的相似度 > 80%的段落占比"
+        data_type: "float"
+        unit: "percent"
+        thresholds:
+          - condition: "> 50%"
+            risk_level: "high"
+          - condition: "30% - 50%"
+            risk_level: "medium"
+          - condition: "15% - 30%"
+            risk_level: "low"
+          - condition: "< 15%"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-108", "HKIPO-119"]
+
+      - id: "F042"
+        name: "数据密度(定量信息占比)"
+        name_en: "numerical_claim_density"
+        source_sections: ["业务", "风险因素", "管理层讨论与分析"]
+        source_keywords: ["数据密度", "数字", "百分比", "quantitative"]
+        calculation: "(数字引用次数 + 百分比出现次数) / 总字数 × 100%"
+        data_type: "float"
+        unit: "percent"
+        thresholds:
+          - condition: "< 1%"
+            risk_level: "high"
+          - condition: "1% - 3%"
+            risk_level: "medium"
+          - condition: "3% - 8%"
+            risk_level: "low"
+          - condition: "> 8%"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-117", "HKIPO-120", "HKIPO-139", "HKIPO-115", "HKIPO-118", "HKIPO-121"]
+
+      - id: "F043"
+        name: "模糊限定词使用频率"
+        name_en: "qualifier_usage_frequency"
+        source_sections: ["风险因素", "合约安排", "前瞻性陈述"]
+        source_keywords: ["可能", "might", "may", "could", "或", "某些", "一定程度的", "通常", "大概"]
+        calculation: "模糊限定词总数 / 风险因素章节总词数 × 100%"
+        data_type: "float"
+        unit: "percent"
+        thresholds:
+          - condition: "> 10%"
+            risk_level: "high"
+          - condition: "6% - 10%"
+            risk_level: "high"
+          - condition: "3% - 6%"
+            risk_level: "medium"
+          - condition: "< 3%"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-136", "HKIPO-139", "HKIPO-140"]
+
+      - id: "F044"
+        name: "免责声明密度"
+        name_en: "disclaimer_density"
+        source_sections: ["业务", "管理层讨论与分析", "概要", "前瞻性陈述"]
+        source_keywords: ["免责声明", "disclaimer", "概不保证", "无法保证", "前瞻性陈述"]
+        calculation: "非风险因素章节中免责声明条数 / 该章节千字数为单位；同时统计前瞻性声明字数"
+        data_type: "float"
+        unit: "per_thousand_chars"
+        thresholds:
+          - condition: "> 5条/千字 或前瞻性声明 > 500字"
+            risk_level: "high"
+          - condition: "3-5条/千字"
+            risk_level: "high"
+          - condition: "1-3条/千字"
+            risk_level: "medium"
+          - condition: "< 1条/千字"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-141", "HKIPO-142", "HKIPO-143", "HKIPO-127", "HKIPO-130"]
+
+  # ============================================================
+  # Group 4: IPO Structure Features (5 features)
+  # ============================================================
+  - id: "FG_IPO_STRUCTURE"
+    name: "IPO结构特征组"
+    description: "与IPO发行结构相关的特征，覆盖估值定价、发行结构、中介质量和市场环境"
+    features:
+      - id: "F045"
+        name: "发行市盈率(P/E)偏离度"
+        name_en: "offering_pe_deviation"
+        source_sections: ["全球发售的架构", "财务资料", "行业概览"]
+        source_keywords: ["发行市盈率", "P/E", "offering price", "发行价"]
+        calculation: "(发行P/E - 行业可比公司中位数P/E) / 行业中位数P/E × 100%"
+        data_type: "float"
+        unit: "percent"
+        thresholds:
+          - condition: "> 50%"
+            risk_level: "high"
+          - condition: "30% - 50%"
+            risk_level: "high"
+          - condition: "10% - 30%"
+            risk_level: "medium"
+          - condition: "< 10%"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-148", "HKIPO-149", "HKIPO-150", "HKIPO-146"]
+
+      - id: "F046"
+        name: "自由流通量比例"
+        name_en: "free_float_percentage"
+        source_sections: ["全球发售的架构", "股本", "股权架构"]
+        source_keywords: ["自由流通量", "free float", "公众持股", "public float"]
+        calculation: "公众持股数 / 已发行总股数 × 100%"
+        data_type: "float"
+        unit: "percent"
+        thresholds:
+          - condition: "< 15%（港交所最低线）"
+            risk_level: "high"
+          - condition: "15% - 25%"
+            risk_level: "medium"
+          - condition: "25% - 40%"
+            risk_level: "low"
+          - condition: "> 40%"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-154", "HKIPO-155"]
+
+      - id: "F047"
+        name: "基石投资者集中度与锁定期"
+        name_en: "cornerstone_investor_concentration"
+        source_sections: ["全球发售的架构", "基石投资者", "股本"]
+        source_keywords: ["基石投资者", "cornerstone", "锁定期", "lock-up"]
+        calculation: "基石投资者获配股份数 / 发售总股数 × 100%；记录锁定期月数"
+        data_type: "float"
+        unit: "percent"
+        thresholds:
+          - condition: "> 50% 或锁定期 < 6个月"
+            risk_level: "high"
+          - condition: "30% - 50%"
+            risk_level: "medium"
+          - condition: "10% - 30%且锁定期 ≥ 12个月"
+            risk_level: "low"
+          - condition: "< 10%"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-151", "HKIPO-153", "HKIPO-156"]
+
+      - id: "F048"
+        name: "承销团规模与质量"
+        name_en: "underwriting_syndicate_quality"
+        source_sections: ["全球发售的架构", "保荐人", "承销商"]
+        source_keywords: ["保荐人", "sponsor", "承销商", "underwriter", "联席保荐人"]
+        calculation: "综合指标：联席保荐人数量×0.4 + 国际知名投行参与(0/1)×0.3 + 分析师覆盖承诺(0/1)×0.3"
+        data_type: "float"
+        unit: "score"
+        thresholds:
+          - condition: "质量得分 < 0.3 或仅1家保荐人"
+            risk_level: "high"
+          - condition: "0.3 - 0.5"
+            risk_level: "medium"
+          - condition: "0.5 - 0.8"
+            risk_level: "low"
+          - condition: "> 0.8"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-158", "HKIPO-159"]
+
+      - id: "F049"
+        name: "绿鞋机制与控股股东锁仓"
+        name_en: "green_shoe_and_lockup"
+        source_sections: ["全球发售的架构", "超额配股权", "稳定价格行动", "控股股东承诺"]
+        source_keywords: ["绿鞋", "green shoe", "超额配股权", "over-allotment", "锁仓", "lock-up"]
+        calculation: "超额配股权比例 = 超额配股权股份数 / 发售总股数 × 100%；控股股东锁仓月数"
+        data_type: "float"
+        unit: "percent"
+        thresholds:
+          - condition: "无绿鞋 或 控股股东锁仓 < 6个月"
+            risk_level: "high"
+          - condition: "绿鞋 < 10% 或锁仓 < 12个月"
+            risk_level: "medium"
+          - condition: "绿鞋 ≥ 10%且锁仓 ≥ 12个月"
+            risk_level: "low"
+          - condition: "绿鞋 ≥ 15%且锁仓 ≥ 24个月"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-152", "HKIPO-153", "HKIPO-157"]
+
+  # ============================================================
+  # Group 5: Operational Efficiency Features (supplementary financial)
+  # ============================================================
+  - id: "FG_OPERATIONAL"
+    name: "营运效率特征组"
+    description: "从招股书财务报表中提取的营运能力和资本结构补充特征"
+    features:
+      - id: "F050"
+        name: "应收账款周转率"
+        name_en: "receivables_turnover"
+        source_sections: ["综合损益表", "资产负债表", "财务资料"]
+        source_keywords: ["应收账款周转率", "receivables turnover", "周转天数", "回款"]
+        calculation: "营业收入 / 平均应收账款余额；周转天数 = 365 / 周转率"
+        data_type: "float"
+        unit: "times"
+        thresholds:
+          - condition: "< 行业均值×0.5 或周转天数 > 行业均值×2"
+            risk_level: "high"
+          - condition: "< 行业均值×0.7"
+            risk_level: "high"
+          - condition: "行业均值×0.7 - 1.0"
+            risk_level: "medium"
+          - condition: "> 行业均值×1.0"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-017", "HKIPO-022", "HKIPO-037"]
+
+      - id: "F051"
+        name: "存货周转率"
+        name_en: "inventory_turnover"
+        source_sections: ["综合损益表", "资产负债表", "财务资料"]
+        source_keywords: ["存货周转率", "inventory turnover", "存货积压", "跌价"]
+        calculation: "营业成本 / 平均存货余额；周转天数 = 365 / 周转率"
+        data_type: "float"
+        unit: "times"
+        thresholds:
+          - condition: "< 行业均值×0.5 或周转天数 > 行业均值×2"
+            risk_level: "high"
+          - condition: "< 行业均值×0.7"
+            risk_level: "high"
+          - condition: "行业均值×0.7 - 1.0"
+            risk_level: "medium"
+          - condition: "> 行业均值×1.0"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-018", "HKIPO-023"]
+
+      - id: "F052"
+        name: "总资产周转率与营业周期"
+        name_en: "asset_turnover_and_operating_cycle"
+        source_sections: ["综合损益表", "资产负债表", "财务资料"]
+        source_keywords: ["总资产周转率", "asset turnover", "营业周期", "应付账款周转"]
+        calculation: "总资产周转率 = 营业收入 / 平均总资产；营业周期 = 存货周转天数 + 应收账款周转天数"
+        data_type: "float"
+        unit: "times"
+        thresholds:
+          - condition: "总资产周转率 < 行业均值×0.5 或营业周期 > 行业均值×1.5"
+            risk_level: "high"
+          - condition: "总资产周转率 < 行业均值×0.7 或营业周期延长 > 30%"
+            risk_level: "medium"
+          - condition: "接近行业均值"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-019", "HKIPO-020", "HKIPO-021"]
+
+      - id: "F053"
+        name: "股权集中度与资本结构"
+        name_en: "ownership_concentration_capital_structure"
+        source_sections: ["股本及股东资料", "资产负债表", "财务资料"]
+        source_keywords: ["股权集中", "少数股东", "永续债", "优先股", "混合工具"]
+        calculation: "实控人持股比例；少数股东权益/总权益×100%；(永续债+优先股)/总权益×100%"
+        data_type: "float"
+        unit: "percent"
+        thresholds:
+          - condition: "实控人 > 66.67% 或少数股东 > 30% 或混合工具 > 15%"
+            risk_level: "high"
+          - condition: "实控人 > 50% 或少数股东 > 20%"
+            risk_level: "medium"
+          - condition: "股权结构合理"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-044", "HKIPO-046", "HKIPO-047"]
+
+      - id: "F054"
+        name: "合规风险综合指数"
+        name_en: "regulatory_compliance_risk_index"
+        source_sections: ["监管概览", "业务", "风险因素"]
+        source_keywords: ["牌照", "资质", "政策", "数据安全", "反垄断", "环保", "跨境合规"]
+        calculation: "综合评估：核心资质到期风险(0-1) + 政策不利变化程度(0-1) + 数据/反垄断/环保/跨境合规风险(0-1)"
+        data_type: "float"
+        unit: "index"
+        thresholds:
+          - condition: "指数 > 0.7 或存在核心资质即将到期"
+            risk_level: "high"
+          - condition: "0.4 - 0.7"
+            risk_level: "medium"
+          - condition: "< 0.4"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-065", "HKIPO-066", "HKIPO-068", "HKIPO-069", "HKIPO-070", "HKIPO-071"]
+
+      - id: "F055"
+        name: "行业竞争与市场空间"
+        name_en: "industry_competition_market_space"
+        source_sections: ["行业概览", "业务", "风险因素"]
+        source_keywords: ["竞争格局", "CR3", "技术替代", "市场空间", "TAM", "海外市场"]
+        calculation: "行业CR3集中度；市场CAGR；是否存在替代技术；海外收入占比"
+        data_type: "float"
+        unit: "index"
+        thresholds:
+          - condition: "CR3 < 20% 或存在颠覆性替代 或 TAM CAGR < 3%"
+            risk_level: "high"
+          - condition: "CR3 < 30% 或市场增长放缓"
+            risk_level: "medium"
+          - condition: "竞争格局稳定且市场空间充足"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-097", "HKIPO-098", "HKIPO-099", "HKIPO-100"]
+
+      - id: "F056"
+        name: "研发人员占比"
+        name_en: "rd_staff_ratio"
+        source_sections: ["董事及员工资料", "业务"]
+        source_keywords: ["研发人员", "技术人员", "R&D staff", "研发占比"]
+        calculation: "研发及技术人员数 / 员工总数 × 100%"
+        data_type: "float"
+        unit: "percent"
+        thresholds:
+          - condition: "< 行业均值×0.5"
+            risk_level: "high"
+          - condition: "< 行业均值×0.7"
+            risk_level: "medium"
+          - condition: "行业均值×0.7 - 1.2"
+            risk_level: "low"
+          - condition: "> 行业均值×1.2"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-090"]
+
+  # ============================================================
+  # Group 6: Textual Consistency & Coverage Features (supplementary)
+  # ============================================================
+  - id: "FG_TEXTUAL_CONSISTENCY"
+    name: "文本一致性与覆盖度特征组"
+    description: "通过NLP分析检测招股书跨章节一致性和风险因素覆盖完整性"
+    features:
+      - id: "F057"
+        name: "跨章节数据一致性指数"
+        name_en: "cross_section_consistency_index"
+        source_sections: ["财务摘要", "财务资料", "管理层讨论与分析", "概要", "行业概览"]
+        source_keywords: ["不一致", "矛盾", "差异", "口径", "时间线"]
+        calculation: "交叉比对关键财务数据、行业数据、运营指标定义和重大事件时间线在不同章节间的一致性"
+        data_type: "float"
+        unit: "index"
+        thresholds:
+          - condition: "存在 ≥ 3处 > 5%数据差异 或时间线冲突 > 3个月"
+            risk_level: "high"
+          - condition: "存在1-2处数据差异 或口径不一致"
+            risk_level: "medium"
+          - condition: "跨章节数据基本一致"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-122", "HKIPO-123", "HKIPO-124", "HKIPO-125", "HKIPO-126"]
+
+      - id: "F058"
+        name: "风险因素覆盖完整度"
+        name_en: "risk_factor_coverage_completeness"
+        source_sections: ["风险因素", "行业概览", "财务资料"]
+        source_keywords: ["风险因素", "risk factors", "系统性风险", "特质风险", "行业风险"]
+        calculation: "对比同行业可比公司风险披露清单；计算系统性vs特质风险比例；检查行业特有风险和财务风险是否充分覆盖"
+        data_type: "float"
+        unit: "percent"
+        thresholds:
+          - condition: "缺失 ≥ 2项行业标准风险 或宏观风险占比 > 60% 或财务风险 < 15%"
+            risk_level: "high"
+          - condition: "缺失1项行业标准风险 或覆盖度 < 可比公司70%"
+            risk_level: "medium"
+          - condition: "覆盖度与同行业相当"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-116", "HKIPO-132", "HKIPO-133", "HKIPO-134", "HKIPO-135"]
+
+      - id: "F059"
+        name: "段落可读性与篇幅指数"
+        name_en: "paragraph_readability_index"
+        source_sections: ["风险因素", "管理层讨论与分析"]
+        source_keywords: ["段落长度", "行数", "可读性", "readability"]
+        calculation: "风险因素章节中超长段落(>15行或>300字)的占比；结合嵌套从句占比"
+        data_type: "float"
+        unit: "percent"
+        thresholds:
+          - condition: "> 80%关键风险段落超长 或嵌套从句 > 15%"
+            risk_level: "high"
+          - condition: "50% - 80%段落超长"
+            risk_level: "medium"
+          - condition: "< 50%段落超长"
+            risk_level: "low"
+        mapped_rules: ["HKIPO-107"]
+
+# Feature extraction metadata
+extraction_config:
+  default_source_language: "zh"
+  supported_languages: ["zh", "en"]
+  table_extraction: true
+  requires_financial_statements: true
+  nlp_model: "financial_bert_zh"
+  sentiment_lexicon: "hk_ipo_financial_sentiment_v1"
+  extraction_pipeline:
+    - step: "pdf_parse"
+      description: "PDF解析与章节分割"
+    - step: "table_extraction"
+      description: "财务报表表格识别与结构化"
+    - step: "financial_feature_extraction"
+      description: "从结构化表格中计算财务指标"
+    - step: "non_standard_extraction"
+      description: "从定性披露段落中提取非标特征"
+    - step: "textual_analysis"
+      description: "NLP模型分析文本情感、模糊度和披露质量"
+    - step: "ipo_structure_extraction"
+      description: "从发行结构章节提取IPO相关特征"
+  feature_vector:
+    total_features: 59
+    numeric_features: 52
+    boolean_features: 1
+    integer_features: 6
+    normalization: "z-score per industry sector"

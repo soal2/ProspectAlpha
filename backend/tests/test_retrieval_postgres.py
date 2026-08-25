@@ -131,7 +131,7 @@ def test_postgres_chunk_indexer_inserts_project_doc_and_chunk_fields(tmp_path):
     assert chunk_call["params"][2] == "ysyy"
     assert chunk_call["params"][5] == "[1.0,1.0,0.0]"
     assert chunk_call["params"][6] == 2
-    assert '"description_source": "vlm"' in chunk_call["params"][-1]
+    assert '"description_source": "vlm"' in chunk_call["params"][-2]
     assert conn.commits == 1
 
 
@@ -153,6 +153,7 @@ def test_postgres_chunk_indexer_vector_full_text_and_hybrid_search_use_distinct_
             "images/image.jpg",
             None,
             {"page_idx": 2},
+            "",
             0.91,
             0.2,
             0.7325,

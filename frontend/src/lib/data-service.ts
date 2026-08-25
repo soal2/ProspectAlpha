@@ -3,6 +3,9 @@ import type {
   Agent,
   AnalysisSummary,
   BacktestDetailData,
+  BacktestDetailResponse,
+  BacktestJob,
+  BacktestCandidatePreview,
   BacktestSummary,
   DashboardStats,
   EvidenceDetailItem,
@@ -10,7 +13,9 @@ import type {
   HomepageExample,
   IntakeData,
   KnowledgeData,
+  MarketSnapshotOption,
   ReportData,
+  RiskLevel,
   RiskRule,
   RiskRulesData,
   TraceData,
@@ -20,9 +25,9 @@ export interface AnalysisFinding {
   finding_id: string;
   agent_name: string;
   skill_id?: string | null;
-  rule_set_id: string;
-  rule_version: string;
-  rule_id: string;
+  rule_set_id?: string | null;
+  rule_version?: string | null;
+  rule_id?: string | null;
   dimension_code: string;
   rule_type: string;
   category: string;
@@ -37,6 +42,16 @@ export interface AnalysisFinding {
   matched_terms: string[];
   requires_human_review: boolean;
   verification_status?: string;
+  risk_type?: string;
+  origin?: "rule" | "text_signal" | "agent_emergent" | "external";
+  causal_chain?: string;
+  industry_relevance?: string;
+  company_specificity?: string;
+  expected_market_effects?: string[];
+  external_evidence_ids?: string[];
+  counter_evidence_ids?: string[];
+  evidence_grade?: "direct" | "inferential" | "lead" | "contradicted";
+  hypothesis_status?: "reported" | "corroborated" | "disputed" | "refuted";
 }
 
 export interface OrchestraStage {
@@ -158,6 +173,7 @@ export interface AnalysisProgress {
 
 export interface AnalysisRun {
   run_id: string;
+  stock_code?: string | null;
   company_name: string;
   status: string;
   current_stage: string;
@@ -181,6 +197,7 @@ export interface AnalysisRun {
     max_findings: number;
   };
   input_summary: {
+    stock_code?: string | null;
     document_text_chars: number;
     document_text_preview?: string;
     structured_data_keys: string[];
@@ -202,6 +219,24 @@ export interface AnalysisRun {
   interrupt_reason?: string | null;
   replacement_history?: ReplacementHistoryEntry[];
   module_results?: Record<string, unknown>[];
+  industry_profile?: {
+    code: string;
+    name: string;
+    rationale: string;
+    evidence_ids: string[];
+    evidence_pages: number[];
+    user_confirmed: boolean;
+    frozen: boolean;
+  } | null;
+  text_signal_snapshot?: {
+    version: string;
+    industry_code: string;
+    signals: Record<string, unknown>[];
+    benchmark_note: string;
+  } | null;
+  hypotheses?: Record<string, unknown>[];
+  research_budget?: { hypothesis_limit: number; search_limit: number } | null;
+  research_usage?: { hypotheses_researched: number; searches_used: number; pages_fetched: number } | null;
   /** Read-only compatibility shape for runs created before dynamic strategy planning. */
   orchestra_plan?: OrchestraPlan | StrategyPlan;
 }
@@ -210,9 +245,16 @@ type BackendReport = {
   report_id: string;
   status: string;
   review_status: string;
+  overall_risk_level: RiskLevel;
   markdown: string;
   html: string;
   created_at: string;
+  summary?: string;
+  themes?: Record<string, unknown>[];
+  exploratory_findings?: Record<string, unknown>[];
+  counterevidence?: Record<string, unknown>[];
+  limitations?: string[];
+  evidence_index?: Record<string, unknown>[];
 };
 
 export type UploadedDocument = {
@@ -235,10 +277,12 @@ export type UploadedDocument = {
 
 export type AnalysisRunPayload = {
   company_name: string;
+  stock_code?: string;
   document_text: string;
   document_id?: string;
   material_url?: string;
   ipo_project_hint?: string;
+  data_cutoff_date?: string;
   confirm_defaults?: boolean;
   risk_rule_set_id?: string;
   analysis_depth?: "quick" | "standard" | "deep";
@@ -248,10 +292,12 @@ export type AnalysisRunPayload = {
 
 export type AnalysisRunInputPatch = {
   company_name?: string;
+  stock_code?: string;
   document_text?: string;
   document_id?: string;
   material_url?: string;
   ipo_project_hint?: string;
+  data_cutoff_date?: string;
   risk_rule_set_id?: string;
   analysis_depth?: "quick" | "standard" | "deep";
   structured_data?: Record<string, string>;
@@ -314,15 +360,24 @@ export type AnalysisOptions = {
 
 async function fetchAnalyses(): Promise<AnalysisSummary[]> {
   const runs = await apiRequest<AnalysisRun[]>("/analysis-runs");
-  const evidenceCounts = await Promise.all(
-    runs.map(async (run) => (await fetchRunEvidence(run.run_id)).length),
+  return Promise.all(
+    runs.map(async (run) => {
+      const [evidenceCount, report] = await Promise.all([
+        fetchRunEvidence(run.run_id).then((items) => items.length),
+        fetchBackendReport(run.run_id),
+      ]);
+      return toAnalysisSummary(run, evidenceCount, report?.overall_risk_level);
+    }),
   );
-  return runs.map((run, index) => toAnalysisSummary(run, evidenceCounts[index]));
 }
 
 async function fetchAnalysis(id: string): Promise<AnalysisSummary | null> {
   try {
-    return toAnalysisSummary(await apiRequest<AnalysisRun>(`/analysis-runs/${id}`));
+    const [run, report] = await Promise.all([
+      apiRequest<AnalysisRun>(`/analysis-runs/${id}`),
+      fetchBackendReport(id),
+    ]);
+    return toAnalysisSummary(run, undefined, report?.overall_risk_level);
   } catch (err) {
     if (isNotFound(err)) return null;
     throw err;
@@ -344,7 +399,7 @@ async function fetchAgents(): Promise<Agent[]> {
 }
 
 async function fetchBacktests(): Promise<BacktestSummary[]> {
-  return [];
+  return apiRequest<BacktestSummary[]>("/backtests");
 }
 
 async function fetchDashboardStats(): Promise<DashboardStats> {
@@ -394,9 +449,19 @@ async function fetchReportData(id: string): Promise<ReportData | null> {
   try {
     const [run, report] = await Promise.all([
       apiRequest<AnalysisRun>(`/analysis-runs/${id}`),
-      apiRequest<BackendReport>(`/analysis-runs/${id}/report`),
+      fetchBackendReport(id),
     ]);
+    if (!report) return null;
     return toReportData(run, report);
+  } catch (err) {
+    if (isNotFound(err)) return null;
+    throw err;
+  }
+}
+
+async function fetchBackendReport(id: string): Promise<BackendReport | null> {
+  try {
+    return await apiRequest<BackendReport>(`/analysis-runs/${id}/report`);
   } catch (err) {
     if (isNotFound(err)) return null;
     throw err;
@@ -446,7 +511,7 @@ async function fetchEvidenceDetailItems(id: string): Promise<EvidenceDetailItem[
           ? "retrieval"
           : item.relevance_score > 0
             ? "relevance"
-            : "unavailable",
+            : ("unavailable" as "retrieval" | "relevance" | "unavailable"),
       snippet: item.text,
       risk: riskByFinding[item.finding_id] ?? evidenceStatusLabel(item.verifier_status),
       documentId: item.document_id,
@@ -505,7 +570,7 @@ async function fetchKnowledgeData(): Promise<KnowledgeData> {
           ? "retrieval"
           : item.relevance_score > 0
             ? "relevance"
-            : "unavailable",
+            : ("unavailable" as "retrieval" | "relevance" | "unavailable"),
       snippet: item.text,
       risk: riskByFinding[item.finding_id] ?? evidenceStatusLabel(item.verifier_status),
       documentId: item.document_id,
@@ -540,8 +605,13 @@ async function fetchKnowledgeData(): Promise<KnowledgeData> {
   };
 }
 
-async function fetchBacktestDetailData(id: string): Promise<BacktestDetailData | null> {
-  return null;
+async function fetchBacktestDetailData(id: string): Promise<BacktestDetailResponse | null> {
+  try {
+    return apiRequest<BacktestDetailResponse>(`/backtests/${id}`);
+  } catch (err) {
+    if (isNotFound(err)) return null;
+    throw err;
+  }
 }
 
 async function fetchIntakeData(): Promise<IntakeData> {
@@ -642,6 +712,47 @@ export async function getBacktests() {
   return fetchBacktests();
 }
 
+export async function createBacktest(payload: { snapshot_id: string; wind_code: string; name?: string; test_start_date?: string; test_end_date?: string }) {
+  return apiRequest<BacktestSummary>("/backtests", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getBacktestCandidates(snapshotId: string) {
+  return apiRequest<BacktestCandidatePreview[]>(`/backtests/market-data/${snapshotId}/candidates`);
+}
+
+export async function confirmBacktestCandidates(id: string, decisions: { wind_code: string; score_id?: string | null; include: boolean; exclusion_reason?: string | null }[]) {
+  return apiRequest<BacktestSummary>(`/backtests/${id}/candidates`, { method: "POST", body: JSON.stringify({ decisions }) });
+}
+
+export async function startBacktest(id: string) {
+  return apiRequest<BacktestJob>(`/backtests/${id}/start`, { method: "POST" });
+}
+
+export async function reproduceBacktest(id: string) {
+  return apiRequest<BacktestJob>(`/backtests/${id}/reproduce`, { method: "POST" });
+}
+
+export async function publishMarketSnapshot(id: string) {
+  return apiRequest<MarketSnapshotOption>(`/backtests/market-data/${id}/publish`, { method: "POST" });
+}
+
+export async function uploadMarketData(files: { security: File; company: File; prices: File }) {
+  const body = new FormData();
+  body.append("security", files.security);
+  body.append("company", files.company);
+  body.append("prices", files.prices);
+  const response = await fetch(`${API_BASE_URL}/backtests/market-data/upload`, { method: "POST", body });
+  if (!response.ok) throw new Error((await response.json().catch(() => ({ detail: response.statusText }))).detail ?? "市场数据上传失败");
+  return response.json() as Promise<{ snapshot_id: string; labels_created: number }>;
+}
+
+export async function getMarketSnapshots() {
+  return apiRequest<MarketSnapshotOption[]>("/backtests/market-data/snapshots");
+}
+
 // Dashboard
 export async function getDashboardStats() {
   return fetchDashboardStats();
@@ -713,6 +824,16 @@ export async function startAnalysisRun(runId: string) {
     throw new Error(text || `Request failed: ${response.status}`);
   }
   return response.json() as Promise<AnalysisRun>;
+}
+
+export async function confirmIndustryProfile(
+  runId: string,
+  payload: { code?: string; name?: string },
+) {
+  return apiRequest<AnalysisRun>(`/analysis-runs/${runId}/industry-profile/confirm`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
 }
 
 export async function selectAnalysisExperts(runId: string, agentNames: string[]) {
@@ -1030,7 +1151,11 @@ export async function getEvidenceFeed(id?: string) {
   return fetchEvidenceFeed(id);
 }
 
-function toAnalysisSummary(run: AnalysisRun, evidenceCountOverride?: number): AnalysisSummary {
+function toAnalysisSummary(
+  run: AnalysisRun,
+  evidenceCountOverride?: number,
+  reportRiskLevel?: RiskLevel,
+): AnalysisSummary {
   const structured =
     (run as AnalysisRun & { structured_data?: Record<string, unknown> }).structured_data ?? {};
   const evidenceCount =
@@ -1045,7 +1170,7 @@ function toAnalysisSummary(run: AnalysisRun, evidenceCountOverride?: number): An
     listingDate: String(structured.listing_date ?? run.data_cutoff_date),
     offerPrice: Number(structured.offer_price ?? 0),
     offerSize: String(structured.offer_size ?? "待确认"),
-    riskLevel: rateRun(run),
+    riskLevel: reportRiskLevel ?? rateRun(run),
     evidenceCount,
     highConfidence,
     mode: "expert",
@@ -1085,9 +1210,12 @@ function rateRun(run: AnalysisRun): AnalysisSummary["riskLevel"] {
   );
   if (!admitted.length) return "unrated";
   if (admitted.some((finding) => finding.severity === "high" && !finding.requires_human_review)) {
-    return "high";
+    return "very_high";
   }
-  return admitted.length >= 3 ? "mid" : "low";
+  if (admitted.length >= 5) return "high";
+  if (admitted.length >= 3) return "medium";
+  if (admitted.length >= 1) return "low";
+  return "very_low";
 }
 
 function toReportData(run: AnalysisRun, report: BackendReport): ReportData {
@@ -1119,9 +1247,15 @@ function toReportData(run: AnalysisRun, report: BackendReport): ReportData {
   ];
   return {
     id: run.run_id,
+    riskLevel: report.overall_risk_level,
     markdown: report.markdown,
     reviewStatus: report.review_status,
     createdAt: report.created_at,
+    themes: report.themes ?? [],
+    exploratoryFindings: report.exploratory_findings ?? [],
+    counterevidence: report.counterevidence ?? [],
+    limitations: report.limitations ?? [],
+    evidenceIndex: report.evidence_index ?? [],
     toc,
     radar,
     pie,

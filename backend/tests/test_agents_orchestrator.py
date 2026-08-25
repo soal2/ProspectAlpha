@@ -124,6 +124,16 @@ def test_integrated_report_rejects_unknown_trace_references():
                     "evidence_ids": ["evidence_1"],
                 }
             ],
+            "risk_themes": [
+                {
+                    "title": "现金流风险",
+                    "conclusion": "现金流承压。",
+                    "analysis": "现金消耗会削弱经营缓冲。",
+                    "investment_impact": "盈利可见性下降。",
+                    "finding_ids": ["finding_unknown"],
+                    "evidence_ids": ["evidence_1"],
+                }
+            ],
         }
     )
 
@@ -134,10 +144,11 @@ def test_integrated_report_rejects_unknown_trace_references():
             finding_ids={"finding_1"},
             finding_ids_by_module={"financial": {"finding_1"}},
             evidence_by_finding={"finding_1": {"evidence_1"}},
+            verification_status_by_finding={"finding_1": "supported"},
         )
 
 
-def test_integrated_report_requires_each_module_exactly_once():
+def test_integrated_report_does_not_require_fixed_module_coverage():
     report = orchestrator.IntegratedRiskReport.model_validate(
         {
             "title": "IPO 风险报告",
@@ -155,17 +166,18 @@ def test_integrated_report_requires_each_module_exactly_once():
                     "analysis": "重复章节",
                 },
             ],
+            "risk_themes": [],
         }
     )
 
-    with pytest.raises(ValueError, match="every expert module exactly once"):
-        orchestrator.validate_report_references(
-            report,
-            module_ids={"financial", "legal"},
-            finding_ids=set(),
-            finding_ids_by_module={"financial": set(), "legal": set()},
-            evidence_by_finding={},
-        )
+    orchestrator.validate_report_references(
+        report,
+        module_ids={"financial", "legal"},
+        finding_ids=set(),
+        finding_ids_by_module={"financial": set(), "legal": set()},
+        evidence_by_finding={},
+        verification_status_by_finding={},
+    )
 
 
 def test_integrated_report_rejects_evidence_from_another_finding():
@@ -183,6 +195,16 @@ def test_integrated_report_rejects_evidence_from_another_finding():
                     "evidence_ids": ["evidence_2"],
                 }
             ],
+            "risk_themes": [
+                {
+                    "title": "现金流风险",
+                    "conclusion": "现金流承压。",
+                    "analysis": "现金消耗会削弱经营缓冲。",
+                    "investment_impact": "盈利可见性下降。",
+                    "finding_ids": ["finding_1"],
+                    "evidence_ids": ["evidence_2"],
+                }
+            ],
         }
     )
 
@@ -190,13 +212,102 @@ def test_integrated_report_rejects_evidence_from_another_finding():
         orchestrator.validate_report_references(
             report,
             module_ids={"financial"},
-            finding_ids={"finding_1", "finding_2"},
+            finding_ids={"finding_1"},
             finding_ids_by_module={"financial": {"finding_1"}},
             evidence_by_finding={
                 "finding_1": {"evidence_1"},
                 "finding_2": {"evidence_2"},
             },
+            verification_status_by_finding={"finding_1": "supported"},
         )
+
+
+def test_integrated_report_does_not_require_every_finding_in_a_theme():
+    report = orchestrator.IntegratedRiskReport.model_validate(
+        {
+            "title": "IPO 风险报告",
+            "executive_summary": "存在风险",
+            "overall_risk_level": "中",
+            "sections": [
+                {
+                    "module_id": "financial",
+                    "title": "财务风险",
+                    "analysis": "现金流承压",
+                    "finding_ids": ["finding_1", "finding_2"],
+                    "evidence_ids": ["evidence_1", "evidence_2"],
+                }
+            ],
+            "risk_themes": [
+                {
+                    "title": "现金流风险",
+                    "conclusion": "现金流承压。",
+                    "analysis": "现金消耗会削弱经营缓冲。",
+                    "investment_impact": "盈利可见性下降。",
+                    "finding_ids": ["finding_1"],
+                    "evidence_ids": ["evidence_1"],
+                }
+            ],
+        }
+    )
+
+    orchestrator.validate_report_references(
+        report,
+        module_ids={"financial"},
+        finding_ids={"finding_1", "finding_2"},
+        finding_ids_by_module={"financial": {"finding_1", "finding_2"}},
+        evidence_by_finding={
+            "finding_1": {"evidence_1"},
+            "finding_2": {"evidence_2"},
+        },
+        verification_status_by_finding={
+            "finding_1": "supported",
+            "finding_2": "supported",
+        },
+    )
+
+
+def test_integrated_report_allows_mixed_evidence_strength_in_one_theme():
+    report = orchestrator.IntegratedRiskReport.model_validate(
+        {
+            "title": "IPO 风险报告",
+            "executive_summary": "存在风险",
+            "overall_risk_level": "中",
+            "sections": [
+                {
+                    "module_id": "financial",
+                    "title": "财务风险",
+                    "analysis": "现金流与收入质量均待核验",
+                    "finding_ids": ["finding_1", "finding_2"],
+                    "evidence_ids": ["evidence_1", "evidence_2"],
+                }
+            ],
+            "risk_themes": [
+                {
+                    "title": "经营质量风险",
+                    "conclusion": "经营质量承压。",
+                    "analysis": "现金流与收入质量可能共同影响盈利兑现。",
+                    "investment_impact": "盈利可见性下降。",
+                    "finding_ids": ["finding_1", "finding_2"],
+                    "evidence_ids": ["evidence_1", "evidence_2"],
+                }
+            ],
+        }
+    )
+
+    orchestrator.validate_report_references(
+        report,
+        module_ids={"financial"},
+        finding_ids={"finding_1", "finding_2"},
+        finding_ids_by_module={"financial": {"finding_1", "finding_2"}},
+        evidence_by_finding={
+            "finding_1": {"evidence_1"},
+            "finding_2": {"evidence_2"},
+        },
+        verification_status_by_finding={
+            "finding_1": "supported",
+            "finding_2": "weakly_supported",
+        },
+    )
 
 
 def test_integrated_report_rejects_finding_from_another_module():
@@ -219,6 +330,16 @@ def test_integrated_report_rejects_finding_from_another_module():
                     "analysis": "未发现重大风险",
                 },
             ],
+            "risk_themes": [
+                {
+                    "title": "法务风险",
+                    "conclusion": "存在法务风险。",
+                    "analysis": "相关事项会增加合规不确定性。",
+                    "investment_impact": "经营兑现可能受到约束。",
+                    "finding_ids": ["finding_legal"],
+                    "evidence_ids": ["evidence_legal"],
+                }
+            ],
         }
     )
 
@@ -232,4 +353,5 @@ def test_integrated_report_rejects_finding_from_another_module():
                 "legal": {"finding_legal"},
             },
             evidence_by_finding={"finding_legal": {"evidence_legal"}},
+            verification_status_by_finding={"finding_legal": "supported"},
         )

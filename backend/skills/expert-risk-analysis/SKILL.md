@@ -1,6 +1,10 @@
 ---
 name: expert-risk-analysis
+version: 1.0.0
 description: 以领域专家身份对规则预筛候选做 LLM 二次判断，并通过 A2A 协作补强证据。当需要判定候选风险的严重度与置信度、撰写可溯源的推理摘要、或与编排 Agent 和同伴专家协作时使用。
+owners: [financial_agent, legal_agent, market_agent, quality, redteam]
+execution: prompt_only
+failure_policy: required
 ---
 
 # 专家风险二判与 A2A 协作
@@ -19,6 +23,7 @@ description: 以领域专家身份对规则预筛候选做 LLM 二次判断，�
 
 - `reasoning_summary` 为 80-200 字，必须引用页码/章节或证据片段原文。
 - 证据不足以支撑结论时必须置 `needs_more_evidence=true`，不得为了凑结论降低证据标准。
+- 可基于多段相关原文提出推测性研判，但必须返回 `evaluation_result=insufficient_evidence`、说明推断依据和缺失材料；推测不得升级为正式 finding。
 
 ## A2A 协作纪律
 

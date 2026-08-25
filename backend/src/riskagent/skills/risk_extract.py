@@ -27,6 +27,9 @@ class RuleEvaluation(BaseModel):
     skill_id: str | None = None
     severity: str = "medium"
     confidence: float = 0.5
+    probability: int = 3  # 1-5, 概率等级（默认中等）
+    impact: int = 3       # 1-5, 影响等级（默认中等）
+    matrix_risk_level: str = "medium"  # 由概率-影响矩阵查表得出
 
 
 def load_rules_for_agent(

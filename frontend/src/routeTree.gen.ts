@@ -19,6 +19,7 @@ import { Route as BacktestIndexRouteImport } from './routes/backtest.index'
 import { Route as AnalysesIndexRouteImport } from './routes/analyses.index'
 import { Route as ExpertsIdRouteImport } from './routes/experts.$id'
 import { Route as BacktestNewRouteImport } from './routes/backtest.new'
+import { Route as BacktestAdminRouteImport } from './routes/backtest.admin'
 import { Route as BacktestIdRouteImport } from './routes/backtest.$id'
 import { Route as AnalysesIdRouteImport } from './routes/analyses.$id'
 import { Route as AnalysesIdIndexRouteImport } from './routes/analyses.$id.index'
@@ -77,6 +78,11 @@ const BacktestNewRoute = BacktestNewRouteImport.update({
   path: '/backtest/new',
   getParentRoute: () => rootRouteImport,
 } as any)
+const BacktestAdminRoute = BacktestAdminRouteImport.update({
+  id: '/backtest/admin',
+  path: '/backtest/admin',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const BacktestIdRoute = BacktestIdRouteImport.update({
   id: '/backtest/$id',
   path: '/backtest/$id',
@@ -122,6 +128,7 @@ export interface FileRoutesByFullPath {
   '/risk-rules': typeof RiskRulesRoute
   '/analyses/$id': typeof AnalysesIdRouteWithChildren
   '/backtest/$id': typeof BacktestIdRoute
+  '/backtest/admin': typeof BacktestAdminRoute
   '/backtest/new': typeof BacktestNewRoute
   '/experts/$id': typeof ExpertsIdRoute
   '/analyses/': typeof AnalysesIndexRoute
@@ -140,6 +147,7 @@ export interface FileRoutesByTo {
   '/monitor': typeof MonitorRoute
   '/risk-rules': typeof RiskRulesRoute
   '/backtest/$id': typeof BacktestIdRoute
+  '/backtest/admin': typeof BacktestAdminRoute
   '/backtest/new': typeof BacktestNewRoute
   '/experts/$id': typeof ExpertsIdRoute
   '/analyses': typeof AnalysesIndexRoute
@@ -160,6 +168,7 @@ export interface FileRoutesById {
   '/risk-rules': typeof RiskRulesRoute
   '/analyses/$id': typeof AnalysesIdRouteWithChildren
   '/backtest/$id': typeof BacktestIdRoute
+  '/backtest/admin': typeof BacktestAdminRoute
   '/backtest/new': typeof BacktestNewRoute
   '/experts/$id': typeof ExpertsIdRoute
   '/analyses/': typeof AnalysesIndexRoute
@@ -181,6 +190,7 @@ export interface FileRouteTypes {
     | '/risk-rules'
     | '/analyses/$id'
     | '/backtest/$id'
+    | '/backtest/admin'
     | '/backtest/new'
     | '/experts/$id'
     | '/analyses/'
@@ -199,6 +209,7 @@ export interface FileRouteTypes {
     | '/monitor'
     | '/risk-rules'
     | '/backtest/$id'
+    | '/backtest/admin'
     | '/backtest/new'
     | '/experts/$id'
     | '/analyses'
@@ -218,6 +229,7 @@ export interface FileRouteTypes {
     | '/risk-rules'
     | '/analyses/$id'
     | '/backtest/$id'
+    | '/backtest/admin'
     | '/backtest/new'
     | '/experts/$id'
     | '/analyses/'
@@ -238,6 +250,7 @@ export interface RootRouteChildren {
   RiskRulesRoute: typeof RiskRulesRoute
   AnalysesIdRoute: typeof AnalysesIdRouteWithChildren
   BacktestIdRoute: typeof BacktestIdRoute
+  BacktestAdminRoute: typeof BacktestAdminRoute
   BacktestNewRoute: typeof BacktestNewRoute
   AnalysesIndexRoute: typeof AnalysesIndexRoute
   BacktestIndexRoute: typeof BacktestIndexRoute
@@ -313,6 +326,13 @@ declare module '@tanstack/react-router' {
       path: '/backtest/new'
       fullPath: '/backtest/new'
       preLoaderRoute: typeof BacktestNewRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/backtest/admin': {
+      id: '/backtest/admin'
+      path: '/backtest/admin'
+      fullPath: '/backtest/admin'
+      preLoaderRoute: typeof BacktestAdminRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/backtest/$id': {
@@ -407,6 +427,7 @@ const rootRouteChildren: RootRouteChildren = {
   RiskRulesRoute: RiskRulesRoute,
   AnalysesIdRoute: AnalysesIdRouteWithChildren,
   BacktestIdRoute: BacktestIdRoute,
+  BacktestAdminRoute: BacktestAdminRoute,
   BacktestNewRoute: BacktestNewRoute,
   AnalysesIndexRoute: AnalysesIndexRoute,
   BacktestIndexRoute: BacktestIndexRoute,

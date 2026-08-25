@@ -7,9 +7,10 @@ import yaml
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import sessionmaker
 
-from riskagent.analysis_runs import AnalysisRunCreate, AnalysisRunInputPatch
+from riskagent.analysis_runs import AnalysisRunCreate, AnalysisRunInputPatch, IndustryProfileConfirmation
 from riskagent.api.analysis import _api_dispatch_mode
 from riskagent.api.main import create_app
+from riskagent.backtesting.service import BacktestCreate, BacktestService, MarketImportRequest
 from riskagent.common.cache import TTLCache
 from riskagent.database import Base, make_engine
 from riskagent.documents import DocumentRepository
@@ -18,6 +19,7 @@ from riskagent.models import (
     DocumentAssetRow,
     DocumentBlockRow,
     EvidenceLibraryRow,
+    RiskScoreSnapshotRow,
 )
 from riskagent.providers.object_store import LocalObjectStore
 from riskagent.risk_rules import RiskRuleRepository
@@ -58,7 +60,9 @@ def test_clarifying_patch_start_freezes_inputs_and_generates_artifacts(
     )
     assert ready.status == "ready"
 
-    completed = repo.start(run.run_id)
+    proposed = repo.start(run.run_id)
+    assert proposed.status == "awaiting_industry_confirmation"
+    completed = repo.confirm_industry_profile(run.run_id, IndustryProfileConfirmation())
     assert completed.status == "completed"
     assert completed.inputs_frozen is True
     assert completed.document_blocks
@@ -72,6 +76,68 @@ def test_clarifying_patch_start_freezes_inputs_and_generates_artifacts(
 
     with pytest.raises(ValueError):
         repo.update_inputs(completed.run_id, AnalysisRunInputPatch(company_name="不可修改"))
+
+
+def test_completed_report_freezes_score_and_enters_t5_backtest(tmp_path, analysis_repo_factory):
+    """The report completion path, not a manual endpoint, creates the backtest input."""
+    repo = analysis_repo_factory(
+        rule_repository=_rule_repo(),
+        path=tmp_path / "runs.yaml",
+        evidence_library_path=tmp_path / "evidence_library.yaml",
+    )
+    completed = repo.create_and_run(
+        AnalysisRunCreate(
+            company_name="闭环测试 IPO",
+            stock_code="0001.HK",
+            document_text="风险因素：公司存在关联交易、对赌和赎回安排，经营活动现金流持续为负。",
+            confirm_defaults=True,
+        )
+    )
+    assert completed.status == "completed"
+    assert any(event["event_type"] == "risk_score_frozen" for event in completed.events)
+    with repo.session_factory() as session:
+        score = session.get(RiskScoreSnapshotRow, f"score_{completed.run_id}")
+        assert score is not None
+        assert score.wind_code == "0001.HK"
+
+    security = tmp_path / "security.csv"
+    company = tmp_path / "company.csv"
+    prices = tmp_path / "prices.csv"
+    security.write_text(
+        "S_INFO_WINDCODE,S_INFO_COMPCODE,S_INFO_NAME,S_INFO_LISTDATE,S_INFO_LISTPRICE\n"
+        "0001.HK,COMP1,闭环测试 IPO,20270102,10\n",
+        encoding="utf-8",
+    )
+    company.write_text("S_INFO_COMPCODE,S_INFO_COMPNAME\nCOMP1,闭环测试 IPO\n", encoding="utf-8")
+    prices.write_text(
+        "S_INFO_WINDCODE,TRADE_DT,S_DQ_LOW,S_DQ_CLOSE\n"
+        "0001.HK,20270102,10,10\n"
+        "0001.HK,20270103,9,9.5\n"
+        "0001.HK,20270106,8.9,9.2\n"
+        "0001.HK,20270107,9.1,9.4\n"
+        "0001.HK,20270108,9.3,9.6\n",
+        encoding="utf-8",
+    )
+    service = BacktestService(session_factory=repo.session_factory, initialize=False)
+    imported = service.import_market_data(
+        MarketImportRequest(
+            security_csv=str(security), company_csv=str(company), prices_csv=str(prices)
+        )
+    )
+    snapshots = service.list_market_snapshots()
+    assert snapshots[0].snapshotId == imported["snapshot_id"]
+    assert snapshots[0].t5Labels == 1
+    assert snapshots[0].eligibleSamples == 1
+    assert snapshots[0].canCreateBacktest is False
+    service.publish_market_snapshot(imported["snapshot_id"])
+    assert service.list_market_snapshots()[0].canCreateBacktest is True
+    backtest = service.create_backtest(BacktestCreate(snapshot_id=imported["snapshot_id"], wind_code="0001.HK"))
+    assert backtest.status == "待运行"
+    job = service.start_backtest(backtest.id)
+    service.run_job(job.id)
+    detail = service.detail(backtest.id)
+    assert detail["summary"]["status"] == "完成", detail.get("jobs", [{}])[0].get("error")
+    assert detail["samples"][0]["actualDecline"] is True
 
 
 def test_analysis_api_exposes_minimal_pipeline_resources(
@@ -148,6 +214,8 @@ def test_analysis_api_exposes_minimal_pipeline_resources(
 
     run_id = payload["run_id"]
     started = client.post(f"/analysis-runs/{run_id}/start").json()
+    assert started["status"] == "awaiting_industry_confirmation"
+    started = client.post(f"/analysis-runs/{run_id}/industry-profile/confirm", json={}).json()
     assert started["status"] in {"queued", "completed"}
     for _ in range(200):
         current = client.get(f"/analysis-runs/{run_id}").json()
@@ -179,7 +247,20 @@ def test_analysis_api_exposes_minimal_pipeline_resources(
     assert "text" not in trace["evidenceFeed"][0]
     report = client.get(f"/analysis-runs/{run_id}/report").json()
     assert report["review_status"] in {"draft", "needs_human_review"}
-    assert "IPO 风险分析草案" in report["markdown"]
+    assert report["overall_risk_level"] in {
+        "very_low",
+        "low",
+        "medium",
+        "high",
+        "very_high",
+        "unrated",
+    }
+    assert report["markdown"].startswith("# 测试 IPO IPO 隐性风险尽调报告")
+    assert "## 探索性发现" in report["markdown"]
+    assert "## 反证与争议" in report["markdown"]
+    assert set(report).issuperset(
+        {"summary", "themes", "exploratory_findings", "counterevidence", "limitations", "evidence_index"}
+    )
 
 
 def test_pdf_upload_drives_analysis_with_page_and_bbox_evidence(
@@ -226,6 +307,8 @@ def test_pdf_upload_drives_analysis_with_page_and_bbox_evidence(
     assert run_response.status_code == 201
     run_id = run_response.json()["run_id"]
     started = client.post(f"/analysis-runs/{run_id}/start").json()
+    assert started["status"] == "awaiting_industry_confirmation"
+    started = client.post(f"/analysis-runs/{run_id}/industry-profile/confirm", json={}).json()
     assert started["status"] in {"queued", "completed"}
     for _ in range(200):
         current = client.get(f"/analysis-runs/{run_id}").json()
@@ -295,7 +378,12 @@ def test_database_persistence_covers_document_run_and_evidence(
     run = analysis_repo.create_draft(
         AnalysisRunCreate(company_name="DB 测试 IPO", document_id=document.document_id)
     )
-    completed = analysis_repo.start(run.run_id)
+    proposed = analysis_repo.start(run.run_id)
+    assert proposed.status == "awaiting_industry_confirmation"
+    completed = analysis_repo.confirm_industry_profile(
+        run.run_id,
+        IndustryProfileConfirmation(),
+    )
 
     assert completed.status == "completed"
     with session_factory() as session:

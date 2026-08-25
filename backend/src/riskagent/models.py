@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, String, Text, func
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, JSON, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from riskagent.database import Base
@@ -195,3 +195,176 @@ class RiskRuleRow(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     display_order: Mapped[int] = mapped_column(Integer, index=True)
     created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class MarketDatasetSnapshotRow(Base):
+    __tablename__ = "market_dataset_snapshots"
+
+    snapshot_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    file_hashes: Mapped[dict] = mapped_column(JSON)
+    source_paths: Mapped[dict] = mapped_column(JSON)
+    coverage: Mapped[dict] = mapped_column(JSON)
+    row_counts: Mapped[dict] = mapped_column(JSON)
+    quality_report: Mapped[dict] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(24), default="draft", index=True)
+    published_at: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[str] = mapped_column(String(64))
+
+
+class SecurityMasterRow(Base):
+    __tablename__ = "security_master"
+    __table_args__ = (UniqueConstraint("snapshot_id", "wind_code", name="uq_security_snapshot_code"),)
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    snapshot_id: Mapped[str] = mapped_column(ForeignKey("market_dataset_snapshots.snapshot_id"), index=True)
+    wind_code: Mapped[str] = mapped_column(String(32), index=True)
+    company_code: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    name: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    listing_date: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    listing_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    source: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+
+class CompanyInfoRow(Base):
+    __tablename__ = "company_info"
+    __table_args__ = (UniqueConstraint("snapshot_id", "company_code", name="uq_company_snapshot_code"),)
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    snapshot_id: Mapped[str] = mapped_column(ForeignKey("market_dataset_snapshots.snapshot_id"), index=True)
+    company_code: Mapped[str] = mapped_column(String(64), index=True)
+    name: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    english_name: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    business_scope: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class DailyPriceRow(Base):
+    __tablename__ = "daily_prices"
+    __table_args__ = (UniqueConstraint("snapshot_id", "wind_code", "trade_date", name="uq_price_snapshot_code_date"),)
+
+    id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    snapshot_id: Mapped[str] = mapped_column(ForeignKey("market_dataset_snapshots.snapshot_id"), index=True)
+    wind_code: Mapped[str] = mapped_column(String(32), index=True)
+    trade_date: Mapped[str] = mapped_column(String(16), index=True)
+    low: Mapped[float] = mapped_column(Float)
+    close: Mapped[float] = mapped_column(Float)
+    open: Mapped[float | None] = mapped_column(Float, nullable=True)
+    high: Mapped[float | None] = mapped_column(Float, nullable=True)
+    volume: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
+class IpoOutcomeLabelRow(Base):
+    __tablename__ = "ipo_outcome_labels"
+    __table_args__ = (UniqueConstraint("snapshot_id", "wind_code", "horizon", name="uq_label_snapshot_code_horizon"),)
+
+    id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    snapshot_id: Mapped[str] = mapped_column(ForeignKey("market_dataset_snapshots.snapshot_id"), index=True)
+    wind_code: Mapped[str] = mapped_column(String(32), index=True)
+    horizon: Mapped[int] = mapped_column(Integer)
+    offer_price: Mapped[float] = mapped_column(Float)
+    end_close: Mapped[float] = mapped_column(Float)
+    min_low: Mapped[float] = mapped_column(Float)
+    return_pct: Mapped[float] = mapped_column(Float)
+    max_drawdown_pct: Mapped[float] = mapped_column(Float)
+    significant_decline: Mapped[bool] = mapped_column(Boolean)
+    breaking: Mapped[bool] = mapped_column(Boolean)
+
+
+class RiskScoreSnapshotRow(Base):
+    __tablename__ = "risk_score_snapshots"
+
+    score_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(64), index=True)
+    wind_code: Mapped[str] = mapped_column(String(32), index=True)
+    scorecard_version: Mapped[str] = mapped_column(String(32))
+    total_score: Mapped[float] = mapped_column(Float)
+    risk_level: Mapped[str] = mapped_column(String(16))
+    breakdown: Mapped[dict] = mapped_column(JSON)
+    limitations: Mapped[list[str]] = mapped_column(JSON)
+    analysis_as_of_date: Mapped[str] = mapped_column(String(16), index=True)
+    input_hash: Mapped[str] = mapped_column(String(64))
+    evidence_hash: Mapped[str] = mapped_column(String(64))
+    finding_snapshot: Mapped[list[dict]] = mapped_column(JSON, default=list)
+    industry_profile: Mapped[dict] = mapped_column(JSON, default=dict)
+    text_signal_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    weight_profile: Mapped[dict] = mapped_column(JSON, default=dict)
+    research_snapshot_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    created_at: Mapped[str] = mapped_column(String(64))
+
+
+class BacktestRunRow(Base):
+    __tablename__ = "backtest_runs"
+
+    backtest_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    snapshot_id: Mapped[str] = mapped_column(ForeignKey("market_dataset_snapshots.snapshot_id"), index=True)
+    name: Mapped[str] = mapped_column(String(256))
+    test_start_date: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    test_end_date: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    status: Mapped[str] = mapped_column(String(24))
+    metrics: Mapped[dict] = mapped_column(JSON)
+    protocol: Mapped[dict] = mapped_column(JSON, default=dict)
+    candidate_set_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    artifact_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    created_at: Mapped[str] = mapped_column(String(64))
+
+
+class BacktestSampleRow(Base):
+    __tablename__ = "backtest_samples"
+    __table_args__ = (UniqueConstraint("backtest_id", "wind_code", name="uq_backtest_sample_code"),)
+
+    id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    backtest_id: Mapped[str] = mapped_column(ForeignKey("backtest_runs.backtest_id"), index=True)
+    wind_code: Mapped[str] = mapped_column(String(32), index=True)
+    company_name: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    score: Mapped[float] = mapped_column(Float)
+    risk_level: Mapped[str] = mapped_column(String(16))
+    actual_decline: Mapped[bool] = mapped_column(Boolean)
+    actual_breaking: Mapped[bool] = mapped_column(Boolean)
+    return_pct: Mapped[float] = mapped_column(Float)
+    max_drawdown_pct: Mapped[float] = mapped_column(Float)
+    reason: Mapped[str] = mapped_column(Text)
+    score_id: Mapped[str] = mapped_column(String(96), index=True)
+    analysis_run_id: Mapped[str] = mapped_column(String(64), index=True)
+    analysis_as_of_date: Mapped[str] = mapped_column(String(16))
+    industry_profile: Mapped[dict] = mapped_column(JSON, default=dict)
+    specific_risks: Mapped[list[dict]] = mapped_column(JSON, default=list)
+    outcome_profile: Mapped[dict] = mapped_column(JSON, default=dict)
+    retrospective_attribution: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class BacktestCandidateSetRow(Base):
+    __tablename__ = "backtest_candidate_sets"
+
+    candidate_set_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    backtest_id: Mapped[str] = mapped_column(ForeignKey("backtest_runs.backtest_id"), unique=True, index=True)
+    snapshot_id: Mapped[str] = mapped_column(ForeignKey("market_dataset_snapshots.snapshot_id"), index=True)
+    status: Mapped[str] = mapped_column(String(24), index=True)
+    created_at: Mapped[str] = mapped_column(String(64))
+
+
+class BacktestCandidateSampleRow(Base):
+    __tablename__ = "backtest_candidate_samples"
+    __table_args__ = (UniqueConstraint("candidate_set_id", "wind_code", name="uq_candidate_set_code"),)
+
+    id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    candidate_set_id: Mapped[str] = mapped_column(ForeignKey("backtest_candidate_sets.candidate_set_id"), index=True)
+    wind_code: Mapped[str] = mapped_column(String(32), index=True)
+    listing_date: Mapped[str] = mapped_column(String(16))
+    label_id: Mapped[str] = mapped_column(String(160))
+    score_id: Mapped[str | None] = mapped_column(String(96), nullable=True, index=True)
+    source_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    inclusion_status: Mapped[str] = mapped_column(String(24), default="proposed")
+    exclusion_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class BacktestJobRow(Base):
+    __tablename__ = "backtest_jobs"
+
+    job_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    backtest_id: Mapped[str] = mapped_column(ForeignKey("backtest_runs.backtest_id"), index=True)
+    kind: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(24), index=True)
+    progress: Mapped[int] = mapped_column(Integer, default=0)
+    stage: Mapped[str] = mapped_column(String(128), default="queued")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[str] = mapped_column(String(64))
+    completed_at: Mapped[str | None] = mapped_column(String(64), nullable=True)

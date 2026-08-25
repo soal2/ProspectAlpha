@@ -95,7 +95,7 @@ def test_agent_experts_seed_empty_database(tmp_path):
     repo = AgentExpertRepository(session_factory=session_factory)
 
     agents = repo.list_agents()
-    assert len(agents) == 12
+    assert len(agents) == 14
     assert agents[0]["id"] == "L3-001"
     assert {agent["layer"] for agent in agents} == {"L3", "L2", "L1"}
 
@@ -140,7 +140,7 @@ def test_agent_experts_returns_database_rows_in_display_order(tmp_path):
     ]
 
 
-def test_persona_expert_directory_returns_12_personas_with_full_metadata(tmp_path):
+def test_persona_expert_directory_returns_14_personas_with_full_metadata(tmp_path):
     engine = make_engine(f"sqlite:///{tmp_path / 'agents.db'}")
     session_factory = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
     supervisor = AgentTeamSupervisor(
@@ -151,7 +151,7 @@ def test_persona_expert_directory_returns_12_personas_with_full_metadata(tmp_pat
 
     options = supervisor.agent_options()
 
-    assert len(options) == 12
+    assert len(options) == 14
     required_keys = {
         "agent_name",
         "persona_id",
@@ -175,12 +175,14 @@ def test_persona_expert_directory_returns_12_personas_with_full_metadata(tmp_pat
         "L2-001",
         "L2-002",
         "L2-003",
+        "L2-004",
         "L1-001",
         "L1-002",
         "L1-003",
         "L1-004",
         "L1-005",
         "L1-006",
+        "L1-007",
     }
     first = next(option for option in options if option["persona_id"] == "L1-001")
     assert first["agent_name"] == "qin_bingwen_financial_agent"

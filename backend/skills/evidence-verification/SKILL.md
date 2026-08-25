@@ -1,6 +1,10 @@
 ---
 name: evidence-verification
+version: 1.0.0
 description: 校验风险结论的证据链完整性并晋升合格证据入证据库。当需要判定某条 finding 是否有充分原文支撑、执行证据门禁、或把 supported 证据沉淀到跨 run 证据库时使用。
+owners: [financial_agent, legal_agent, market_agent, evidence, quality, redteam]
+execution: prompt_only
+failure_policy: required
 ---
 
 # 证据核验与沉淀

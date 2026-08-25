@@ -1,3 +1,683 @@
-# Risk taxonomy placeholder.
-# TODO: Define first-level risks, second-level risks, descriptions, and review requirements.
-risks: []
+# =============================================================================
+# Risk Taxonomy for HK IPO Risk Analysis
+# Aligned with ISO 31000:2018 and COSO ERM frameworks
+# Maps to hk_ipo_risk_rules_v1.json rule categories (164 rules, 3 dimensions)
+# =============================================================================
+
+version: "1.0"
+framework_references:
+  - name: "ISO 31000:2018"
+    description: "Risk management guidelines — principles and guidelines on risk management"
+  - name: "COSO ERM"
+    description: "Enterprise Risk Management — Integrating Risk with Strategy and Performance"
+  - name: "HKEX Listing Rules"
+    description: "Hong Kong Exchanges and Clearing Limited Main Board Listing Rules"
+
+# =============================================================================
+# Top-level taxonomy: 8 risk categories with subcategories
+# =============================================================================
+taxonomy:
+  # ---------------------------------------------------------------------------
+  # 1. STRAT — Strategic Risk
+  # ---------------------------------------------------------------------------
+  - id: "STRAT"
+    name: "战略风险"
+    name_en: "Strategic Risk"
+    description: "与企业战略方向、行业定位、市场竞争格局和长期发展相关的风险"
+    subcategories:
+      - id: "STRAT-01"
+        name: "行业竞争格局恶化"
+        name_en: "Industry Competition Deterioration"
+        description: "行业集中度低、价格战加剧、进入壁垒低导致的竞争风险"
+        rule_ids: ["HKIPO-097"]
+      - id: "STRAT-02"
+        name: "技术替代风险"
+        name_en: "Technology Substitution Risk"
+        description: "面临颠覆性技术替代威胁，现有技术路线可能被淘汰"
+        rule_ids: ["HKIPO-098"]
+      - id: "STRAT-03"
+        name: "市场空间有限"
+        name_en: "Limited Market Space"
+        description: "主要产品市场天花板低，增长空间受限"
+        rule_ids: ["HKIPO-099"]
+      - id: "STRAT-04"
+        name: "海外市场拓展风险"
+        name_en: "Overseas Expansion Risk"
+        description: "海外业务面临地缘政治、贸易壁垒和本土化竞争挑战"
+        rule_ids: ["HKIPO-100"]
+      - id: "STRAT-05"
+        name: "成长能力衰退"
+        name_en: "Growth Capability Decline"
+        description: "营收增速下滑、利润增长乏力、资产扩张与产出背离"
+        rule_ids: ["HKIPO-038", "HKIPO-039", "HKIPO-040", "HKIPO-041", "HKIPO-042", "HKIPO-043"]
+      - id: "STRAT-06"
+        name: "竞品压力（生物科技）"
+        name_en: "Competitive Product Pressure (Biotech)"
+        description: "核心候选产品面临已上市或临床后期竞品的竞争压力"
+        rule_ids: ["HKIPO-145"]
+
+  # ---------------------------------------------------------------------------
+  # 2. FIN — Financial Risk
+  # ---------------------------------------------------------------------------
+  - id: "FIN"
+    name: "财务风险"
+    name_en: "Financial Risk"
+    description: "与企业财务状况、盈利能力、现金流、偿债能力和盈利质量相关的风险"
+    subcategories:
+      - id: "FIN-01"
+        name: "盈利能力不足"
+        name_en: "Insufficient Profitability"
+        description: "毛利率、净利率、ROE、ROA等核心盈利指标低于行业或持续恶化"
+        rule_ids: ["HKIPO-001", "HKIPO-002", "HKIPO-003", "HKIPO-004", "HKIPO-005", "HKIPO-006", "HKIPO-007", "HKIPO-008"]
+      - id: "FIN-02"
+        name: "偿债能力不足"
+        name_en: "Insufficient Solvency"
+        description: "流动比率、速动比率偏低，资产负债率过高，利息保障不足"
+        rule_ids: ["HKIPO-009", "HKIPO-010", "HKIPO-011", "HKIPO-012", "HKIPO-013", "HKIPO-014", "HKIPO-015", "HKIPO-016"]
+      - id: "FIN-03"
+        name: "现金流风险"
+        name_en: "Cash Flow Risk"
+        description: "经营现金流为负、自由现金流持续为负、现金消耗率过高"
+        rule_ids: ["HKIPO-024", "HKIPO-025", "HKIPO-026", "HKIPO-027", "HKIPO-028", "HKIPO-029", "HKIPO-030"]
+      - id: "FIN-04"
+        name: "盈利质量风险"
+        name_en: "Earnings Quality Risk"
+        description: "非经常性损益占比高、政府补贴依赖、公允价值波动、减值异常"
+        rule_ids: ["HKIPO-031", "HKIPO-032", "HKIPO-033", "HKIPO-034", "HKIPO-035", "HKIPO-036", "HKIPO-037"]
+      - id: "FIN-05"
+        name: "持续经营风险"
+        name_en: "Going Concern Risk"
+        description: "持续经营不确定性、累计亏损、业务模式不可持续"
+        rule_ids: ["HKIPO-080", "HKIPO-081", "HKIPO-085"]
+      - id: "FIN-06"
+        name: "担保与质押风险"
+        name_en: "Guarantee & Pledge Risk"
+        description: "资产受限比例高、对外担保敞口大"
+        rule_ids: ["HKIPO-078", "HKIPO-079"]
+      - id: "FIN-07"
+        name: "资本结构风险"
+        name_en: "Capital Structure Risk"
+        description: "期限错配、少数股东权益过高、混合工具占比过高"
+        rule_ids: ["HKIPO-045", "HKIPO-046", "HKIPO-047"]
+
+  # ---------------------------------------------------------------------------
+  # 3. OPS — Operational Risk
+  # ---------------------------------------------------------------------------
+  - id: "OPS"
+    name: "运营风险"
+    name_en: "Operational Risk"
+    description: "与企业日常经营、供应链管理、营运效率、业务模式可持续性和核心技术相关的风险"
+    subcategories:
+      - id: "OPS-01"
+        name: "客户/供应商依赖"
+        name_en: "Customer/Supplier Dependency"
+        description: "客户或供应商集中度过高、客户供应商重叠、合作关系不稳定"
+        rule_ids: ["HKIPO-049", "HKIPO-050", "HKIPO-051", "HKIPO-052", "HKIPO-053"]
+      - id: "OPS-02"
+        name: "营运能力低下"
+        name_en: "Operational Efficiency Deterioration"
+        description: "应收账款、存货周转率偏低，营业周期延长，应付账款异常"
+        rule_ids: ["HKIPO-017", "HKIPO-018", "HKIPO-019", "HKIPO-020", "HKIPO-021", "HKIPO-022", "HKIPO-023"]
+      - id: "OPS-03"
+        name: "核心技术/知识产权风险"
+        name_en: "Core Technology / IP Risk"
+        description: "技术依赖外部授权、专利质量低、专利到期、权属纠纷"
+        rule_ids: ["HKIPO-086", "HKIPO-087", "HKIPO-088", "HKIPO-089", "HKIPO-090"]
+      - id: "OPS-04"
+        name: "持续经营运营风险"
+        name_en: "Going Concern Operational Risk"
+        description: "重大客户流失、核心产品/管线推进不及预期、关键人员依赖"
+        rule_ids: ["HKIPO-082", "HKIPO-083", "HKIPO-084"]
+      - id: "OPS-05"
+        name: "未商业化企业产品风险"
+        name_en: "Pre-commercialization Product Risk"
+        description: "核心候选产品尚未获批且无产品销售收入的生物科技特有风险"
+        rule_ids: ["HKIPO-144"]
+      - id: "OPS-06"
+        name: "许可条款风险"
+        name_en: "License Terms Risk"
+        description: "核心候选产品受第三方许可持续付款或终止条款约束"
+        rule_ids: ["HKIPO-147"]
+
+  # ---------------------------------------------------------------------------
+  # 4. COMP — Compliance & Legal Risk
+  # ---------------------------------------------------------------------------
+  - id: "COMP"
+    name: "合规风险"
+    name_en: "Compliance & Legal Risk"
+    description: "与法律法规遵从、监管政策变化、诉讼纠纷、税务合规和数据安全相关的风险"
+    subcategories:
+      - id: "COMP-01"
+        name: "政策监管风险"
+        name_en: "Regulatory Policy Risk"
+        description: "牌照依赖、行业政策变化、VIE架构、反垄断、跨境合规、环保合规"
+        rule_ids: ["HKIPO-065", "HKIPO-066", "HKIPO-067", "HKIPO-068", "HKIPO-069", "HKIPO-070", "HKIPO-071"]
+      - id: "COMP-02"
+        name: "诉讼与纠纷"
+        name_en: "Litigation & Disputes"
+        description: "重大未决诉讼、知识产权诉讼、劳动纠纷、行政处罚、集体诉讼"
+        rule_ids: ["HKIPO-072", "HKIPO-073", "HKIPO-074", "HKIPO-075", "HKIPO-076"]
+      - id: "COMP-03"
+        name: "税务风险"
+        name_en: "Tax Risk"
+        description: "税务争议、税收优惠依赖、有效税率异常、转让定价风险"
+        rule_ids: ["HKIPO-101", "HKIPO-102", "HKIPO-103", "HKIPO-104"]
+      - id: "COMP-04"
+        name: "制裁合规"
+        name_en: "Sanctions Compliance"
+        description: "制裁名单筛查、政治敏感人物关联、可疑交易模式、反洗钱内控缺陷、出口管制与技术转让风险"
+        rule_ids: ["HKIPO-160", "HKIPO-161", "HKIPO-162", "HKIPO-163", "HKIPO-164"]
+
+  # ---------------------------------------------------------------------------
+  # 5. GOV — Governance Risk
+  # ---------------------------------------------------------------------------
+  - id: "GOV"
+    name: "治理风险"
+    name_en: "Governance Risk"
+    description: "与公司治理结构、内部控制、管理层诚信、关联交易和股权设计相关的风险"
+    subcategories:
+      - id: "GOV-01"
+        name: "管理层与公司治理"
+        name_en: "Management & Corporate Governance"
+        description: "管理层变动、诚信问题、独董不足、薪酬不合理、内部人控制、内控缺陷"
+        rule_ids: ["HKIPO-091", "HKIPO-092", "HKIPO-093", "HKIPO-094", "HKIPO-095", "HKIPO-096"]
+      - id: "GOV-02"
+        name: "关联交易风险"
+        name_en: "Related Party Transaction Risk"
+        description: "关联交易金额重大、定价不透明、资金占用、担保、趋势异常、同业竞争"
+        rule_ids: ["HKIPO-054", "HKIPO-055", "HKIPO-056", "HKIPO-057", "HKIPO-058", "HKIPO-059"]
+      - id: "GOV-03"
+        name: "股权结构风险"
+        name_en: "Equity Structure Risk"
+        description: "股权集中度过高、大股东质押、融资轮次过多"
+        rule_ids: ["HKIPO-044", "HKIPO-077", "HKIPO-048"]
+      - id: "GOV-04"
+        name: "中介机构质量"
+        name_en: "Intermediary Quality"
+        description: "保荐人、审计师、律师等中介机构资质、声誉及执业质量风险"
+        rule_ids: ["HKIPO-158", "HKIPO-159"]
+
+  # ---------------------------------------------------------------------------
+  # 6. MKT — Market Risk
+  # ---------------------------------------------------------------------------
+  - id: "MKT"
+    name: "市场风险"
+    name_en: "Market Risk"
+    description: "与发行定价、市场估值、流动性和投资者认知相关的风险"
+    subcategories:
+      - id: "MKT-01"
+        name: "估值与发行定价风险"
+        name_en: "Valuation & Pricing Risk"
+        description: "发行估值偏高或定价依据不充分，上市后面临破发风险"
+        rule_ids: ["HKIPO-146", "HKIPO-148", "HKIPO-149", "HKIPO-150"]
+      - id: "MKT-02"
+        name: "汇兑风险"
+        name_en: "Foreign Exchange Risk"
+        description: "汇兑损益对利润影响显著，外汇风险敞口管理不足"
+        rule_ids: ["HKIPO-035"]
+
+  # ---------------------------------------------------------------------------
+  # 7. ESG — Environmental, Social & Governance Risk
+  # ---------------------------------------------------------------------------
+  - id: "ESG"
+    name: "ESG风险"
+    name_en: "Environmental, Social & Governance Risk"
+    description: "与环境保护、社会责任、数据隐私和ESG披露相关的风险"
+    subcategories:
+      - id: "ESG-01"
+        name: "环境合规风险"
+        name_en: "Environmental Compliance Risk"
+        description: "高污染行业、环保处罚记录、排污许可风险"
+        rule_ids: ["HKIPO-071"]
+      - id: "ESG-02"
+        name: "社会责任风险"
+        name_en: "Social Responsibility Risk"
+        description: "劳动纠纷频发、数据安全与隐私合规问题"
+        rule_ids: ["HKIPO-074", "HKIPO-068"]
+      - id: "ESG-03"
+        name: "反垄断与公平竞争"
+        name_en: "Anti-monopoly & Fair Competition"
+        description: "市场份额过大、排他性安排等反垄断风险"
+        rule_ids: ["HKIPO-069"]
+
+  # ---------------------------------------------------------------------------
+  # 8. IPO — IPO-Specific Structural Risk
+  # ---------------------------------------------------------------------------
+  - id: "IPO"
+    name: "IPO特有结构风险"
+    name_en: "IPO-Specific Structural Risk"
+    description: "与IPO发行结构、对赌条款、募资设计和上市后特殊安排相关的特有风险"
+    subcategories:
+      - id: "IPO-01"
+        name: "对赌/赎回条款风险"
+        name_en: "VAM & Redemption Risk"
+        description: "特殊股东权利、对赌条款触发、赎回到期、IPO后权利未终止"
+        rule_ids: ["HKIPO-060", "HKIPO-061", "HKIPO-062", "HKIPO-063", "HKIPO-064"]
+      - id: "IPO-02"
+        name: "募资承诺风险"
+        name_en: "Fundraising Commitment Risk"
+        description: "募资用途宽泛、可行性论证不足、盈利预测激进"
+        rule_ids: ["HKIPO-127", "HKIPO-128", "HKIPO-129", "HKIPO-130", "HKIPO-131"]
+      - id: "IPO-03"
+        name: "IPO发行结构"
+        name_en: "IPO Issuance Structure"
+        description: "发行规模、配售结构、绿鞋机制、基石投资者安排等发行层面结构性风险"
+        rule_ids: ["HKIPO-151", "HKIPO-152", "HKIPO-153", "HKIPO-154", "HKIPO-155", "HKIPO-156", "HKIPO-157"]
+
+  # ---------------------------------------------------------------------------
+  # 9. DISC — Disclosure & Information Risk (D3 textual dimension)
+  # ---------------------------------------------------------------------------
+  - id: "DISC"
+    name: "信息披露风险"
+    name_en: "Disclosure & Information Risk"
+    description: "与招股书信息披露质量、文本粉饰度、可读性和一致性相关的风险（对应D3维度）"
+    subcategories:
+      - id: "DISC-01"
+        name: "可读性风险"
+        name_en: "Readability Risk"
+        description: "专业术语密度高、被动语态过多、段落过长、冗余表述、长句嵌套"
+        rule_ids: ["HKIPO-105", "HKIPO-106", "HKIPO-107", "HKIPO-108", "HKIPO-109"]
+      - id: "DISC-02"
+        name: "情感倾向与粉饰"
+        name_en: "Sentiment Bias & Whitewashing"
+        description: "过度乐观表述、风险章节乐观措辞、负面事件中性化、行业定位拔高"
+        rule_ids: ["HKIPO-110", "HKIPO-111", "HKIPO-112", "HKIPO-113", "HKIPO-114"]
+      - id: "DISC-03"
+        name: "信息披露完整性"
+        name_en: "Disclosure Completeness"
+        description: "关键财务数据缺失、定量信息不足、关联交易披露不充分、Non-GAAP过度突出"
+        rule_ids: ["HKIPO-115", "HKIPO-116", "HKIPO-117", "HKIPO-118", "HKIPO-119", "HKIPO-120", "HKIPO-121"]
+      - id: "DISC-04"
+        name: "前后一致性"
+        name_en: "Internal Consistency"
+        description: "财务数据跨章不一致、风险描述矛盾、行业数据引用不一致、口径变更、时间线冲突"
+        rule_ids: ["HKIPO-122", "HKIPO-123", "HKIPO-124", "HKIPO-125", "HKIPO-126"]
+      - id: "DISC-05"
+        name: "风险因素覆盖度"
+        name_en: "Risk Factor Coverage"
+        description: "系统/特质风险比例失衡、排序异常、行业特有风险缺失、财务风险披露不充分"
+        rule_ids: ["HKIPO-132", "HKIPO-133", "HKIPO-134", "HKIPO-135"]
+      - id: "DISC-06"
+        name: "语言模糊性"
+        name_en: "Language Ambiguity"
+        description: "模糊限定词密度高、双重否定、条件句堆砌、无量化表述、概不保证滥用"
+        rule_ids: ["HKIPO-136", "HKIPO-137", "HKIPO-138", "HKIPO-139", "HKIPO-140"]
+      - id: "DISC-07"
+        name: "免责声明密度"
+        name_en: "Disclaimer Density"
+        description: "前瞻性陈述声明异常、免责声明分布异常、风险规避表述过度"
+        rule_ids: ["HKIPO-141", "HKIPO-142", "HKIPO-143"]
+
+# =============================================================================
+# Cross-dimension triggers
+# When rules from different dimensions fire together, risk is elevated
+# =============================================================================
+cross_dimension_triggers:
+  - id: "CDT-01"
+    name: "关联交易 + 客户集中度"
+    name_en: "Related Party Transactions + Customer Concentration"
+    description: "关联交易占比高且主要客户存在关联关系时，业务独立性风险显著上升"
+    trigger_conditions:
+      - dimension: "D2"
+        category: "关联交易"
+        rule_ids: ["HKIPO-054", "HKIPO-055", "HKIPO-058"]
+      - dimension: "D2"
+        category: "客户/供应商依赖"
+        rule_ids: ["HKIPO-049", "HKIPO-053"]
+    combined_risk_level: "high"
+    suggested_action: "重点核查关联交易定价公允性和客户独立性，评估业务是否具备面向市场独立获客能力"
+
+  - id: "CDT-02"
+    name: "财务指标恶化 + 文本粉饰度高"
+    name_en: "Financial Deterioration + High Text Whitewashing"
+    description: "财务指标异常同时文本粉饰度高，暗示可能存在财务操纵"
+    trigger_conditions:
+      - dimension: "D1"
+        category: "盈利能力"
+        rule_ids: ["HKIPO-001", "HKIPO-005", "HKIPO-007"]
+      - dimension: "D3"
+        category: "情感倾向"
+        rule_ids: ["HKIPO-110", "HKIPO-111", "HKIPO-113"]
+    combined_risk_level: "very_high"
+    suggested_action: "启动深度财务尽职调查，交叉核验财务数据与文本描述的一致性"
+
+  - id: "CDT-03"
+    name: "现金流消耗快 + 融资依赖高"
+    name_en: "Fast Cash Burn + High Financing Dependency"
+    description: "经营现金流持续为负且高度依赖外部融资，持续经营风险极高"
+    trigger_conditions:
+      - dimension: "D1"
+        category: "现金流"
+        rule_ids: ["HKIPO-024", "HKIPO-026", "HKIPO-030"]
+      - dimension: "D1"
+        category: "偿债能力"
+        rule_ids: ["HKIPO-013", "HKIPO-015"]
+    combined_risk_level: "very_high"
+    suggested_action: "评估现金跑道、IPO募资紧迫性和上市后流动性安全边际"
+
+  - id: "CDT-04"
+    name: "政策监管变化 + 牌照依赖"
+    name_en: "Regulatory Change + License Dependency"
+    description: "行业政策收紧同时核心业务高度依赖牌照资质，面临业务中断风险"
+    trigger_conditions:
+      - dimension: "D2"
+        category: "政策监管"
+        rule_ids: ["HKIPO-065", "HKIPO-066"]
+      - dimension: "D2"
+        category: "政策监管"
+        rule_ids: ["HKIPO-067"]
+    combined_risk_level: "high"
+    suggested_action: "评估政策影响时间线和牌照续期确定性，制定业务连续性预案"
+
+  - id: "CDT-05"
+    name: "估值偏高 + 市场情绪冷淡"
+    name_en: "High Valuation + Cold Market Sentiment"
+    description: "发行估值处于行业高位同时文本情感过度乐观，破发风险显著"
+    trigger_conditions:
+      - dimension: "D2"
+        category: "估值与发行定价"
+        rule_ids: ["HKIPO-146"]
+      - dimension: "D3"
+        category: "情感倾向"
+        rule_ids: ["HKIPO-110", "HKIPO-114"]
+    combined_risk_level: "high"
+    suggested_action: "重新审视定价合理性，对比同行业可比公司估值中枢"
+
+  - id: "CDT-06"
+    name: "管理层变动 + 内控缺陷"
+    name_en: "Management Turnover + Internal Control Deficiency"
+    description: "核心管理层频繁更换叠加内部控制重大缺陷，治理危机风险极高"
+    trigger_conditions:
+      - dimension: "D2"
+        category: "管理层与公司治理"
+        rule_ids: ["HKIPO-091", "HKIPO-092"]
+      - dimension: "D2"
+        category: "管理层与公司治理"
+        rule_ids: ["HKIPO-095", "HKIPO-096"]
+    combined_risk_level: "very_high"
+    suggested_action: "评估管理层稳定性和内控整改计划，关注审计意见类型"
+
+  - id: "CDT-07"
+    name: "诉讼风险 + 关联交易"
+    name_en: "Litigation Risk + Related Party Transactions"
+    description: "重大未决诉讼同时关联交易频繁，存在利益输送嫌疑"
+    trigger_conditions:
+      - dimension: "D2"
+        category: "诉讼与纠纷"
+        rule_ids: ["HKIPO-072", "HKIPO-075"]
+      - dimension: "D2"
+        category: "关联交易"
+        rule_ids: ["HKIPO-054", "HKIPO-056"]
+    combined_risk_level: "very_high"
+    suggested_action: "穿透核查诉讼事项与关联方的关联关系，评估潜在财务损失"
+
+  - id: "CDT-08"
+    name: "供应商集中 + 地缘政治"
+    name_en: "Supplier Concentration + Geopolitical Risk"
+    description: "供应商高度集中且涉及地缘政治敏感地区，供应链断裂风险极高"
+    trigger_conditions:
+      - dimension: "D2"
+        category: "客户/供应商依赖"
+        rule_ids: ["HKIPO-050"]
+      - dimension: "D2"
+        category: "行业竞争"
+        rule_ids: ["HKIPO-100"]
+    combined_risk_level: "high"
+    suggested_action: "评估供应链多元化方案和替代供应商储备，量化地缘风险敞口"
+
+  - id: "CDT-09"
+    name: "对赌条款 + 现金流压力"
+    name_en: "VAM Clauses + Cash Flow Pressure"
+    description: "存在对赌或赎回条款同时现金流紧张，赎回触发和资金链断裂风险极高"
+    trigger_conditions:
+      - dimension: "D2"
+        category: "对赌/赎回条款"
+        rule_ids: ["HKIPO-061", "HKIPO-062"]
+      - dimension: "D1"
+        category: "现金流"
+        rule_ids: ["HKIPO-024", "HKIPO-030"]
+    combined_risk_level: "very_high"
+    suggested_action: "评估对赌完成概率和赎回资金缺口，制定应急融资方案"
+
+  - id: "CDT-10"
+    name: "研发资本化率高 + 审计意见保留"
+    name_en: "High R&D Capitalization + Qualified Audit Opinion"
+    description: "研发投入资本化率异常偏高同时审计存在保留意见，资产虚增风险极高"
+    trigger_conditions:
+      - dimension: "D1"
+        category: "盈利质量"
+        rule_ids: ["HKIPO-036"]
+      - dimension: "D3"
+        category: "信息披露完整性"
+        rule_ids: ["HKIPO-115", "HKIPO-121"]
+    combined_risk_level: "very_high"
+    suggested_action: "要求管理层提供资本化合理性论证，与同行可比公司逐一对比"
+
+  - id: "CDT-11"
+    name: "盈利质量差 + 披露模糊"
+    name_en: "Poor Earnings Quality + Vague Disclosure"
+    description: "非经常性损益占比高且文本表述模糊，刻意掩盖盈利结构问题"
+    trigger_conditions:
+      - dimension: "D1"
+        category: "盈利质量"
+        rule_ids: ["HKIPO-031", "HKIPO-032"]
+      - dimension: "D3"
+        category: "语言模糊性"
+        rule_ids: ["HKIPO-136", "HKIPO-139"]
+    combined_risk_level: "high"
+    suggested_action: "拆解盈利结构，量化核心业务真实盈利能力，要求补充披露"
+
+  - id: "CDT-12"
+    name: "核心技术依赖 + 知识产权纠纷"
+    name_en: "Core Tech Dependency + IP Disputes"
+    description: "核心技术依赖外部授权且存在权属纠纷，技术资产稳定性极差"
+    trigger_conditions:
+      - dimension: "D2"
+        category: "核心技术/知识产权"
+        rule_ids: ["HKIPO-086", "HKIPO-089"]
+      - dimension: "D2"
+        category: "诉讼与纠纷"
+        rule_ids: ["HKIPO-073"]
+    combined_risk_level: "very_high"
+    suggested_action: "评估技术自主可控程度和替代方案，核查IP权属链条完整性"
+
+# =============================================================================
+# Rule-to-taxonomy mapping (all 164 rules)
+# Each rule maps to its primary category; some rules appear in multiple categories
+# =============================================================================
+rule_mapping:
+  # D1: 标准化财务指标风险 — 盈利能力 (8 rules)
+  HKIPO-001: { primary_category: "FIN", subcategory: "FIN-01", source_dimension: "D1" }
+  HKIPO-002: { primary_category: "FIN", subcategory: "FIN-01", source_dimension: "D1" }
+  HKIPO-003: { primary_category: "FIN", subcategory: "FIN-01", source_dimension: "D1" }
+  HKIPO-004: { primary_category: "FIN", subcategory: "FIN-01", source_dimension: "D1" }
+  HKIPO-005: { primary_category: "FIN", subcategory: "FIN-01", source_dimension: "D1" }
+  HKIPO-006: { primary_category: "FIN", subcategory: "FIN-01", source_dimension: "D1" }
+  HKIPO-007: { primary_category: "FIN", subcategory: "FIN-01", source_dimension: "D1" }
+  HKIPO-008: { primary_category: "FIN", subcategory: "FIN-01", source_dimension: "D1" }
+  # D1: 偿债能力 (8 rules)
+  HKIPO-009: { primary_category: "FIN", subcategory: "FIN-02", source_dimension: "D1" }
+  HKIPO-010: { primary_category: "FIN", subcategory: "FIN-02", source_dimension: "D1" }
+  HKIPO-011: { primary_category: "FIN", subcategory: "FIN-02", source_dimension: "D1" }
+  HKIPO-012: { primary_category: "FIN", subcategory: "FIN-02", source_dimension: "D1" }
+  HKIPO-013: { primary_category: "FIN", subcategory: "FIN-02", source_dimension: "D1" }
+  HKIPO-014: { primary_category: "FIN", subcategory: "FIN-02", source_dimension: "D1" }
+  HKIPO-015: { primary_category: "FIN", subcategory: "FIN-02", source_dimension: "D1" }
+  HKIPO-016: { primary_category: "FIN", subcategory: "FIN-02", source_dimension: "D1" }
+  # D1: 营运能力 (7 rules)
+  HKIPO-017: { primary_category: "OPS", subcategory: "OPS-02", source_dimension: "D1" }
+  HKIPO-018: { primary_category: "OPS", subcategory: "OPS-02", source_dimension: "D1" }
+  HKIPO-019: { primary_category: "OPS", subcategory: "OPS-02", source_dimension: "D1" }
+  HKIPO-020: { primary_category: "OPS", subcategory: "OPS-02", source_dimension: "D1" }
+  HKIPO-021: { primary_category: "OPS", subcategory: "OPS-02", source_dimension: "D1" }
+  HKIPO-022: { primary_category: "OPS", subcategory: "OPS-02", source_dimension: "D1" }
+  HKIPO-023: { primary_category: "OPS", subcategory: "OPS-02", source_dimension: "D1" }
+  # D1: 现金流 (7 rules)
+  HKIPO-024: { primary_category: "FIN", subcategory: "FIN-03", source_dimension: "D1" }
+  HKIPO-025: { primary_category: "FIN", subcategory: "FIN-03", source_dimension: "D1" }
+  HKIPO-026: { primary_category: "FIN", subcategory: "FIN-03", source_dimension: "D1" }
+  HKIPO-027: { primary_category: "FIN", subcategory: "FIN-03", source_dimension: "D1" }
+  HKIPO-028: { primary_category: "FIN", subcategory: "FIN-03", source_dimension: "D1" }
+  HKIPO-029: { primary_category: "FIN", subcategory: "FIN-03", source_dimension: "D1" }
+  HKIPO-030: { primary_category: "FIN", subcategory: "FIN-03", source_dimension: "D1" }
+  # D1: 盈利质量 (7 rules)
+  HKIPO-031: { primary_category: "FIN", subcategory: "FIN-04", source_dimension: "D1" }
+  HKIPO-032: { primary_category: "FIN", subcategory: "FIN-04", source_dimension: "D1" }
+  HKIPO-033: { primary_category: "FIN", subcategory: "FIN-04", source_dimension: "D1" }
+  HKIPO-034: { primary_category: "FIN", subcategory: "FIN-04", source_dimension: "D1" }
+  HKIPO-035: { primary_category: "MKT", subcategory: "MKT-02", source_dimension: "D1" }
+  HKIPO-036: { primary_category: "FIN", subcategory: "FIN-04", source_dimension: "D1" }
+  HKIPO-037: { primary_category: "FIN", subcategory: "FIN-04", source_dimension: "D1" }
+  # D1: 成长能力 (6 rules)
+  HKIPO-038: { primary_category: "STRAT", subcategory: "STRAT-05", source_dimension: "D1" }
+  HKIPO-039: { primary_category: "STRAT", subcategory: "STRAT-05", source_dimension: "D1" }
+  HKIPO-040: { primary_category: "STRAT", subcategory: "STRAT-05", source_dimension: "D1" }
+  HKIPO-041: { primary_category: "STRAT", subcategory: "STRAT-05", source_dimension: "D1" }
+  HKIPO-042: { primary_category: "STRAT", subcategory: "STRAT-05", source_dimension: "D1" }
+  HKIPO-043: { primary_category: "STRAT", subcategory: "STRAT-05", source_dimension: "D1" }
+  # D1: 资本结构 (5 rules)
+  HKIPO-044: { primary_category: "GOV", subcategory: "GOV-03", source_dimension: "D1" }
+  HKIPO-045: { primary_category: "FIN", subcategory: "FIN-07", source_dimension: "D1" }
+  HKIPO-046: { primary_category: "FIN", subcategory: "FIN-07", source_dimension: "D1" }
+  HKIPO-047: { primary_category: "FIN", subcategory: "FIN-07", source_dimension: "D1" }
+  HKIPO-048: { primary_category: "GOV", subcategory: "GOV-03", source_dimension: "D1" }
+  # D2: 客户/供应商依赖 (5 rules)
+  HKIPO-049: { primary_category: "OPS", subcategory: "OPS-01", source_dimension: "D2" }
+  HKIPO-050: { primary_category: "OPS", subcategory: "OPS-01", source_dimension: "D2" }
+  HKIPO-051: { primary_category: "OPS", subcategory: "OPS-01", source_dimension: "D2" }
+  HKIPO-052: { primary_category: "OPS", subcategory: "OPS-01", source_dimension: "D2" }
+  HKIPO-053: { primary_category: "OPS", subcategory: "OPS-01", source_dimension: "D2" }
+  # D2: 关联交易 (6 rules)
+  HKIPO-054: { primary_category: "GOV", subcategory: "GOV-02", source_dimension: "D2" }
+  HKIPO-055: { primary_category: "GOV", subcategory: "GOV-02", source_dimension: "D2" }
+  HKIPO-056: { primary_category: "GOV", subcategory: "GOV-02", source_dimension: "D2" }
+  HKIPO-057: { primary_category: "GOV", subcategory: "GOV-02", source_dimension: "D2" }
+  HKIPO-058: { primary_category: "GOV", subcategory: "GOV-02", source_dimension: "D2" }
+  HKIPO-059: { primary_category: "GOV", subcategory: "GOV-02", source_dimension: "D2" }
+  # D2: 对赌/赎回条款 (5 rules)
+  HKIPO-060: { primary_category: "IPO", subcategory: "IPO-01", source_dimension: "D2" }
+  HKIPO-061: { primary_category: "IPO", subcategory: "IPO-01", source_dimension: "D2" }
+  HKIPO-062: { primary_category: "IPO", subcategory: "IPO-01", source_dimension: "D2" }
+  HKIPO-063: { primary_category: "IPO", subcategory: "IPO-01", source_dimension: "D2" }
+  HKIPO-064: { primary_category: "IPO", subcategory: "IPO-01", source_dimension: "D2" }
+  # D2: 政策监管 (7 rules)
+  HKIPO-065: { primary_category: "COMP", subcategory: "COMP-01", source_dimension: "D2" }
+  HKIPO-066: { primary_category: "COMP", subcategory: "COMP-01", source_dimension: "D2" }
+  HKIPO-067: { primary_category: "COMP", subcategory: "COMP-01", source_dimension: "D2" }
+  HKIPO-068: { primary_category: "ESG", subcategory: "ESG-02", source_dimension: "D2" }
+  HKIPO-069: { primary_category: "ESG", subcategory: "ESG-03", source_dimension: "D2" }
+  HKIPO-070: { primary_category: "COMP", subcategory: "COMP-01", source_dimension: "D2" }
+  HKIPO-071: { primary_category: "ESG", subcategory: "ESG-01", source_dimension: "D2" }
+  # D2: 诉讼与纠纷 (5 rules)
+  HKIPO-072: { primary_category: "COMP", subcategory: "COMP-02", source_dimension: "D2" }
+  HKIPO-073: { primary_category: "COMP", subcategory: "COMP-02", source_dimension: "D2" }
+  HKIPO-074: { primary_category: "ESG", subcategory: "ESG-02", source_dimension: "D2" }
+  HKIPO-075: { primary_category: "COMP", subcategory: "COMP-02", source_dimension: "D2" }
+  HKIPO-076: { primary_category: "COMP", subcategory: "COMP-02", source_dimension: "D2" }
+  # D2: 担保与质押 (3 rules)
+  HKIPO-077: { primary_category: "GOV", subcategory: "GOV-03", source_dimension: "D2" }
+  HKIPO-078: { primary_category: "FIN", subcategory: "FIN-06", source_dimension: "D2" }
+  HKIPO-079: { primary_category: "FIN", subcategory: "FIN-06", source_dimension: "D2" }
+  # D2: 持续经营 (6 rules)
+  HKIPO-080: { primary_category: "FIN", subcategory: "FIN-05", source_dimension: "D2" }
+  HKIPO-081: { primary_category: "FIN", subcategory: "FIN-05", source_dimension: "D2" }
+  HKIPO-082: { primary_category: "OPS", subcategory: "OPS-04", source_dimension: "D2" }
+  HKIPO-083: { primary_category: "OPS", subcategory: "OPS-04", source_dimension: "D2" }
+  HKIPO-084: { primary_category: "OPS", subcategory: "OPS-04", source_dimension: "D2" }
+  HKIPO-085: { primary_category: "FIN", subcategory: "FIN-05", source_dimension: "D2" }
+  # D2: 核心技术/知识产权 (6 rules)
+  HKIPO-086: { primary_category: "OPS", subcategory: "OPS-03", source_dimension: "D2" }
+  HKIPO-087: { primary_category: "OPS", subcategory: "OPS-03", source_dimension: "D2" }
+  HKIPO-088: { primary_category: "OPS", subcategory: "OPS-03", source_dimension: "D2" }
+  HKIPO-089: { primary_category: "OPS", subcategory: "OPS-03", source_dimension: "D2" }
+  HKIPO-090: { primary_category: "OPS", subcategory: "OPS-03", source_dimension: "D2" }
+  HKIPO-091: { primary_category: "GOV", subcategory: "GOV-01", source_dimension: "D2" }
+  # D2: 管理层与公司治理 (6 rules, continued)
+  HKIPO-092: { primary_category: "GOV", subcategory: "GOV-01", source_dimension: "D2" }
+  HKIPO-093: { primary_category: "GOV", subcategory: "GOV-01", source_dimension: "D2" }
+  HKIPO-094: { primary_category: "GOV", subcategory: "GOV-01", source_dimension: "D2" }
+  HKIPO-095: { primary_category: "GOV", subcategory: "GOV-01", source_dimension: "D2" }
+  HKIPO-096: { primary_category: "GOV", subcategory: "GOV-01", source_dimension: "D2" }
+  # D2: 行业竞争 (5 rules)
+  HKIPO-097: { primary_category: "STRAT", subcategory: "STRAT-01", source_dimension: "D2" }
+  HKIPO-098: { primary_category: "STRAT", subcategory: "STRAT-02", source_dimension: "D2" }
+  HKIPO-099: { primary_category: "STRAT", subcategory: "STRAT-03", source_dimension: "D2" }
+  HKIPO-100: { primary_category: "STRAT", subcategory: "STRAT-04", source_dimension: "D2" }
+  HKIPO-101: { primary_category: "COMP", subcategory: "COMP-03", source_dimension: "D2" }
+  # D2: 税务风险 (4 rules, continued)
+  HKIPO-102: { primary_category: "COMP", subcategory: "COMP-03", source_dimension: "D2" }
+  HKIPO-103: { primary_category: "COMP", subcategory: "COMP-03", source_dimension: "D2" }
+  HKIPO-104: { primary_category: "COMP", subcategory: "COMP-03", source_dimension: "D2" }
+  # D3: 可读性 (5 rules)
+  HKIPO-105: { primary_category: "DISC", subcategory: "DISC-01", source_dimension: "D3" }
+  HKIPO-106: { primary_category: "DISC", subcategory: "DISC-01", source_dimension: "D3" }
+  HKIPO-107: { primary_category: "DISC", subcategory: "DISC-01", source_dimension: "D3" }
+  HKIPO-108: { primary_category: "DISC", subcategory: "DISC-01", source_dimension: "D3" }
+  HKIPO-109: { primary_category: "DISC", subcategory: "DISC-01", source_dimension: "D3" }
+  # D3: 情感倾向 (5 rules)
+  HKIPO-110: { primary_category: "DISC", subcategory: "DISC-02", source_dimension: "D3" }
+  HKIPO-111: { primary_category: "DISC", subcategory: "DISC-02", source_dimension: "D3" }
+  HKIPO-112: { primary_category: "DISC", subcategory: "DISC-02", source_dimension: "D3" }
+  HKIPO-113: { primary_category: "DISC", subcategory: "DISC-02", source_dimension: "D3" }
+  HKIPO-114: { primary_category: "DISC", subcategory: "DISC-02", source_dimension: "D3" }
+  # D3: 信息披露完整性 (7 rules)
+  HKIPO-115: { primary_category: "DISC", subcategory: "DISC-03", source_dimension: "D3" }
+  HKIPO-116: { primary_category: "DISC", subcategory: "DISC-03", source_dimension: "D3" }
+  HKIPO-117: { primary_category: "DISC", subcategory: "DISC-03", source_dimension: "D3" }
+  HKIPO-118: { primary_category: "DISC", subcategory: "DISC-03", source_dimension: "D3" }
+  HKIPO-119: { primary_category: "DISC", subcategory: "DISC-03", source_dimension: "D3" }
+  HKIPO-120: { primary_category: "DISC", subcategory: "DISC-03", source_dimension: "D3" }
+  HKIPO-121: { primary_category: "DISC", subcategory: "DISC-03", source_dimension: "D3" }
+  # D3: 前后一致性 (5 rules)
+  HKIPO-122: { primary_category: "DISC", subcategory: "DISC-04", source_dimension: "D3" }
+  HKIPO-123: { primary_category: "DISC", subcategory: "DISC-04", source_dimension: "D3" }
+  HKIPO-124: { primary_category: "DISC", subcategory: "DISC-04", source_dimension: "D3" }
+  HKIPO-125: { primary_category: "DISC", subcategory: "DISC-04", source_dimension: "D3" }
+  HKIPO-126: { primary_category: "DISC", subcategory: "DISC-04", source_dimension: "D3" }
+  # D3: 过度承诺 (5 rules)
+  HKIPO-127: { primary_category: "IPO", subcategory: "IPO-02", source_dimension: "D3" }
+  HKIPO-128: { primary_category: "IPO", subcategory: "IPO-02", source_dimension: "D3" }
+  HKIPO-129: { primary_category: "IPO", subcategory: "IPO-02", source_dimension: "D3" }
+  HKIPO-130: { primary_category: "IPO", subcategory: "IPO-02", source_dimension: "D3" }
+  HKIPO-131: { primary_category: "IPO", subcategory: "IPO-02", source_dimension: "D3" }
+  # D3: 风险因素覆盖度 (4 rules)
+  HKIPO-132: { primary_category: "DISC", subcategory: "DISC-05", source_dimension: "D3" }
+  HKIPO-133: { primary_category: "DISC", subcategory: "DISC-05", source_dimension: "D3" }
+  HKIPO-134: { primary_category: "DISC", subcategory: "DISC-05", source_dimension: "D3" }
+  HKIPO-135: { primary_category: "DISC", subcategory: "DISC-05", source_dimension: "D3" }
+  # D3: 语言模糊性 (5 rules)
+  HKIPO-136: { primary_category: "DISC", subcategory: "DISC-06", source_dimension: "D3" }
+  HKIPO-137: { primary_category: "DISC", subcategory: "DISC-06", source_dimension: "D3" }
+  HKIPO-138: { primary_category: "DISC", subcategory: "DISC-06", source_dimension: "D3" }
+  HKIPO-139: { primary_category: "DISC", subcategory: "DISC-06", source_dimension: "D3" }
+  HKIPO-140: { primary_category: "DISC", subcategory: "DISC-06", source_dimension: "D3" }
+  # D3: 免责声明密度 (3 rules)
+  HKIPO-141: { primary_category: "DISC", subcategory: "DISC-07", source_dimension: "D3" }
+  HKIPO-142: { primary_category: "DISC", subcategory: "DISC-07", source_dimension: "D3" }
+  HKIPO-143: { primary_category: "DISC", subcategory: "DISC-07", source_dimension: "D3" }
+  # D2 v1.1 additions: 生物科技特有规则 (4 rules)
+  HKIPO-144: { primary_category: "OPS", subcategory: "OPS-05", source_dimension: "D2" }
+  HKIPO-145: { primary_category: "STRAT", subcategory: "STRAT-06", source_dimension: "D2" }
+  HKIPO-146: { primary_category: "MKT", subcategory: "MKT-01", source_dimension: "D2" }
+  HKIPO-147: { primary_category: "OPS", subcategory: "OPS-06", source_dimension: "D2" }
+  # D2 v1.2 additions: 估值与发行定价扩展 (3 rules)
+  HKIPO-148: { primary_category: "MKT", subcategory: "MKT-01", source_dimension: "D2" }
+  HKIPO-149: { primary_category: "MKT", subcategory: "MKT-01", source_dimension: "D2" }
+  HKIPO-150: { primary_category: "MKT", subcategory: "MKT-01", source_dimension: "D2" }
+  # D2 v1.2 additions: IPO发行结构 (7 rules)
+  HKIPO-151: { primary_category: "IPO", subcategory: "IPO-03", source_dimension: "D2" }
+  HKIPO-152: { primary_category: "IPO", subcategory: "IPO-03", source_dimension: "D2" }
+  HKIPO-153: { primary_category: "IPO", subcategory: "IPO-03", source_dimension: "D2" }
+  HKIPO-154: { primary_category: "IPO", subcategory: "IPO-03", source_dimension: "D2" }
+  HKIPO-155: { primary_category: "IPO", subcategory: "IPO-03", source_dimension: "D2" }
+  HKIPO-156: { primary_category: "IPO", subcategory: "IPO-03", source_dimension: "D2" }
+  HKIPO-157: { primary_category: "IPO", subcategory: "IPO-03", source_dimension: "D2" }
+  # D2 v1.2 additions: 中介机构质量 (2 rules)
+  HKIPO-158: { primary_category: "GOV", subcategory: "GOV-04", source_dimension: "D2" }
+  HKIPO-159: { primary_category: "GOV", subcategory: "GOV-04", source_dimension: "D2" }
+  # D2 v1.3 additions: 制裁合规 (5 rules)
+  HKIPO-160: { primary_category: "COMP", subcategory: "COMP-04", source_dimension: "D2" }
+  HKIPO-161: { primary_category: "COMP", subcategory: "COMP-04", source_dimension: "D2" }
+  HKIPO-162: { primary_category: "COMP", subcategory: "COMP-04", source_dimension: "D2" }
+  HKIPO-163: { primary_category: "COMP", subcategory: "COMP-04", source_dimension: "D2" }
+  HKIPO-164: { primary_category: "COMP", subcategory: "COMP-04", source_dimension: "D2" }

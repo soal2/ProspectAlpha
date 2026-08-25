@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Protocol
@@ -50,6 +51,7 @@ class DocumentChunk:
     mineru_img_path: str | None = None
     table_html: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    content_sha256: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -271,6 +273,10 @@ class BlockChunker:
         for output_chunk in chunks:
             output_chunk.metadata.setdefault("bbox_coordinate_space", "normalized_1000")
             output_chunk.metadata.setdefault("page_number_base", 1)
+        chunks = [
+            replace(chunk, content_sha256=_compute_content_sha256(chunk.text))
+            for chunk in chunks
+        ]
         output_path = self._write_chunks(request.output_dir, chunks)
         return ChunkResult(
             document_id=document_id,
@@ -560,6 +566,11 @@ class _TableRowTextExtractor(HTMLParser):
 
 def _chunk_id(document_id: str, chunk_number: int) -> str:
     return f"{document_id}_chunk_{chunk_number:06d}"
+
+
+def _compute_content_sha256(text: str) -> str:
+    """Compute SHA-256 hex digest of chunk text content."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _image_description_cache_key(source_item_index: int, item: dict[str, Any]) -> str:

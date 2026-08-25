@@ -1,11 +1,11 @@
-"""CLI: truncate all ProspectAlpha business tables and reseed reference data.
+"""CLI: rebuild all ProspectAlpha tables and reseed reference data.
 
 Usage:
     cd backend && PYTHONPATH=src python -m scripts.reset_database --yes
 
-Tables are cleared in reverse foreign-key order so child rows vanish before
-their parents. All primary keys are String UUIDs, so no sequence reset is
-needed. After the truncate the ``seed_reference_data`` helper re-populates
+The development schema is dropped and recreated from current ORM metadata so
+intentional no-migration contract replacements take effect. Afterwards the
+``seed_reference_data`` helper re-populates
 ``agent_experts`` / ``agent_specs`` / ``risk_rule_sets`` / ``risk_rules`` /
 ``risk_rule_dimensions`` from the in-tree seed constants.
 """
@@ -15,52 +15,32 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from typing import Type
+from sqlalchemy import inspect, text
 
-from sqlalchemy import text
-from sqlalchemy.orm import DeclarativeBase, sessionmaker
-
-from riskagent.database import session_factory_from_url
-from riskagent.models import (
-    AgentExpertRow,
-    AgentSpecRow,
-    AnalysisRunRow,
-    DocumentAssetRow,
-    DocumentBlockRow,
-    EvidenceLibraryRow,
-    RiskRuleDimensionRow,
-    RiskRuleRow,
-    RiskRuleSetRow,
-)
+import riskagent.models  # noqa: F401  # register every table in Base.metadata
+from riskagent.database import Base, session_factory_from_url
 from riskagent.seed_data import seed_reference_data
-
-# Reverse-FK deletion order: leaf tables first, root reference tables last.
-TABLES_IN_RESET_ORDER: list[Type[DeclarativeBase]] = [
-    EvidenceLibraryRow,     # -> analysis_runs
-    DocumentBlockRow,       # -> documents
-    AnalysisRunRow,         # -> documents
-    DocumentAssetRow,       # root business asset
-    AgentSpecRow,           # reference (will be rebuilt by seed)
-    AgentExpertRow,         # reference (will be rebuilt by seed)
-    RiskRuleRow,            # -> risk_rule_sets, risk_rule_dimensions
-    RiskRuleDimensionRow,   # -> risk_rule_sets
-    RiskRuleSetRow,         # root reference
-]
 
 
 def reset_database(database_url: str) -> dict[str, int]:
-    """Delete every row from the current business tables, then reseed reference data.
+    """Drop and recreate the development schema, then reseed reference data.
 
     Returns a mapping of ``{table_name: deleted_row_count}`` for observability.
     """
     session_factory = session_factory_from_url(database_url)
     deleted: dict[str, int] = {}
-    with session_factory() as session:
-        for row_cls in TABLES_IN_RESET_ORDER:
-            table_name = row_cls.__tablename__
-            result = session.execute(text(f"DELETE FROM {table_name}"))
-            deleted[table_name] = result.rowcount or 0
-        session.commit()
+    engine = session_factory.kw["bind"]
+    inspector = inspect(engine)
+    with engine.connect() as connection:
+        for table in Base.metadata.sorted_tables:
+            if inspector.has_table(table.name):
+                deleted[table.name] = int(
+                    connection.execute(text(f'SELECT COUNT(*) FROM "{table.name}"')).scalar_one()
+                )
+            else:
+                deleted[table.name] = 0
+    Base.metadata.drop_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
     # seed_reference_data is idempotent: it only inserts when the target table
     # is empty (or stale for agent_specs), so it cleanly rebuilds the catalog.
     seed_reference_data(session_factory)
@@ -88,7 +68,7 @@ def main() -> int:
 
     if not args.yes:
         confirm = input(
-            f"This will DELETE all rows in {len(TABLES_IN_RESET_ORDER)} tables at {db_url}. "
+            f"This will DROP and rebuild {len(Base.metadata.tables)} tables at {db_url}. "
             "Type RESET to proceed: "
         )
         if confirm.strip() != "RESET":

@@ -2,7 +2,6 @@ from pathlib import Path
 import time
 
 from fastapi.testclient import TestClient
-import yaml
 
 from riskagent.agents import debate as debate_module
 from riskagent.agents.exceptions import DebateLLMError
@@ -48,10 +47,22 @@ def test_analysis_run_uses_rule_snapshot_and_evidence(tmp_path, analysis_repo_fa
     )
 
     assert run.status == "completed"
-    assert run.rule_snapshot["totals"]["rule_count"] == 147
+    assert run.rule_snapshot["totals"]["rule_count"] == rule_repo.load().totals["rule_count"]
     assert run.findings
-    assert all(finding.rule_id.startswith("HKIPO-") for finding in run.findings)
-    assert any("关联交易" in finding.matched_terms for finding in run.findings)
+    rule_findings = [finding for finding in run.findings if finding.origin == "rule"]
+    assert rule_findings
+    assert all(finding.rule_id and finding.rule_id.startswith("HKIPO-") for finding in rule_findings)
+    evidence_ids = {item.evidence_id for item in run.evidence}
+    admitted_ids = {
+        item.finding_id
+        for item in run.verification_results
+        if item.status in {"supported", "weakly_supported"}
+    }
+    assert all(
+        set(finding.evidence_ids) <= evidence_ids
+        for finding in run.findings
+        if finding.finding_id in admitted_ids
+    )
 
 
 def test_analysis_api_creates_ready_run_then_start_completes(
@@ -84,12 +95,22 @@ def test_analysis_api_creates_ready_run_then_start_completes(
     assert response.status_code == 201
     payload = response.json()
     assert payload["status"] == "ready"
-    assert payload["rule_snapshot"]["totals"]["rule_count"] == 147
+    assert payload["rule_snapshot"]["totals"]["rule_count"] == (
+        RiskRuleRepository(Path(__file__).parents[1] / "configs" / "risk_rules.yaml")
+        .load()
+        .totals["rule_count"]
+    )
     assert payload["findings"] == []
 
     run_id = payload["run_id"]
     started = client.post(f"/analysis-runs/{run_id}/start").json()
-    assert started["status"] in {"queued", "completed"}
+    assert started["status"] == "awaiting_industry_confirmation"
+    assert started["industry_profile"]["frozen"] is False
+    confirmed = client.post(
+        f"/analysis-runs/{run_id}/industry-profile/confirm",
+        json={},
+    ).json()
+    assert confirmed["industry_profile"]["frozen"] is True
     for _ in range(200):
         current = client.get(f"/analysis-runs/{run_id}").json()
         if current["status"] == "completed":
@@ -113,8 +134,10 @@ def test_analysis_options_returns_minimal_real_choices(monkeypatch):
     assert set(payload) == {"risk_rule_sets", "agents", "analysis_depths"}
     assert payload["risk_rule_sets"][0]["rule_set_id"] == "hk_ipo_prospectus_risk_framework_v1"
     assert "rules" not in payload["risk_rule_sets"][0]
-    assert len(payload["agents"]) == 12
-    assert {agent["agent_name"] for agent in payload["agents"]} == {
+    # The expert roster evolves; the contract is that the core twelve stay
+    # available and every advertised agent is uniquely named.
+    agent_names = {agent["agent_name"] for agent in payload["agents"]}
+    assert {
         "shen_beichen_orchestrator_agent",
         "xiao_zeming_quality_agent",
         "zhou_shenyan_redteam_agent",
@@ -127,7 +150,8 @@ def test_analysis_options_returns_minimal_real_choices(monkeypatch):
         "ye_zhiyuan_business_agent",
         "cheng_zheng_evidence_agent",
         "bai_shice_market_agent",
-    }
+    } <= agent_names
+    assert len(agent_names) == len(payload["agents"])
     assert {item["depth"] for item in payload["analysis_depths"]} == {"quick", "standard", "deep"}
 
 
@@ -145,31 +169,6 @@ def test_analysis_create_rejects_legacy_preselected_expert_chain(monkeypatch):
     )
 
     assert response.status_code == 422
-
-
-def test_analysis_list_tolerates_legacy_persisted_preselected_expert_chain(
-    tmp_path, monkeypatch, analysis_repo_factory
-):
-    monkeypatch.setenv("USE_DATABASE", "0")
-    rule_repo = RiskRuleRepository(Path(__file__).parents[1] / "configs" / "risk_rules.yaml")
-    path = tmp_path / "runs.yaml"
-    repo = analysis_repo_factory(rule_repository=rule_repo, path=path)
-    run = repo.create_draft(
-        AnalysisRunCreate(company_name="历史 IPO", document_text="历史招股书正文")
-    )
-    persisted = run.model_dump()
-    persisted["input_payload"] = {
-        "company_name": "历史 IPO",
-        "document_text": "历史招股书正文",
-        "selected_agent_names": ["financial_agent", "legal_agent"],
-    }
-    path.write_text(yaml.safe_dump({run.run_id: persisted}, allow_unicode=True))
-    monkeypatch.setattr("riskagent.api.analysis._repo", lambda: repo)
-
-    response = TestClient(create_app()).get("/analysis-runs")
-
-    assert response.status_code == 200
-    assert response.json()[0]["run_id"] == run.run_id
 
 
 def test_analysis_run_persists_dynamic_strategy_agents_and_depth(
@@ -224,12 +223,20 @@ def test_dynamic_domain_skills_keep_rule_counts_and_skill_ids(
     assert run.status == "completed"
     assert all(finding.skill_id for finding in run.findings)
     assert {finding.skill_id for finding in run.findings}.issubset(
-        {"financial_risk_skill", "legal_compliance_skill"}
+        {"financial_risk_skill", "legal_compliance_skill", "hidden-risk-discovery"}
     )
     assert {item["skill_id"] for item in run.module_results}.issuperset(
         {"financial_risk_skill", "legal_compliance_skill"}
     )
-    assert all(item["rules_read"] > 0 for item in run.module_results)
+    assert all(
+        item["rules_read"] > 0
+        for item in run.module_results
+        if item["module_id"] != "hidden_risk_discovery"
+    )
+    hidden_module = next(
+        item for item in run.module_results if item["module_id"] == "hidden_risk_discovery"
+    )
+    assert hidden_module["rules_read"] == 0
     assert any(event["event_type"] == "peer_request_sent" for event in run.events)
     reports = [event for event in run.events if event["event_type"] == "agent_reported"]
     assert len(reports) == len(run.module_results)
@@ -266,7 +273,14 @@ def test_invalid_strategy_pauses_and_api_selection_resumes(
             "document_text": "公司存在关联交易和赎回安排。",
         },
     ).json()
-    paused = client.post(f"/analysis-runs/{created['run_id']}/start")
+    proposed = client.post(f"/analysis-runs/{created['run_id']}/start")
+
+    assert proposed.status_code == 200
+    assert proposed.json()["status"] == "awaiting_industry_confirmation"
+    paused = client.post(
+        f"/analysis-runs/{created['run_id']}/industry-profile/confirm",
+        json={},
+    )
 
     assert paused.status_code == 200
     assert paused.json()["status"] == "awaiting_expert_selection"

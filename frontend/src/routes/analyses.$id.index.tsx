@@ -21,6 +21,7 @@ import {
   getAnalysisRun,
   getTraceData,
   getEvidenceFeed,
+  confirmIndustryProfile,
   startAnalysisRun,
   streamAnalysisRun,
   type AnalysisRun,
@@ -73,6 +74,7 @@ type EvidenceFeedItem = {
   snippet?: string | null;
   document_id?: string | null;
   bbox?: number[];
+  scoreKind?: "retrieval" | "relevance" | "unavailable";
 };
 type Bubble = { who: string; kind: string; text: string; t: string };
 
@@ -92,7 +94,7 @@ const kindClass: Record<string, string> = {
 };
 
 const terminalStatuses = new Set(["completed", "failed"]);
-const pausedStatuses = new Set(["awaiting_expert_selection"]);
+const pausedStatuses = new Set(["awaiting_industry_confirmation", "awaiting_expert_selection"]);
 
 function RealtimeStream() {
   const api = getRouteApi("/analyses/$id");
@@ -112,6 +114,9 @@ function RealtimeStream() {
   };
 
   const [run, setRun] = useState<AnalysisRun>(initialRun);
+  const [industryCode, setIndustryCode] = useState(initialRun.industry_profile?.code ?? "");
+  const [industryName, setIndustryName] = useState(initialRun.industry_profile?.name ?? "");
+  const [confirmingIndustry, setConfirmingIndustry] = useState(false);
   const [trace, setTrace] = useState<TraceView>(initialTrace);
   const [evidenceFeed, setEvidenceFeed] = useState<EvidenceFeedItem[]>(initialEvidenceFeed);
   const [liveEvents, setLiveEvents] = useState<AnalysisRunEvent[]>(initialRun.events ?? []);
@@ -380,7 +385,9 @@ function RealtimeStream() {
               {starting
                 ? "正在启动 Agent 编队"
                 : pausedStatuses.has(run.status)
-                  ? "等待人工选择专家"
+                  ? run.status === "awaiting_industry_confirmation"
+                    ? "等待确认行业画像"
+                    : "等待人工选择专家"
                   : terminalStatuses.has(run.status)
                     ? "分析已结束"
                     : "实时同步中"}
@@ -412,7 +419,46 @@ function RealtimeStream() {
         </div>
       </header>
 
-      {pausedStatuses.has(run.status) ? (
+      {run.status === "awaiting_industry_confirmation" ? (
+        <form
+          className="flex flex-wrap items-end justify-between gap-3 border-b border-amber-500/30 bg-amber-500/8 px-5 py-3 text-xs"
+          onSubmit={(event) => {
+            event.preventDefault();
+            setConfirmingIndustry(true);
+            void confirmIndustryProfile(id, { code: industryCode, name: industryName })
+              .then((nextRun) => {
+                setRun(nextRun);
+                setLiveEvents(nextRun.events ?? []);
+                window.location.reload();
+              })
+              .catch((error: unknown) =>
+                setStreamError(error instanceof Error ? error.message : "行业确认失败"),
+              )
+              .finally(() => setConfirmingIndustry(false));
+          }}
+        >
+          <div className="min-w-[280px] flex-1">
+            <div className="inline-flex items-center gap-2 font-medium text-amber-800">
+              <PauseCircle className="size-4" /> 确认行业画像后冻结并继续分析
+            </div>
+            <p className="mt-1 text-muted-foreground">
+              {run.industry_profile?.rationale ?? "系统尚未给出行业判断理由。"} 证据页：
+              {run.industry_profile?.evidence_pages?.join("、") || "未识别"}
+            </p>
+          </div>
+          <label className="grid gap-1">
+            <span className="text-muted-foreground">行业代码</span>
+            <input className="h-8 rounded-md border border-border bg-background px-2" value={industryCode} onChange={(event) => setIndustryCode(event.target.value)} required />
+          </label>
+          <label className="grid gap-1">
+            <span className="text-muted-foreground">行业名称</span>
+            <input className="h-8 rounded-md border border-border bg-background px-2" value={industryName} onChange={(event) => setIndustryName(event.target.value)} required />
+          </label>
+          <button disabled={confirmingIndustry} className="rounded-full bg-primary px-3 py-1.5 font-medium text-primary-foreground disabled:opacity-50">
+            {confirmingIndustry ? "确认中" : "确认并继续"}
+          </button>
+        </form>
+      ) : run.status === "awaiting_expert_selection" ? (
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-amber-500/30 bg-amber-500/8 px-5 py-3 text-xs">
           <span className="inline-flex items-center gap-2 text-amber-800">
             <PauseCircle className="size-4" />

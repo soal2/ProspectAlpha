@@ -13,8 +13,8 @@ usage_notes:
 - v1.1 补充未商业化生物科技企业的管线、竞品、估值依赖及第三方许可条款规则。
 totals:
   dimension_count: 3
-  category_count: 28
-  rule_count: 147
+  category_count: 31
+  rule_count: 164
 dimensions:
 - dimension_code: D1
   dimension: 维度1：标准化财务指标风险
@@ -40,8 +40,8 @@ dimensions:
 - dimension_code: D2
   dimension: 维度2：非标隐性风险
   rule_type: qualitative_disclosure
-  category_count: 13
-  rule_count: 60
+  category_count: 16
+  rule_count: 77
   description: 从业务描述、关联交易、法律合规、公司治理等定性披露中挖掘隐蔽风险。该类风险不易从纯财务数据中发现，但往往是IPO'爆雷'的根本原因。覆盖客户/供应商、关联交易、对赌、政策、诉讼、担保、持续经营、知识产权、治理、行业竞争、税务等11大类别。
   categories:
   - name: 客户/供应商依赖
@@ -65,11 +65,17 @@ dimensions:
   - name: 行业竞争
     rule_count: 5
   - name: 估值与发行定价
-    rule_count: 1
+    rule_count: 4
   - name: 许可条款
     rule_count: 1
+  - name: IPO发行结构
+    rule_count: 7
+  - name: 中介机构质量
+    rule_count: 2
   - name: 税务风险
     rule_count: 4
+  - name: 制裁合规
+    rule_count: 5
 - dimension_code: D3
   dimension: 维度3：文本粉饰度风险
   rule_type: textual_nlp
@@ -1711,3 +1717,631 @@ rules:
   calculation_or_method: 逐项核对许可标的、付款义务、期限、终止条件及对核心产品的影响
   source_sections: 业务 / 知识产权 / 重大合约 / 风险因素
   enabled: true
+- rule_id: HKIPO-148
+  dimension_code: D2
+  dimension: 维度2：非标隐性风险
+  rule_type: qualitative_disclosure
+  category: 估值与发行定价
+  risk_item: 发行定价P/E偏离度
+  description: 发行市盈率显著高于行业可比公司中位数，存在估值过高和上市后破发风险。
+  trigger_condition: 发行P/E > 行业可比公司中位数P/E × 1.3
+  calculation_or_method: 发行P/E = 发行价 / 每股收益；偏离度 = (发行P/E - 行业中位数P/E) / 行业中位数P/E × 100%
+  source_sections: 全球发售的架构 / 财务资料 / 行业概览
+  enabled: true
+- rule_id: HKIPO-149
+  dimension_code: D2
+  dimension: 维度2：非标隐性风险
+  rule_type: qualitative_disclosure
+  category: 估值与发行定价
+  risk_item: 发行定价P/B偏离度
+  description: 发行市净率显著高于行业可比公司，尤其对重资产行业可能暗示估值泡沫。
+  trigger_condition: 发行P/B > 行业可比公司中位数P/B × 1.5
+  calculation_or_method: 发行P/B = 发行价 / 每股净资产；偏离度 = (发行P/B - 行业中位数P/B) / 行业中位数P/B × 100%
+  source_sections: 全球发售的架构 / 财务资料 / 行业概览
+  enabled: true
+- rule_id: HKIPO-150
+  dimension_code: D2
+  dimension: 维度2：非标隐性风险
+  rule_type: qualitative_disclosure
+  category: 估值与发行定价
+  risk_item: EV/EBITDA可比公司对比偏离
+  description: 隐含企业价值倍数显著高于上市可比公司，存在估值过高风险。
+  trigger_condition: 隐含EV/EBITDA > 可比公司中位数 × 1.5
+  calculation_or_method: 隐含EV = 发行市值 + 总负债 - 现金及等价物；EV/EBITDA = 隐含EV / EBITDA
+  source_sections: 全球发售的架构 / 财务资料 / 行业概览
+  enabled: true
+- rule_id: HKIPO-151
+  dimension_code: D2
+  dimension: 维度2：非标隐性风险
+  rule_type: qualitative_disclosure
+  category: IPO发行结构
+  risk_item: 基石投资者锁定期及集中度风险
+  description: 基石投资者配售占比过高且锁定期较短，上市后集中抛售压力大。
+  trigger_condition: 基石投资者配售占发售总量 > 50% 或 锁定期 < 6个月
+  calculation_or_method: 基石集中度 = 基石投资者获配股份数 / 发售总股数 × 100%；核查锁定期限及提前释放条件
+  source_sections: 全球发售的架构 / 基石投资者 / 股本
+  enabled: true
+- rule_id: HKIPO-152
+  dimension_code: D2
+  dimension: 维度2：非标隐性风险
+  rule_type: qualitative_disclosure
+  category: IPO发行结构
+  risk_item: 绿鞋机制/超额配股权缺失或不足
+  description: 未设置超额配股权或超额配股权比例偏低，上市后缺乏价格稳定支撑。
+  trigger_condition: 未设绿鞋机制 或 超额配股权比例 < 发售总额的10%
+  calculation_or_method: 超额配股权比例 = 超额配股权对应股份数 / 发售总股数 × 100%；核查行使期限
+  source_sections: 全球发售的架构 / 超额配股权 / 稳定价格行动
+  enabled: true
+- rule_id: HKIPO-153
+  dimension_code: D2
+  dimension: 维度2：非标隐性风险
+  rule_type: qualitative_disclosure
+  category: IPO发行结构
+  risk_item: 控股股东锁仓协议条件宽松
+  description: 控股股东锁仓期短或存在提前释放条件，上市后减持风险大。
+  trigger_condition: 控股股东锁仓期 < 12个月 或 存在宽松的提前释放/质押例外条款
+  calculation_or_method: 审查锁仓协议期限、提前释放触发条件及质押例外条款
+  source_sections: 全球发售的架构 / 控股股东承诺 / 股本
+  enabled: true
+- rule_id: HKIPO-154
+  dimension_code: D2
+  dimension: 维度2：非标隐性风险
+  rule_type: qualitative_disclosure
+  category: IPO发行结构
+  risk_item: 自由流通量不足
+  description: 公众持股比例接近港交所最低要求，上市后流动性不足。
+  trigger_condition: 公众持股比例 < 25%（或港交所豁免的15%） 或 自由流通量仅略高于最低要求
+  calculation_or_method: 自由流通量 = 公众持股数 / 已发行总股数 × 100%；核查港交所上市规则第8.08条
+  source_sections: 全球发售的架构 / 股本 / 股权架构
+  enabled: true
+- rule_id: HKIPO-155
+  dimension_code: D2
+  dimension: 维度2：非标隐性风险
+  rule_type: qualitative_disclosure
+  category: IPO发行结构
+  risk_item: 上市后流动性风险
+  description: 预期市值小、无做市安排或分析师覆盖不足，上市后交投清淡。
+  trigger_condition: 预期市值 < 20亿港元 且 无做市商安排 或 无分析师覆盖承诺
+  calculation_or_method: 评估预期市值、日均成交额估算、做市商/流动性提供商安排及分析师覆盖承诺
+  source_sections: 全球发售的架构 / 股本 / 稳定价格行动
+  enabled: true
+- rule_id: HKIPO-156
+  dimension_code: D2
+  dimension: 维度2：非标隐性风险
+  rule_type: qualitative_disclosure
+  category: IPO发行结构
+  risk_item: 锚定投资者质量不足
+  description: 锚定投资者声誉低、获配比例集中或锁仓条款弱，分销质量存疑。
+  trigger_condition: 锚定投资者中知名机构占比 < 30% 或 单一锚定投资者获配比例 > 20%
+  calculation_or_method: 评估锚定投资者的机构声誉、获配比例分布及锁仓条款
+  source_sections: 全球发售的架构 / 配售 / 锚定投资者
+  enabled: true
+- rule_id: HKIPO-157
+  dimension_code: D2
+  dimension: 维度2：非标隐性风险
+  rule_type: qualitative_disclosure
+  category: IPO发行结构
+  risk_item: 发行窗口市场环境不利
+  description: IPO发行期间市场处于下行趋势或近期IPO破发率高，增加破发风险。
+  trigger_condition: 恒生指数近30日跌幅 > 5% 或 近一个月港股IPO首日破发率 > 40%
+  calculation_or_method: 统计恒生指数近30日涨跌幅；统计近一个月港股IPO首日破发比例
+  source_sections: 行业概览 / 全球发售的架构 / 市场数据
+  enabled: true
+- rule_id: HKIPO-158
+  dimension_code: D2
+  dimension: 维度2：非标隐性风险
+  rule_type: qualitative_disclosure
+  category: 中介机构质量
+  risk_item: 保荐人历史IPO表现不佳
+  description: 保荐人历史承销IPO的首日破发率高或短期表现差，项目质量把控能力弱。
+  trigger_condition: 保荐人近2年承销IPO首日破发率 > 40% 或 5日平均涨跌幅 < -5%
+  calculation_or_method: 统计保荐人近2年内完成的全部港股IPO项目的首日及第5日表现
+  source_sections: 全球发售的架构 / 保荐人 / 承销商
+  enabled: true
+- rule_id: HKIPO-159
+  dimension_code: D2
+  dimension: 维度2：非标隐性风险
+  rule_type: qualitative_disclosure
+  category: 中介机构质量
+  risk_item: 承销团声誉与覆盖度不足
+  description: 联席保荐人数量少或均为低tier券商，上市后研究覆盖和市场支持不足。
+  trigger_condition: 联席保荐人数量 = 1 或 无国际知名投行参与承销
+  calculation_or_method: 统计联席保荐人数量、各保荐人的市场排名及分析师覆盖承诺
+  source_sections: 全球发售的架构 / 保荐人 / 承销商
+  enabled: true
+- rule_id: HKIPO-160
+  dimension_code: D2
+  dimension: 维度2：非标隐性风险
+  rule_type: qualitative_disclosure
+  category: 制裁合规
+  risk_item: 制裁名单筛查
+  description: 筛查公司运营国家/地区是否出现在OFAC、EU、UN制裁名单上；评估受限业务占比。
+  trigger_condition: 招股书披露公司业务涉及受制裁国家/地区或受限行业
+  calculation_or_method: 筛查公司运营国家/地区是否出现在OFAC、EU、UN制裁名单上；评估受限业务占比
+  source_sections: 风险因素 / 业务描述 / 地域分布
+  enabled: true
+- rule_id: HKIPO-161
+  dimension_code: D2
+  dimension: 维度2：非标隐性风险
+  rule_type: qualitative_disclosure
+  category: 制裁合规
+  risk_item: 政治敏感人物关联
+  description: 识别公司管理层/大股东是否为现任或离任政府官员、军方人士或其关联人士；评估政治关联对业务的潜在影响。
+  trigger_condition: 招股书披露主要股东、董事或高管的政治背景
+  calculation_or_method: 识别公司管理层/大股东是否为现任或离任政府官员、军方人士或其关联人士；评估政治关联对业务的潜在影响
+  source_sections: 董事及高管 / 主要股东 / 关联交易
+  enabled: true
+- rule_id: HKIPO-162
+  dimension_code: D2
+  dimension: 维度2：非标隐性风险
+  rule_type: qualitative_disclosure
+  category: 制裁合规
+  risk_item: 可疑交易模式
+  description: 识别通过离岸金融中心的大额交易、与主营业务不匹配的跨境支付、第三方代收代付安排、现金密集型业务的异常现金流等可疑交易模式。
+  trigger_condition: 招股书披露异常的交易结构或资金流向
+  calculation_or_method: "识别：(1) 通过离岸金融中心的大额交易；(2) 与主营业务不匹配的跨境支付；(3) 第三方代收代付安排；(4) 现金密集型业务的异常现金流"
+  source_sections: 财务报表附注 / 关联交易 / 资金用途
+  enabled: true
+- rule_id: HKIPO-163
+  dimension_code: D2
+  dimension: 维度2：非标隐性风险
+  rule_type: qualitative_disclosure
+  category: 制裁合规
+  risk_item: 反洗钱内控缺陷
+  description: 评估公司是否建立KYC(了解你的客户)制度、是否配备反洗钱合规官、是否接受过反洗钱监管检查及历史是否有反洗钱处罚记录。
+  trigger_condition: 招股书披露公司受金融监管但缺乏反洗钱合规体系
+  calculation_or_method: "评估：(1) 是否建立KYC(了解你的客户)制度；(2) 是否有反洗钱合规官；(3) 是否接受过反洗钱监管检查；(4) 历史是否有反洗钱处罚记录"
+  source_sections: 风险因素 / 监管与合规 / 内部控制
+  enabled: true
+- rule_id: HKIPO-164
+  dimension_code: D2
+  dimension: 维度2：非标隐性风险
+  rule_type: qualitative_disclosure
+  category: 制裁合规
+  risk_item: 出口管制与技术转让风险
+  description: 评估核心技术是否受出口管制条例约束、是否存在技术转让限制、关键供应链是否依赖受限实体及是否有实体清单关联风险。
+  trigger_condition: 招股书披露公司涉及受管制技术或产品
+  calculation_or_method: "评估：(1) 核心技术是否受出口管制条例约束；(2) 是否存在技术转让限制；(3) 关键供应链是否依赖受限实体；(4) 是否有实体清单关联风险"
+  source_sections: 业务描述 / 技术能力 / 风险因素 / 供应链
+  enabled: true
+
+cross_dimension_rules:
+  # ===========================================================================
+  # D1+D2 combinations (financial + qualitative)
+  # ===========================================================================
+  - id: "CDR-001"
+    name: "关联交易+客户集中度→业务独立性风险"
+    description: "当关联交易占比高且主要客户存在关联关系时，业务独立性风险显著上升"
+    trigger_dimensions:
+      - dimension: "D2"
+        category: "关联交易"
+        rule_ids: ["HKIPO-054", "HKIPO-055", "HKIPO-058"]
+      - dimension: "D2"
+        category: "客户/供应商依赖"
+        rule_ids: ["HKIPO-049", "HKIPO-053"]
+    combined_severity: "very_high"
+    confidence_boost: 1.5
+    evidence_required:
+      - "关联交易金额及占比"
+      - "重叠客户/供应商名称及交易额"
+    risk_category: "业务独立性"
+
+  - id: "CDR-002"
+    name: "财务指标恶化+文本粉饰度高→财务操纵嫌疑"
+    description: "财务指标异常同时文本粉饰度高，暗示可能存在财务操纵行为"
+    trigger_dimensions:
+      - dimension: "D1"
+        category: "盈利能力"
+        rule_ids: ["HKIPO-001", "HKIPO-005", "HKIPO-007"]
+      - dimension: "D3"
+        category: "情感倾向"
+        rule_ids: ["HKIPO-110", "HKIPO-111", "HKIPO-113"]
+    combined_severity: "very_high"
+    confidence_boost: 1.8
+    evidence_required:
+      - "核心盈利指标趋势及行业对比"
+      - "文本情感得分及粉饰度指标"
+    risk_category: "财务操纵"
+
+  - id: "CDR-003"
+    name: "现金流消耗快+融资依赖高→持续经营风险"
+    description: "经营现金流持续为负且高度依赖外部融资，持续经营风险极高"
+    trigger_dimensions:
+      - dimension: "D1"
+        category: "现金流"
+        rule_ids: ["HKIPO-024", "HKIPO-026", "HKIPO-030"]
+      - dimension: "D1"
+        category: "偿债能力"
+        rule_ids: ["HKIPO-013", "HKIPO-015"]
+    combined_severity: "very_high"
+    confidence_boost: 1.7
+    evidence_required:
+      - "月度现金消耗率及现金跑道"
+      - "有息负债结构及再融资计划"
+    risk_category: "持续经营"
+
+  - id: "CDR-004"
+    name: "应收账款激增+收入确认激进→收入质量风险"
+    description: "应收账款占收入比异常偏高叠加收入确认政策激进，收入真实性存疑"
+    trigger_dimensions:
+      - dimension: "D1"
+        category: "营运能力"
+        rule_ids: ["HKIPO-017", "HKIPO-022"]
+      - dimension: "D1"
+        category: "盈利质量"
+        rule_ids: ["HKIPO-037"]
+    combined_severity: "high"
+    confidence_boost: 1.5
+    evidence_required:
+      - "应收账款账龄分析及坏账计提比例"
+      - "收入确认会计政策及与同行对比"
+    risk_category: "收入质量"
+
+  - id: "CDR-005"
+    name: "毛利率异常高+同行偏离度大→盈利真实性风险"
+    description: "毛利率显著高于行业且缺乏合理解释，可能存在收入虚增或成本低估"
+    trigger_dimensions:
+      - dimension: "D1"
+        category: "盈利能力"
+        rule_ids: ["HKIPO-001", "HKIPO-006"]
+      - dimension: "D3"
+        category: "信息披露完整性"
+        rule_ids: ["HKIPO-120", "HKIPO-117"]
+    combined_severity: "high"
+    confidence_boost: 1.4
+    evidence_required:
+      - "毛利率与同行业可比公司对比数据"
+      - "成本结构拆分及合理性论证"
+    risk_category: "盈利真实性"
+
+  - id: "CDR-006"
+    name: "存货周转率下降+资产减值不足→资产虚增风险"
+    description: "存货周转持续放缓且减值计提不足，存货资产价值可能被高估"
+    trigger_dimensions:
+      - dimension: "D1"
+        category: "营运能力"
+        rule_ids: ["HKIPO-018", "HKIPO-023"]
+      - dimension: "D1"
+        category: "盈利质量"
+        rule_ids: ["HKIPO-034"]
+    combined_severity: "high"
+    confidence_boost: 1.4
+    evidence_required:
+      - "存货明细及库龄分析"
+      - "减值测试假设及同行计提比例对比"
+    risk_category: "资产真实性"
+
+  - id: "CDR-007"
+    name: "经营现金流为负+政府补贴依赖→盈利可持续性风险"
+    description: "经营造血能力不足且利润高度依赖政府补贴，盈利模式不可持续"
+    trigger_dimensions:
+      - dimension: "D1"
+        category: "现金流"
+        rule_ids: ["HKIPO-024", "HKIPO-025"]
+      - dimension: "D1"
+        category: "盈利质量"
+        rule_ids: ["HKIPO-032"]
+    combined_severity: "very_high"
+    confidence_boost: 1.6
+    evidence_required:
+      - "政府补贴明细及政策依据"
+      - "剔除补贴后的核心盈利能力分析"
+    risk_category: "盈利可持续性"
+
+  - id: "CDR-008"
+    name: "研发资本化率高+文本正面倾向异常→技术价值高估风险"
+    description: "研发投入资本化率异常偏高且文本过度美化技术价值，无形资产可能严重虚增"
+    trigger_dimensions:
+      - dimension: "D1"
+        category: "盈利质量"
+        rule_ids: ["HKIPO-036"]
+      - dimension: "D3"
+        category: "情感倾向"
+        rule_ids: ["HKIPO-110", "HKIPO-114"]
+    combined_severity: "high"
+    confidence_boost: 1.5
+    evidence_required:
+      - "研发资本化政策及与同行对比"
+      - "技术描述情感得分及第三方验证"
+    risk_category: "技术价值"
+
+  # ===========================================================================
+  # D2+D2 combinations (qualitative + qualitative)
+  # ===========================================================================
+  - id: "CDR-009"
+    name: "管理层频繁变动+内控缺陷→治理危机风险"
+    description: "核心管理层频繁更换叠加内部控制重大缺陷，治理危机风险极高"
+    trigger_dimensions:
+      - dimension: "D2"
+        category: "管理层与公司治理"
+        rule_ids: ["HKIPO-091", "HKIPO-092"]
+      - dimension: "D2"
+        category: "管理层与公司治理"
+        rule_ids: ["HKIPO-095", "HKIPO-096"]
+    combined_severity: "very_high"
+    confidence_boost: 1.8
+    evidence_required:
+      - "报告期内关键管理人员变动记录"
+      - "内控审计报告及整改进展"
+    risk_category: "公司治理"
+
+  - id: "CDR-010"
+    name: "重大诉讼+关联交易→利益输送嫌疑"
+    description: "重大未决诉讼同时关联交易频繁，存在通过关联方进行利益输送的嫌疑"
+    trigger_dimensions:
+      - dimension: "D2"
+        category: "诉讼与纠纷"
+        rule_ids: ["HKIPO-072", "HKIPO-075"]
+      - dimension: "D2"
+        category: "关联交易"
+        rule_ids: ["HKIPO-054", "HKIPO-056"]
+    combined_severity: "very_high"
+    confidence_boost: 1.7
+    evidence_required:
+      - "未决诉讼清单及涉案金额"
+      - "关联交易对手方与诉讼各方的关联关系"
+    risk_category: "利益输送"
+
+  - id: "CDR-011"
+    name: "供应商集中+地缘政治风险→供应链断裂风险"
+    description: "供应商高度集中且涉及地缘政治敏感地区，供应链中断风险极高"
+    trigger_dimensions:
+      - dimension: "D2"
+        category: "客户/供应商依赖"
+        rule_ids: ["HKIPO-050"]
+      - dimension: "D2"
+        category: "行业竞争"
+        rule_ids: ["HKIPO-100"]
+    combined_severity: "high"
+    confidence_boost: 1.5
+    evidence_required:
+      - "供应商地域分布及替代供应商储备"
+      - "地缘政治风险敞口量化评估"
+    risk_category: "供应链安全"
+
+  - id: "CDR-012"
+    name: "对赌条款+现金流压力→赎回触发风险"
+    description: "存在对赌或赎回条款同时现金流紧张，赎回触发和资金链断裂风险极高"
+    trigger_dimensions:
+      - dimension: "D2"
+        category: "对赌/赎回条款"
+        rule_ids: ["HKIPO-061", "HKIPO-062"]
+      - dimension: "D1"
+        category: "现金流"
+        rule_ids: ["HKIPO-024", "HKIPO-030"]
+    combined_severity: "very_high"
+    confidence_boost: 1.8
+    evidence_required:
+      - "对赌条款完成概率及赎回时间表"
+      - "可用现金及应急融资方案"
+    risk_category: "赎回风险"
+
+  - id: "CDR-013"
+    name: "VIE架构+跨境合规风险→结构合规风险"
+    description: "VIE协议安排存在法律效力不确定性且涉及跨境合规挑战，结构合规风险极高"
+    trigger_dimensions:
+      - dimension: "D2"
+        category: "政策监管"
+        rule_ids: ["HKIPO-067"]
+      - dimension: "D2"
+        category: "政策监管"
+        rule_ids: ["HKIPO-070"]
+    combined_severity: "very_high"
+    confidence_boost: 1.6
+    evidence_required:
+      - "VIE协议法律效力评估及法律意见"
+      - "各法域监管要求合规状态"
+    risk_category: "架构合规"
+
+  - id: "CDR-014"
+    name: "税务争议+税收优惠依赖→税务冲击风险"
+    description: "正在接受税务稽查且利润高度依赖税收优惠，政策变动可能导致税负剧增"
+    trigger_dimensions:
+      - dimension: "D2"
+        category: "税务风险"
+        rule_ids: ["HKIPO-101", "HKIPO-103"]
+      - dimension: "D2"
+        category: "税务风险"
+        rule_ids: ["HKIPO-102"]
+    combined_severity: "high"
+    confidence_boost: 1.5
+    evidence_required:
+      - "税务稽查进展及争议金额"
+      - "税收优惠到期时间表及替代方案"
+    risk_category: "税务风险"
+
+  - id: "CDR-015"
+    name: "股权质押+内部人控制→大股东掏空风险"
+    description: "控股股东高比例质押股权且存在内部人控制，大股东掏空风险极高"
+    trigger_dimensions:
+      - dimension: "D2"
+        category: "担保与质押"
+        rule_ids: ["HKIPO-077"]
+      - dimension: "D2"
+        category: "管理层与公司治理"
+        rule_ids: ["HKIPO-095"]
+    combined_severity: "very_high"
+    confidence_boost: 1.6
+    evidence_required:
+      - "控股股东质押比例及质押用途"
+      - "董事会构成及关联交易决策机制"
+    risk_category: "大股东风险"
+
+  # ===========================================================================
+  # D1+D3 combinations (financial + text analysis)
+  # ===========================================================================
+  - id: "CDR-016"
+    name: "非经常性损益占比高+风险因素淡化→盈利质量+信息披露风险"
+    description: "核心盈利能力差依赖非经常性收益，同时风险因素章节刻意淡化相关披露"
+    trigger_dimensions:
+      - dimension: "D1"
+        category: "盈利质量"
+        rule_ids: ["HKIPO-031", "HKIPO-032"]
+      - dimension: "D3"
+        category: "风险因素覆盖度"
+        rule_ids: ["HKIPO-132", "HKIPO-135"]
+    combined_severity: "high"
+    confidence_boost: 1.5
+    evidence_required:
+      - "非经常性损益明细及持续性评估"
+      - "风险因素章节中财务风险披露充分度"
+    risk_category: "盈利质量与披露"
+
+  - id: "CDR-017"
+    name: "公允价值变动大+估值不确定性高→资产泡沫风险"
+    description: "公允价值变动对利润影响大且估值模型不确定性高，资产价值可能严重虚高"
+    trigger_dimensions:
+      - dimension: "D1"
+        category: "盈利质量"
+        rule_ids: ["HKIPO-033"]
+      - dimension: "D3"
+        category: "信息披露完整性"
+        rule_ids: ["HKIPO-115", "HKIPO-117"]
+    combined_severity: "high"
+    confidence_boost: 1.4
+    evidence_required:
+      - "公允价值计量的层级分布及关键假设"
+      - "敏感性分析及估值区间"
+    risk_category: "资产估值"
+
+  - id: "CDR-018"
+    name: "商誉占比高+文本乐观偏差→减值风险"
+    description: "商誉/无形资产占比高且文本表述过度乐观，未来大额减值风险显著"
+    trigger_dimensions:
+      - dimension: "D1"
+        category: "盈利质量"
+        rule_ids: ["HKIPO-034"]
+      - dimension: "D3"
+        category: "情感倾向"
+        rule_ids: ["HKIPO-110", "HKIPO-112"]
+    combined_severity: "high"
+    confidence_boost: 1.4
+    evidence_required:
+      - "商誉及无形资产明细与减值测试"
+      - "文本情感得分及乐观偏差量化"
+    risk_category: "资产减值"
+
+  # ===========================================================================
+  # D2+D3 combinations (qualitative + text analysis)
+  # ===========================================================================
+  - id: "CDR-019"
+    name: "管线进度模糊+研发叙述过度乐观→生物科技估值泡沫"
+    description: "核心管线进度披露模糊且研发前景描述过度乐观，估值缺乏合理基础"
+    trigger_dimensions:
+      - dimension: "D2"
+        category: "核心技术/知识产权"
+        rule_ids: ["HKIPO-086", "HKIPO-083"]
+      - dimension: "D3"
+        category: "情感倾向"
+        rule_ids: ["HKIPO-110", "HKIPO-111"]
+    combined_severity: "very_high"
+    confidence_boost: 1.6
+    evidence_required:
+      - "各管线里程碑节点及实际进度对比"
+      - "研发相关文本情感分析结果"
+    risk_category: "生物科技估值"
+
+  - id: "CDR-020"
+    name: "竞争描述模糊+市场空间叙述矛盾→商业可行性风险"
+    description: "竞争格局描述使用模糊语言且市场空间论述前后矛盾，商业模式可行性存疑"
+    trigger_dimensions:
+      - dimension: "D2"
+        category: "行业竞争"
+        rule_ids: ["HKIPO-097", "HKIPO-099"]
+      - dimension: "D3"
+        category: "语言模糊性"
+        rule_ids: ["HKIPO-136", "HKIPO-139"]
+    combined_severity: "medium"
+    confidence_boost: 1.3
+    evidence_required:
+      - "行业竞争格局第三方数据"
+      - "跨章节市场空间表述一致性比对"
+    risk_category: "商业可行性"
+
+  - id: "CDR-021"
+    name: "监管政策变化+合规披露不足→合规盲区风险"
+    description: "面临重大监管政策变化但合规相关披露不充分，存在信息披露违规风险"
+    trigger_dimensions:
+      - dimension: "D2"
+        category: "政策监管"
+        rule_ids: ["HKIPO-065", "HKIPO-066"]
+      - dimension: "D3"
+        category: "信息披露完整性"
+        rule_ids: ["HKIPO-116", "HKIPO-119"]
+    combined_severity: "high"
+    confidence_boost: 1.4
+    evidence_required:
+      - "最新监管政策变化及影响评估"
+      - "合规风险披露完整性核查"
+    risk_category: "合规风险"
+
+  # ===========================================================================
+  # IPO structure combinations
+  # ===========================================================================
+  - id: "CDR-022"
+    name: "发行定价偏高+市场情绪冷淡→破发高风险"
+    description: "发行估值处于行业高位同时市场情绪冷淡或发行窗口不利，破发概率极高"
+    trigger_dimensions:
+      - dimension: "D2"
+        category: "估值与发行定价"
+        rule_ids: ["HKIPO-148", "HKIPO-149", "HKIPO-150"]
+      - dimension: "D2"
+        category: "IPO发行结构"
+        rule_ids: ["HKIPO-157"]
+    combined_severity: "very_high"
+    confidence_boost: 1.7
+    evidence_required:
+      - "发行估值与行业可比公司对比"
+      - "近期市场走势及同类IPO表现"
+    risk_category: "破发风险"
+
+  - id: "CDR-023"
+    name: "基石投资者集中+锁仓期短→抛压风险"
+    description: "基石投资者配售占比过高且锁定期短，上市后集中抛售压力极大"
+    trigger_dimensions:
+      - dimension: "D2"
+        category: "IPO发行结构"
+        rule_ids: ["HKIPO-151"]
+      - dimension: "D2"
+        category: "IPO发行结构"
+        rule_ids: ["HKIPO-153"]
+    combined_severity: "high"
+    confidence_boost: 1.5
+    evidence_required:
+      - "基石投资者名单及获配比例"
+      - "锁仓协议条款及提前释放条件"
+    risk_category: "抛压风险"
+
+  - id: "CDR-024"
+    name: "保荐人历史破发率高+估值偏高→中介信誉+定价风险"
+    description: "保荐人历史承销项目破发率高且本次发行估值偏高，定价合理性和中介质量双重存疑"
+    trigger_dimensions:
+      - dimension: "D2"
+        category: "中介机构质量"
+        rule_ids: ["HKIPO-158"]
+      - dimension: "D2"
+        category: "估值与发行定价"
+        rule_ids: ["HKIPO-148", "HKIPO-150"]
+    combined_severity: "high"
+    confidence_boost: 1.5
+    evidence_required:
+      - "保荐人近2年IPO项目首日及短期表现统计"
+      - "本次发行估值与行业对比"
+    risk_category: "中介与定价风险"
+
+  - id: "CDR-025"
+    name: "自由流通量低+市场情绪冷淡→流动性枯竭风险"
+    description: "公众持股比例接近最低要求且市场环境冷淡，上市后面临流动性枯竭"
+    trigger_dimensions:
+      - dimension: "D2"
+        category: "IPO发行结构"
+        rule_ids: ["HKIPO-154", "HKIPO-155"]
+      - dimension: "D2"
+        category: "IPO发行结构"
+        rule_ids: ["HKIPO-157"]
+    combined_severity: "very_high"
+    confidence_boost: 1.6
+    evidence_required:
+      - "公众持股比例及自由流通量估算"
+      - "做市商安排及分析师覆盖计划"
+    risk_category: "流动性风险"

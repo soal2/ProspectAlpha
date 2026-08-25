@@ -103,7 +103,7 @@ async def analyze_findings_with_llm(
             # trigger decision. Confidence alone cannot distinguish a
             # confirmed risk from a confident non-trigger.
             outcome = "insufficient_evidence"
-        if needs_more or (outcome == "triggered" and cand.confidence < 0.55):
+        if needs_more:
             outcome = "insufficient_evidence"
         if outcome == "triggered" and _invalid_zero_revenue_share(cand):
             outcome = "insufficient_evidence"

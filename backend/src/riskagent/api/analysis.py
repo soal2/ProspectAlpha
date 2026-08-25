@@ -7,7 +7,7 @@ import json
 import os
 
 from fastapi import APIRouter, HTTPException, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 
 from riskagent.analysis_runs import (
     AnalysisRun,
@@ -17,12 +17,14 @@ from riskagent.analysis_runs import (
     AnalysisTrace,
     AnalysisRunRepository,
     ExpertSelectionRequest,
+    IndustryProfileConfirmation,
     ReportDraft,
     RunEvidence,
-    _build_report_streaming,
     get_default_analysis_repository,
 )
 from riskagent.runtime_events import get_event_broker, subscribe_redis_events
+from riskagent.skill_runtime import ResearchArtifact
+from riskagent.backtesting.service import service as backtest_service
 
 
 router = APIRouter(prefix="/analysis-runs", tags=["analysis-runs"])
@@ -87,6 +89,35 @@ def update_analysis_inputs(run_id: str, payload: AnalysisRunInputPatch) -> Analy
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 
+@router.post("/{run_id}/industry-profile/confirm", response_model=AnalysisRun)
+def confirm_industry_profile(
+    run_id: str,
+    payload: IndustryProfileConfirmation,
+) -> AnalysisRun:
+    try:
+        return _repo().confirm_industry_profile(
+            run_id,
+            payload,
+            dispatch_mode=_api_dispatch_mode(),
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
+@router.post("/{run_id}/risk-score")
+def freeze_risk_score(run_id: str) -> dict:
+    """Freeze the offline, explainable score used by IPO backtests only."""
+    try:
+        run = _repo().get(run_id)
+        return backtest_service.score_for_analysis_run(run)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
 @router.post("/{run_id}/start", response_model=AnalysisRun)
 def start_analysis_run(run_id: str) -> AnalysisRun:
     try:
@@ -115,6 +146,22 @@ def submit_expert_selection(run_id: str, payload: ExpertSelectionRequest) -> Ana
 def get_analysis_events(run_id: str, after: int = 0) -> dict[str, object]:
     try:
         return {"run_id": run_id, "events": _repo().events(run_id, after)}
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found") from exc
+
+
+@router.get("/{run_id}/research-artifacts", response_model=list[ResearchArtifact])
+def get_research_artifacts(run_id: str) -> list[ResearchArtifact]:
+    try:
+        return _repo().get(run_id).research_artifacts
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found") from exc
+
+
+@router.get("/{run_id}/skill-snapshot", response_model=dict[str, object])
+def get_skill_snapshot(run_id: str) -> dict[str, object]:
+    try:
+        return _repo().get(run_id).skill_snapshot
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found") from exc
 
@@ -150,7 +197,7 @@ async def stream_analysis_run(run_id: str, after: int = 0) -> StreamingResponse:
                         seen_events.add(signature)
                         yield _sse_data(event)
                 run = _repo().get(run_id)
-                if run.status == "awaiting_expert_selection":
+                if run.status in {"awaiting_industry_confirmation", "awaiting_expert_selection"}:
                     yield _sse_data({"type": "paused", "run": run.model_dump()})
                     return
                 if run.status in {"completed", "failed"}:
@@ -221,6 +268,7 @@ def _should_resume(run: AnalysisRun) -> bool:
         "completed",
         "failed",
         "clarifying",
+        "awaiting_industry_confirmation",
         "awaiting_expert_selection",
     }:
         return False
@@ -259,6 +307,26 @@ def get_analysis_report(run_id: str) -> ReportDraft:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found") from exc
 
 
+@router.get("/{run_id}/report/artifact")
+def download_analysis_report_artifact(run_id: str, download: bool = False) -> HTMLResponse:
+    try:
+        run = _repo().get(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found") from exc
+    if run.status != "completed":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Run status is {run.status}, not completed")
+    if run.report is None or not run.report.html:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report artifact not found")
+    disposition = "attachment" if download else "inline"
+    return HTMLResponse(
+        content=run.report.html,
+        headers={
+            "Content-Disposition": f"{disposition}; filename=risk-report-{run_id}.html",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
 @router.get("/{run_id}/stream-report")
 async def stream_report(run_id: str) -> StreamingResponse:
     try:
@@ -267,10 +335,12 @@ async def stream_report(run_id: str) -> StreamingResponse:
         raise HTTPException(status_code=404, detail="Run not found") from exc
     if run.status != "completed":
         raise HTTPException(status_code=409, detail=f"Run status is {run.status}, not completed")
+    if run.report is None:
+        raise HTTPException(status_code=404, detail="Report not found")
 
     async def gen():
         try:
-            async for chunk in _build_report_streaming(run):
+            for chunk in _report_chunks(run.report.markdown):
                 yield f"data: {json.dumps({'type': 'report_chunk', 'delta': chunk}, ensure_ascii=False)}\n\n"
         except Exception as exc:
             yield f"data: {json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
@@ -282,6 +352,13 @@ async def stream_report(run_id: str) -> StreamingResponse:
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+def _report_chunks(markdown: str, *, size: int = 4096):
+    """Yield the persisted report verbatim without invoking an LLM again."""
+
+    for start in range(0, len(markdown), size):
+        yield markdown[start : start + size]
 
 
 @router.get("/{run_id}/trace", response_model=AnalysisTrace)

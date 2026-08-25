@@ -49,6 +49,18 @@ DEFAULT_DOCUMENTS_PATH = DATA_ROOT / "processed" / "documents.yaml"
 DEFAULT_DOCUMENT_STORAGE_DIR = DATA_ROOT / "raw" / "documents"
 MAX_DOCUMENT_BYTES = 50 * 1024 * 1024
 PARSER_VERSION = "pymupdf-v1"
+
+# Canonical prospectus section markers with simplified/traditional/English
+# variants. HK prospectuses are mostly published in traditional Chinese, so a
+# simplified-only marker set silently drops every section heading.
+PROSPECTUS_SECTION_MARKERS: dict[str, tuple[str, ...]] = {
+    "风险因素": ("风险因素", "風險因素", "risk factors"),
+    "关联交易": ("关联交易", "關聯交易", "關連交易", "connected transactions"),
+    "财务资料": ("财务资料", "財務資料", "financial information"),
+    "业务": ("业务", "業務", "business"),
+    "历史及公司架构": ("历史及公司架构", "歷史及公司架構", "history and corporate structure"),
+}
+
 logger = logging.getLogger(__name__)
 _ACTIVE_PROSPECTUS_PIPELINES: set[str] = set()
 _ACTIVE_PROSPECTUS_PIPELINES_LOCK = threading.Lock()
@@ -544,9 +556,9 @@ def _text_from_pdf_block(raw_block: dict[str, Any]) -> str:
 
 def _detect_section(text: str, current: str) -> str:
     head = text[:100]
-    for marker in ["风险因素", "关联交易", "财务资料", "业务", "历史及公司架构"]:
-        if marker in head:
-            return marker
+    for canonical, variants in PROSPECTUS_SECTION_MARKERS.items():
+        if any(variant in head for variant in variants):
+            return canonical
     return current
 
 
@@ -666,6 +678,7 @@ def process_registered_prospectus(document_id: str) -> None:
                 original_filename=registration.original_filename,
                 doc_key=registration.doc_key,
                 source_url=registration.source_url,
+                enable_image_vlm=False,
             ),
             ingestion_repository=ingestion,
         )

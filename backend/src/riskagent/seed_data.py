@@ -95,6 +95,18 @@ AGENT_EXPERTS: list[dict[str, Any]] = [
         "accent": "#7b8ba1",
     },
     {
+        "agent_id": "L2-004",
+        "name": "赵宏远",
+        "role": "宏观经济分析",
+        "layer": "L2",
+        "description": "分析利率、汇率、经济周期、地缘政治与货币政策对 IPO 的影响。",
+        "expertise": ["宏观经济", "利率", "汇率"],
+        "call_count": 0,
+        "avg_tokens": 0,
+        "avatar": "赵",
+        "accent": "#5a4a8a",
+    },
+    {
         "agent_id": "L1-001",
         "name": "秦秉文",
         "role": "财报采集 · 财务分析",
@@ -165,6 +177,18 @@ AGENT_EXPERTS: list[dict[str, Any]] = [
         "avg_tokens": 1860,
         "avatar": "白",
         "accent": "#8a6a3b",
+    },
+    {
+        "agent_id": "L1-007",
+        "name": "林若清",
+        "role": "ESG 评估",
+        "layer": "L1",
+        "description": "评估环境合规、社会责任、治理透明度与 ESG 披露质量，识别漂绿风险。",
+        "expertise": ["ESG", "治理", "合规"],
+        "call_count": 0,
+        "avg_tokens": 0,
+        "avatar": "林",
+        "accent": "#2d8659",
     },
 ]
 
@@ -302,6 +326,28 @@ AGENT_SPECS: list[dict[str, Any]] = [
         "categories": ["行业竞争"],
         "is_default": False,
     },
+    {
+        "agent_name": "esg_agent",
+        "persona_id": "L1-007",
+        "display_name": "林若清",
+        "layer": "L1",
+        "function": "esg_agent",
+        "title": "ESG specialist - Lin Ruoqing",
+        "rule_types": [],
+        "categories": ["ESG与环境合规", "社会责任", "治理透明度"],
+        "is_default": False,
+    },
+    {
+        "agent_name": "macro_economy_agent",
+        "persona_id": "L2-004",
+        "display_name": "赵宏远",
+        "layer": "L2",
+        "function": "macro_economy_agent",
+        "title": "Macro economy specialist - Zhao Hongyuan",
+        "rule_types": [],
+        "categories": ["宏观经济", "利率与汇率", "地缘政治"],
+        "is_default": False,
+    },
 ]
 
 
@@ -310,6 +356,8 @@ AGENT_NAME_ALIASES: dict[str, str] = {
     "legal_agent": "wen_shouzheng_legal_agent",
     "market_agent": "lu_guanlan_market_agent",
     "business_agent": "su_zhiji_business_agent",
+    "esg_agent": "esg_agent",
+    "macro_economy_agent": "macro_economy_agent",
 }
 
 

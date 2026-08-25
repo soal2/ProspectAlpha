@@ -13,6 +13,7 @@ from riskagent.agent_experts import AgentSpec
 from riskagent.agents.orchestrator import StrategyDecision
 from riskagent.agents.supervisor import AgentTeamSupervisor
 from riskagent.analysis_runs import AnalysisRunRepository
+from riskagent.hidden_risk import infer_industry_profile
 from riskagent.retrieval import ChunkSearchResult
 from riskagent.risk_rules import RiskRuleRepository
 
@@ -131,11 +132,41 @@ def deterministic_report_provider(
                 "evidence_ids": evidence_ids,
             }
         )
+    risk_themes = []
+    for verification_status in ("supported", "weakly_supported"):
+        grouped = [
+            item
+            for item in verified_findings
+            if str(item.get("verification_status")) == verification_status
+        ]
+        if not grouped:
+            continue
+        finding_ids = [str(item["finding_id"]) for item in grouped]
+        evidence_ids = list(
+            dict.fromkeys(
+                evidence_id
+                for finding_id in finding_ids
+                for evidence_id in evidence_by_finding.get(finding_id, [])
+            )
+        )
+        risk_themes.append(
+            {
+                "title": "已核验核心风险" if verification_status == "supported" else "待复核风险线索",
+                "conclusion": "相关风险会影响经营兑现的可见性。",
+                "analysis": "已按共同风险驱动因素整合相关 finding，并保留原文证据引用。",
+                "investment_impact": "需要在估值与持续经营假设中保留风险折价和复核空间。",
+                "uncertainties": [] if verification_status == "supported" else ["证据仍需人工复核。"],
+                "monitoring_points": ["跟踪对应招股书披露事项的后续变化。"],
+                "finding_ids": finding_ids,
+                "evidence_ids": evidence_ids,
+            }
+        )
     return {
         "title": f"{company_name} IPO 风险分析草案",
         "executive_summary": "已整合全部动态专家模块并保留证据引用。",
-        "overall_risk_level": "中",
+        "overall_risk_level": "medium",
         "sections": sections,
+        "risk_themes": risk_themes,
         "cross_module_risks": [],
         "recommendations": ["对弱证据结论执行人工复核。"],
         "limitations": [],
@@ -202,6 +233,8 @@ def analysis_repo_factory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             agent_supervisor=supervisor,
             report_provider=deterministic_report_provider,
             chunk_retriever=chunk_retriever,
+            industry_profiler=lambda *, blocks, **_kwargs: infer_industry_profile(blocks),
+            hypothesis_generator=lambda **_kwargs: [],
             **repository_kwargs,
         )
 

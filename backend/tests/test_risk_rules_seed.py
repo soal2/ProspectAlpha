@@ -13,6 +13,7 @@ from riskagent.seed_data import seed_reference_data, verify_risk_rule_seed
 SEED_PATH = Path(__file__).parents[1] / "configs" / "hk_ipo_risk_rules_v1.json"
 SEED_DATA = json.loads(SEED_PATH.read_text(encoding="utf-8"))
 RULE_SET_ID = SEED_DATA["rule_set_id"]
+SEED_RULE_COUNT = len(SEED_DATA["rules"])
 
 
 def _session_factory(tmp_path: Path) -> sessionmaker:
@@ -39,7 +40,7 @@ def test_seed_loads_full_rule_catalog(tmp_path):
     seed_reference_data(session_factory)
 
     rules, dims = _counts(session_factory)
-    assert rules == len(SEED_DATA["rules"]) == 147
+    assert rules == SEED_RULE_COUNT >= 147  # seed grows with the workbook
     assert dims == len(SEED_DATA["dimensions"]) == 3
     with session_factory() as session:
         categories = set(
@@ -48,7 +49,7 @@ def test_seed_loads_full_rule_catalog(tmp_path):
             ).all()
         )
     assert categories == {rule["category"] for rule in SEED_DATA["rules"]}
-    assert len(categories) == 28
+    assert len(categories) >= 28
 
 
 def test_verify_reseeds_partial_rule_set(tmp_path):
@@ -63,8 +64,8 @@ def test_verify_reseeds_partial_rule_set(tmp_path):
 
     seed_reference_data(session_factory)
     rules, dims = _counts(session_factory)
-    assert rules == 147
-    assert dims == 3
+    assert rules == SEED_RULE_COUNT
+    assert dims == len(SEED_DATA["dimensions"])
 
 
 def test_verify_keeps_user_crud_changes(tmp_path):
@@ -84,11 +85,11 @@ def test_verify_keeps_user_crud_changes(tmp_path):
             source_sections="章节",
         )
     )
-    assert _counts(session_factory)[0] == 148
+    assert _counts(session_factory)[0] == SEED_RULE_COUNT + 1
 
     # Re-running the seed must not clobber the user's extra rule.
     seed_reference_data(session_factory)
-    assert _counts(session_factory)[0] == 148
+    assert _counts(session_factory)[0] == SEED_RULE_COUNT + 1
 
 
 def test_verify_reseeds_on_version_bump(tmp_path):
@@ -106,7 +107,7 @@ def test_verify_reseeds_on_version_bump(tmp_path):
     with session_factory() as session:
         row = session.get(RiskRuleSetRow, RULE_SET_ID)
         assert row.version == SEED_DATA.get("version", "v1.1")
-    assert _counts(session_factory)[0] == 147
+    assert _counts(session_factory)[0] == SEED_RULE_COUNT
 
 
 def test_concurrent_create_yields_unique_rule_ids(tmp_path):
@@ -147,4 +148,4 @@ def test_concurrent_create_yields_unique_rule_ids(tmp_path):
 
     assert not errors
     assert len(created) == len(set(created)) == 6
-    assert _counts(session_factory)[0] == 153
+    assert _counts(session_factory)[0] == SEED_RULE_COUNT + 6

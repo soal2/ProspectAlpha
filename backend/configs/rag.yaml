@@ -24,3 +24,16 @@ chunker:
     merge_text: true
     require_image_description: true
     image_context_window_blocks: 3
+
+retrieval:
+  hybrid_search:
+    default_vector_weight: 0.75
+    default_fulltext_weight: 0.25
+    adaptive:
+      enabled: true
+      # Boost fulltext weight when query contains numbers/symbols (financial data queries)
+      numeric_query_fulltext_boost: 0.15
+      # Boost vector weight when query is conceptual/semantic
+      semantic_query_vector_boost: 0.10
+      # Threshold for detecting numeric-heavy queries
+      numeric_char_ratio_threshold: 0.3

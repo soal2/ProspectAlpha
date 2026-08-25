@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
+import logging
 import operator
 import os
 import re
@@ -25,16 +27,20 @@ from riskagent.a2a.runtime import STRATEGIC_AGENT
 from riskagent.a2a.storage import resolve_agent_runtime_root
 from riskagent.agent_experts import AgentSpec, AgentSpecRepository
 from riskagent.agents.orchestrator import (
+    PostIPORiskAssessment,
     StrategyAssignment,
     StrategyDecision,
+    _infer_company_characteristics,
     manual_recovery_strategy_decision,
     manual_strategy_decision,
     orchestrate,
+    select_experts_for_strategy,
     select_replacement,
     validate_replacement_decision,
     validate_strategy_decision,
 )
 from riskagent.agents.expert_llm import analyze_findings_with_llm
+from riskagent.agents.llm_resilience import call_llm_with_resilience
 from riskagent.agents.prompts import render_expert_prompt
 from riskagent.agents.query_llm import rewrite_retrieval_queries_with_llm
 from riskagent.retrieval import ChunkSearchResult, prospectus_hybrid_search
@@ -58,6 +64,16 @@ from riskagent.skills.risk_skill_registry import (
 
 
 MAX_REPLACEMENT_ROUNDS = 2
+
+logger = logging.getLogger(__name__)
+
+# Market sentiment agents that must always be included for cross-modal resonance.
+_MARKET_AGENT_NAMES: frozenset[str] = frozenset({
+    "bai_shice_market_agent",
+    "lu_guanlan_market_agent",
+    "gu_lingsheng_market_agent",
+    "jiang_hengzhi_market_agent",
+})
 TEAM_STARTUP_TIMEOUT_SECONDS = 10.0
 EXPERT_TASK_TIMEOUT_SECONDS = 300.0
 TEAM_SHUTDOWN_TIMEOUT_SECONDS = 10.0
@@ -102,6 +118,8 @@ class ExpertModuleResult(BaseModel):
     status: Literal["completed"]
     rule_ids: list[str] = Field(default_factory=list)
     skill_id: str | None = None
+    skill_ids: list[str] = Field(default_factory=list)
+    skill_results: list[dict[str, Any]] = Field(default_factory=list)
     rules_read: int = Field(ge=0)
     limitations: list[str] = Field(default_factory=list)
     peer_message_ids: list[str] = Field(default_factory=list)
@@ -129,6 +147,7 @@ class AgentTeamResult:
     replacement_history: list[dict[str, Any]] = field(default_factory=list)
     paused: bool = False
     interrupt_reason: str | None = None
+    post_ipo_risk: dict[str, Any] | None = None
 
 
 class AgentState(TypedDict, total=False):
@@ -138,6 +157,10 @@ class AgentState(TypedDict, total=False):
     document_summary: str
     text: str
     document_id: str
+    stock_code: str
+    structured_inputs: dict[str, Any]
+    skill_snapshot: dict[str, Any]
+    document_block_ids: list[str]
     max_findings: int
     rule_snapshot: dict[str, Any]
     available_agents: list[dict[str, Any]]
@@ -155,6 +178,7 @@ class AgentState(TypedDict, total=False):
     replacement_history: list[dict[str, Any]]
     excluded_agents: list[str]
     recovery_mode: bool
+    post_ipo_risk: dict[str, Any]
 
 
 class AgentTeamSupervisor:
@@ -203,6 +227,10 @@ class AgentTeamSupervisor:
         document_summary: str,
         text: str,
         document_id: str = "",
+        stock_code: str = "",
+        structured_inputs: dict[str, Any] | None = None,
+        skill_snapshot: dict[str, Any] | None = None,
+        document_block_ids: list[str] | None = None,
         max_findings: int,
         rule_snapshot: dict[str, Any] | None = None,
         manual_agent_names: list[str] | None = None,
@@ -215,6 +243,10 @@ class AgentTeamSupervisor:
             "document_summary": document_summary[:4000],
             "text": text,
             "document_id": document_id,
+            "stock_code": stock_code,
+            "structured_inputs": structured_inputs or {},
+            "skill_snapshot": skill_snapshot or {},
+            "document_block_ids": document_block_ids or [],
             "max_findings": max_findings,
             "rule_snapshot": rule_snapshot or self.repository.snapshot(),
             "available_agents": self.agent_options(),
@@ -299,6 +331,7 @@ class AgentTeamSupervisor:
         graph.add_node("strategize", self._strategy_node)
         graph.add_node("manual_selection", self._manual_selection_node)
         graph.add_node("run_dynamic_team", self._run_dynamic_team_node)
+        graph.add_node("assess_post_ipo_risk", self._assess_post_ipo_risk_node)
         graph.add_node("finish", self._finish_node)
         graph.add_edge(START, "strategize")
         graph.add_conditional_edges(
@@ -309,9 +342,10 @@ class AgentTeamSupervisor:
         graph.add_edge("manual_selection", "run_dynamic_team")
         graph.add_conditional_edges(
             "run_dynamic_team",
-            lambda state: "manual_selection" if state.get("team_needs_manual") else "finish",
-            ["manual_selection", "finish"],
+            lambda state: "manual_selection" if state.get("team_needs_manual") else "assess_post_ipo_risk",
+            ["manual_selection", "assess_post_ipo_risk"],
         )
+        graph.add_edge("assess_post_ipo_risk", "finish")
         graph.add_edge("finish", END)
         return graph.compile(checkpointer=checkpointer)
 
@@ -326,6 +360,36 @@ class AgentTeamSupervisor:
             except Exception as exc:
                 return {"strategy_error": str(exc)}
         else:
+            # Infer company characteristics for dynamic expert selection
+            characteristics = _infer_company_characteristics(
+                company_name=state.get("company_name"),
+                focus=state.get("user_requirement"),
+            )
+            recommended_agents = select_experts_for_strategy(
+                company_industry=characteristics.get("industry"),
+                company_scale=characteristics.get("company_scale"),
+                has_biotech=characteristics.get("has_biotech", False),
+                has_vie_structure=characteristics.get("has_vie_structure", False),
+                market_data_available=True,  # Always include market data agents
+                focus_areas=None,
+            )
+            # Filter recommended agents to only those actually available
+            available_names = {
+                str(item.get("agent_name", "")).strip()
+                for item in state.get("available_agents", [])
+                if str(item.get("agent_name", "")).strip()
+            }
+            recommended_agents = [
+                name for name in recommended_agents if name in available_names
+            ]
+            logger.info(
+                "Dynamic expert selection for company=%s: characteristics=%s, "
+                "recommended %d agents: %s",
+                state.get("company_name"),
+                characteristics,
+                len(recommended_agents),
+                recommended_agents,
+            )
             try:
                 provider_args = {
                     "user_requirement": state["user_requirement"],
@@ -345,6 +409,8 @@ class AgentTeamSupervisor:
                         plan = _resolve(
                             orchestrate(
                                 **provider_args,
+                                recommended_agents=recommended_agents,
+                                skill_snapshot=state.get("skill_snapshot", {}),
                                 on_delta=live_call.delta,
                                 on_response=live_call.complete,
                             )
@@ -367,6 +433,8 @@ class AgentTeamSupervisor:
                         )
                     ],
                 }
+        plan = _ensure_market_agent_included(plan, state["available_agents"])
+        plan = _ensure_required_core_agents(plan, state["available_agents"])
         return {
             "strategy_plan": plan.model_dump(),
             "execution_plan": {},
@@ -493,6 +561,10 @@ class AgentTeamSupervisor:
                             assignment=resolved_assignment,
                             text=state["text"],
                             document_id=state.get("document_id", ""),
+                            stock_code=state.get("stock_code", ""),
+                            structured_inputs=state.get("structured_inputs", {}),
+                            skill_snapshot=state.get("skill_snapshot", {}),
+                            document_block_ids=state.get("document_block_ids", []),
                             user_requirement=state.get("user_requirement", ""),
                             rules=all_rules,
                             rule_snapshot=state["rule_snapshot"],
@@ -643,6 +715,10 @@ class AgentTeamSupervisor:
                                 assignment=replacement_assignment,
                                 text=state["text"],
                                 document_id=state.get("document_id", ""),
+                                stock_code=state.get("stock_code", ""),
+                                structured_inputs=state.get("structured_inputs", {}),
+                                skill_snapshot=state.get("skill_snapshot", {}),
+                                document_block_ids=state.get("document_block_ids", []),
                                 user_requirement=state.get("user_requirement", ""),
                                 rules=all_rules,
                                 rule_snapshot=state["rule_snapshot"],
@@ -880,6 +956,10 @@ class AgentTeamSupervisor:
         assignment: StrategyAssignment,
         text: str,
         document_id: str = "",
+        stock_code: str = "",
+        structured_inputs: dict[str, Any] | None = None,
+        skill_snapshot: dict[str, Any] | None = None,
+        document_block_ids: list[str] | None = None,
         user_requirement: str = "",
         rules: list[RiskRule],
         rule_snapshot: dict[str, Any],
@@ -919,6 +999,29 @@ class AgentTeamSupervisor:
                     "brief_acknowledged": True,
                 }
             skill = skill_for_agent(spec.name)
+            from riskagent.skill_runtime import SkillInvocation, SkillRuntime
+
+            skill_results: list[dict[str, Any]] = []
+            snapshot_skills = (skill_snapshot or {}).get("skills") or {}
+            runtime = SkillRuntime(skill_snapshot=skill_snapshot)
+            for skill_id in assignment.skill_ids:
+                metadata = snapshot_skills.get(skill_id) or {}
+                if metadata.get("execution") != "callable":
+                    continue
+                invocation = SkillInvocation(
+                    run_id=run_id or "",
+                    assignment_id=assignment.module_id,
+                    agent_name=spec.name,
+                    skill_id=skill_id,
+                    skill_version=str(metadata.get("version") or "0.0.0"),
+                    stock_code=stock_code or None,
+                    company_name=str((structured_inputs or {}).get("company_name") or ""),
+                    document_id=document_id,
+                    document_block_ids=document_block_ids or [],
+                    structured_inputs=structured_inputs or {},
+                    dataset_snapshot_ids=list((skill_snapshot or {}).get("dataset_versions") or []),
+                )
+                skill_results.append(runtime.invoke(invocation).model_dump())
             selected_rules = (
                 rules_for_skill(skill, rules, set()) if skill else _rules_for_spec(spec, rules)
             )
@@ -1217,9 +1320,16 @@ class AgentTeamSupervisor:
                                 evidence_snippets=snippets,
                                 evidence_by_rule=evidence_by_rule,
                                 user_requirement=user_requirement,
-                                assignment=assignment.model_dump(),
+                                assignment={
+                                    **assignment.model_dump(),
+                                    "skill_results": skill_results,
+                                },
                                 query_history=query_history,
-                                system_prompt=render_expert_prompt(spec.capability_payload()),
+                                system_prompt=render_expert_prompt(
+                                    spec.capability_payload(),
+                                    assigned_skill_ids=assignment.skill_ids,
+                                    skill_snapshot=skill_snapshot,
+                                ),
                                 on_delta=live_call.delta,
                                 on_response=live_call.complete,
                             )
@@ -1339,9 +1449,16 @@ class AgentTeamSupervisor:
                                         ],
                                         evidence_by_rule=supplemental_evidence_by_rule,
                                         user_requirement=user_requirement,
-                                        assignment=assignment.model_dump(),
+                                        assignment={
+                                            **assignment.model_dump(),
+                                            "skill_results": skill_results,
+                                        },
                                         query_history=query_history,
-                                        system_prompt=render_expert_prompt(spec.capability_payload()),
+                                        system_prompt=render_expert_prompt(
+                                            spec.capability_payload(),
+                                            assigned_skill_ids=assignment.skill_ids,
+                                            skill_snapshot=skill_snapshot,
+                                        ),
                                     )
                                 )
                                 supplemental_by_rule = {item.rule_id: item for item in supplemental}
@@ -1428,6 +1545,8 @@ class AgentTeamSupervisor:
                     "status": "completed",
                     "rule_ids": [item.rule_id for item in triggered],
                     "skill_id": skill.skill_id if skill else None,
+                    "skill_ids": assignment.skill_ids,
+                    "skill_results": skill_results,
                     "rules_read": len(selected_rules),
                     "limitations": [
                         *_build_module_limitations(peer_review_error, llm_failure, triggered),
@@ -1442,6 +1561,155 @@ class AgentTeamSupervisor:
             }
 
         return handle
+
+    def _assess_post_ipo_risk_node(self, state: AgentState) -> AgentState:
+        """Assess post-IPO performance risk based on expert findings.
+
+        This integrates the competition's key metric (5-day significant decline risk)
+        into the main analysis pipeline.  The assessment is LIGHTWEIGHT: it synthesises
+        signals from existing expert analyses (market sentiment, valuation, financial
+        health, IPO structure) without requiring external market-data API calls.
+        """
+        module_results = state.get("module_results", [])
+        evaluations = state.get("evaluations", [])
+        company_name = state.get("company_name", "")
+        run_id = state.get("run_id", "")
+
+        # ------------------------------------------------------------------
+        # 1. Collect risk signals from expert findings
+        # ------------------------------------------------------------------
+        risk_signals: list[str] = []
+        market_sentiment_summary: str = ""
+        valuation_summary: str = ""
+        financial_summary: str = ""
+        ipo_structure_notes: list[str] = []
+
+        for module in module_results:
+            agent_name = str(module.get("agent_name") or "")
+            summary = str(module.get("summary") or "")
+            rule_ids = module.get("rule_ids") or []
+
+            # Market sentiment agents
+            if agent_name in _MARKET_AGENT_NAMES:
+                market_sentiment_summary = summary or market_sentiment_summary
+                risk_signals.append(f"市场情绪：{summary[:200]}")
+            # Valuation / pricing
+            if "valuation" in agent_name or "jiang_hengzhi" in agent_name:
+                valuation_summary = summary
+                risk_signals.append(f"估值定价：{summary[:200]}")
+            # Financial health
+            if "financial" in agent_name or "qin_bingwen" in agent_name:
+                financial_summary = summary
+                risk_signals.append(f"财务健康：{summary[:200]}")
+            # IPO structure (cornerstone investors, greenshoe, lock-up)
+            for rid in rule_ids:
+                if any(kw in rid for kw in ("cornerstone", "greenshoe", "lock_up", "ipo_structure")):
+                    ipo_structure_notes.append(f"规则 {rid} 触发")
+
+        # Also pull from evaluations for additional triggered risk rules
+        for ev in evaluations:
+            rule_id = str(ev.get("rule_id") or "")
+            evaluation_result = str(ev.get("evaluation_result") or "")
+            if evaluation_result in ("triggered", "high_risk"):
+                risk_signals.append(f"规则 {rule_id} 已触发")
+
+        # ------------------------------------------------------------------
+        # 2. Lightweight heuristic assessment (no external API calls)
+        # ------------------------------------------------------------------
+        high_risk_count = sum(
+            1 for s in risk_signals if any(kw in s for kw in ("负面", "冷淡", "高估", "破发", "偿债", "现金流紧张"))
+        )
+        if high_risk_count >= 3:
+            five_day_risk = "high"
+            breaking_risk = "high"
+        elif high_risk_count >= 1:
+            five_day_risk = "medium"
+            breaking_risk = "medium"
+        else:
+            five_day_risk = "low"
+            breaking_risk = "low"
+
+        twenty_day_risk = five_day_risk  # same heuristic for short horizon
+
+        key_risk_factors = risk_signals[:8]  # cap at top 8
+
+        market_condition = (
+            market_sentiment_summary[:300]
+            if market_sentiment_summary
+            else "市场情绪数据有限，基于专家分析综合判断。"
+        )
+
+        recommendation = (
+            "建议谨慎参与，关注上市后5个交易日内的价格波动。"
+            if five_day_risk == "high"
+            else "可适度关注，但需密切跟踪市场情绪变化。"
+            if five_day_risk == "medium"
+            else "基本面与市场情绪整体积极，可关注上市时机。"
+        )
+
+        # ------------------------------------------------------------------
+        # 3. Optionally refine via lightweight LLM call (if available)
+        # ------------------------------------------------------------------
+        try:
+            llm_payload = json.dumps(
+                {
+                    "company_name": company_name,
+                    "risk_signals": risk_signals[:10],
+                    "market_sentiment": market_sentiment_summary[:500],
+                    "valuation": valuation_summary[:500],
+                    "financial": financial_summary[:500],
+                    "ipo_structure_notes": ipo_structure_notes,
+                },
+                ensure_ascii=False,
+            )
+            raw = asyncio.run(
+                call_llm_with_resilience(
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "你是 ProspectAlpha 上市后风险评估模块。根据专家分析结果，"
+                                "快速评估上市后5个交易日内显著下跌风险、破发风险。"
+                                "只输出 JSON："
+                                '{"five_day_decline_risk":"high"|"medium"|"low",'
+                                '"twenty_day_decline_risk":"high"|"medium"|"low",'
+                                '"breaking_risk":"high"|"medium"|"low",'
+                                '"key_risk_factors":[str],'
+                                '"market_condition_assessment":str,'
+                                '"recommendation":str}'
+                            ),
+                        },
+                        {"role": "user", "content": llm_payload},
+                    ],
+                    temperature=0.1,
+                    context={"phase": "post_ipo_risk_assessment", "run_id": run_id},
+                )
+            )
+            assessment = PostIPORiskAssessment.model_validate(raw)
+        except Exception:
+            # Fallback to heuristic assessment if LLM call fails
+            assessment = PostIPORiskAssessment(
+                five_day_decline_risk=five_day_risk,
+                twenty_day_decline_risk=twenty_day_risk,
+                breaking_risk=breaking_risk,
+                key_risk_factors=key_risk_factors,
+                market_condition_assessment=market_condition,
+                recommendation=recommendation,
+            )
+
+        return {
+            "post_ipo_risk": assessment.model_dump(),
+            "events": [
+                _event(
+                    "post_ipo_risk_assessed",
+                    "orchestrator",
+                    "上市后风险预测完成",
+                    f"5日下跌风险={assessment.five_day_decline_risk}, "
+                    f"破发风险={assessment.breaking_risk}",
+                    payload=assessment.model_dump(),
+                )
+            ],
+        }
 
     def _finish_node(self, state: AgentState) -> AgentState:
         evaluations = [RuleEvaluation.model_validate(item) for item in state.get("evaluations", [])]
@@ -1483,6 +1751,7 @@ class AgentTeamSupervisor:
             replacement_history=list(values.get("replacement_history", [])),
             paused=paused,
             interrupt_reason=interrupt_reason,
+            post_ipo_risk=values.get("post_ipo_risk"),
         )
 
     def _record_runtime_event(self, run_id: str, event: Any) -> None:
@@ -1580,6 +1849,112 @@ def _expert_report_summary(
         f"汇报结论：已核查 {rules_read} 条规则，{assignment.module} "
         "暂未发现达到证据门槛的候选风险。"
     )
+
+def _ensure_market_agent_included(
+    plan: StrategyDecision,
+    available_agents: list[dict[str, Any]],
+) -> StrategyDecision:
+    """Ensure at least one market-sentiment agent is present in the strategy plan.
+
+    Cross-modal resonance (基本面 + 市场情绪) requires market analysis to be
+    part of every run.  If the strategy LLM omitted all market agents, pick
+    the first available one and append a lightweight assignment.
+    """
+    selected_set = set(plan.selected_agents)
+    if selected_set & _MARKET_AGENT_NAMES:
+        return plan
+
+    available_market = [
+        item for item in available_agents
+        if item.get("agent_name") in _MARKET_AGENT_NAMES
+        and item.get("available", True)
+        and item.get("runtime_status") not in {"WORKING", "SHUTDOWN"}
+    ]
+    if not available_market:
+        logger.warning(
+            "No market-sentiment agent is available; cross-modal resonance "
+            "will be based on a 'data unavailable' placeholder."
+        )
+        return plan
+
+    chosen = available_market[0]
+    market_name = str(chosen["agent_name"])
+    market_role = str(chosen.get("role") or chosen.get("title") or market_name)
+    market_capabilities = [str(c) for c in (chosen.get("capabilities") or [])]
+    focus = "、".join(market_capabilities[:5]) or market_role
+
+    new_assignment = StrategyAssignment(
+        module_id=f"module_{market_name.removesuffix('_agent')}",
+        agent_name=market_name,
+        module=market_role,
+        goal=(
+            f"分析市场情绪与发行窗口，为跨模态共振提供基本面与市场情绪关联依据。"
+            f"重点：{focus}。"
+        ),
+        expected_outputs=[
+            str(chosen.get("output_schema") or "RiskFinding + RunEvidence"),
+            "市场情绪分析与跨模态共振输入",
+        ],
+        skill_ids=["sentiment-scorer", "expert-risk-analysis", "evidence-verification"],
+    )
+    plan.selected_agents = list(plan.selected_agents) + [market_name]
+    plan.assignments = list(plan.assignments) + [new_assignment]
+    plan.focus_areas = list(plan.focus_areas) + [focus]
+    logger.info(
+        "Force-included market agent '%s' for cross-modal resonance.",
+        market_name,
+    )
+    return plan
+
+
+def _ensure_required_core_agents(
+    plan: StrategyDecision,
+    available_agents: list[dict[str, Any]],
+) -> StrategyDecision:
+    """Add available financial and legal core experts omitted by the strategist."""
+
+    required = {
+        "qin_bingwen_financial_agent": [
+            "cashflow-analyzer",
+            "valuation-checker",
+            "expert-risk-analysis",
+            "evidence-verification",
+        ],
+        "wen_shouzheng_legal_agent": [
+            "legal-compliance-due-diligence",
+            "expert-risk-analysis",
+            "evidence-verification",
+        ],
+    }
+    by_name = {
+        str(item.get("agent_name")): item
+        for item in available_agents
+        if item.get("available", True)
+        and item.get("runtime_status") not in {"WORKING", "SHUTDOWN"}
+    }
+    selected = set(plan.selected_agents)
+    for name, skill_ids in required.items():
+        if name in selected or name not in by_name:
+            continue
+        card = by_name[name]
+        role = str(card.get("role") or card.get("title") or name)
+        assignment = StrategyAssignment(
+            module_id=f"module_{name.removesuffix('_agent')}",
+            agent_name=name,
+            module=role,
+            goal=f"完成{role}尽调，所有结论绑定招股书证据并明确数据缺口。",
+            expected_outputs=[
+                str(card.get("output_schema") or "RiskFinding + RunEvidence"),
+                "模块风险影响、证据与待补材料",
+            ],
+            skill_ids=skill_ids,
+        )
+        plan.selected_agents = [*plan.selected_agents, name]
+        plan.assignments = [*plan.assignments, assignment]
+        plan.focus_areas = [*plan.focus_areas, role]
+        selected.add(name)
+    return plan
+
 
 def _resolve(value: Any) -> Any:
     return asyncio.run(value) if inspect.isawaitable(value) else value

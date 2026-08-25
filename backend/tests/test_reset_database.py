@@ -1,9 +1,8 @@
 """Tests for the reset_database CLI.
 
 Uses a tmp_path SQLite database so the test does not depend on a real
-PostgreSQL instance. ``seed_reference_data`` is itself database-agnostic
-(it only relies on the ORM models), so SQLite is sufficient to exercise
-the truncate + reseed logic end-to-end.
+PostgreSQL instance. ``seed_reference_data`` is itself database-agnostic,
+so SQLite is sufficient to exercise schema rebuild + reseed end-to-end.
 """
 
 from __future__ import annotations
@@ -12,7 +11,7 @@ from pathlib import Path
 
 from sqlalchemy import func, select
 
-from riskagent.database import init_db, session_factory_from_url
+from riskagent.database import Base, init_db, session_factory_from_url
 from riskagent.models import (
     AgentExpertRow,
     AgentSpecRow,
@@ -64,8 +63,8 @@ def test_reset_database_clears_business_tables_and_reseeds(tmp_path: Path) -> No
 
     deleted = reset_database(db_url)
 
-    # All current reset-managed tables were touched.
-    assert len(deleted) == 9
+    # Every current ORM table was rebuilt.
+    assert len(deleted) == len(Base.metadata.tables)
     for table_name, count in deleted.items():
         assert isinstance(table_name, str)
         assert isinstance(count, int)
@@ -94,7 +93,7 @@ def test_reset_database_is_idempotent(tmp_path: Path) -> None:
     reset_database(db_url)
     deleted_again = reset_database(db_url)
 
-    assert len(deleted_again) == 9
+    assert len(deleted_again) == len(Base.metadata.tables)
     with session_factory() as session:
         assert session.scalar(select(func.count()).select_from(AgentExpertRow)) == len(AGENT_EXPERTS)
         assert session.scalar(select(func.count()).select_from(AgentSpecRow)) == len(AGENT_SPECS)

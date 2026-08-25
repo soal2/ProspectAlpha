@@ -319,7 +319,19 @@ def test_pipeline_evidence_carries_document_id(
         "/analysis-runs",
         json={"company_name": "PDF 溯源测试", "document_id": document_id},
     ).json()["run_id"]
-    client.post(f"/analysis-runs/{run_id}/start")
+    proposed = client.post(f"/analysis-runs/{run_id}/start").json()
+    assert proposed["status"] in {"queued", "awaiting_industry_confirmation"}
+    for _ in range(200):
+        current = client.get(f"/analysis-runs/{run_id}").json()
+        if current["status"] == "awaiting_industry_confirmation":
+            break
+        time.sleep(0.1)
+    else:
+        raise AssertionError("analysis run did not reach industry confirmation")
+    client.post(
+        f"/analysis-runs/{run_id}/industry-profile/confirm",
+        json={},
+    )
     for _ in range(200):
         if client.get(f"/analysis-runs/{run_id}").json()["status"] == "completed":
             break

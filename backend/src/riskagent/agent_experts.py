@@ -41,9 +41,15 @@ class AgentSpec:
         """Return the runtime capability description shared by strategy and A2A."""
 
         from riskagent.skills.risk_skill_registry import skill_for_agent
+        from riskagent.skill_docs import AGENT_SKILL_MAP, FUNCTION_SKILLS
 
         skill = skill_for_agent(self.name)
-        capabilities = list(dict.fromkeys((*self.rule_types, *self.categories)))
+        callable_skill_ids = list(
+            AGENT_SKILL_MAP.get(self.name, FUNCTION_SKILLS.get(self.function, ()))
+        )
+        capabilities = list(
+            dict.fromkeys((*callable_skill_ids, *self.rule_types, *self.categories))
+        )
         description = self.title
         role_zh = self.role_zh or (skill.role_zh if skill else self.title)
         if skill:
@@ -70,6 +76,7 @@ class AgentSpec:
             "accent": self.accent,
             "expertise": list(self.expertise),
             "capabilities": capabilities,
+            "skill_ids": callable_skill_ids,
             "rule_types": list(self.rule_types),
             "categories": list(self.categories),
             "default": self.default,

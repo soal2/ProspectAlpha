@@ -22,7 +22,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from riskagent.a2a import build_dynamic_expert_a2a_routes
 from riskagent.agent_experts import AgentSpec, AgentSpecRepository
-from riskagent.api import agents, analysis, analysis_options, chat, documents, knowledge, risk_rules, skills
+from riskagent.api import agents, analysis, analysis_options, backtests, chat, documents, knowledge, risk_rules, skills
 from riskagent.seed_data import AGENT_EXPERTS, AGENT_SPECS
 
 logger = logging.getLogger(__name__)
@@ -43,7 +43,36 @@ def _cors_origins() -> list[str]:
     ]
 
 
+def _run_rag_schema_migrations() -> None:
+    """Ensure RAG schema is up-to-date for existing databases.
+
+    Covers columns added after the initial ``CREATE TABLE`` (e.g.
+    ``content_sha256``).  The helper function is idempotent and safe to call
+    on every startup.
+    """
+    try:
+        from riskagent.retrieval.index import (
+            DEFAULT_INDEX_SCHEMA,
+            connect_postgres,
+            ensure_content_sha256_column,
+        )
+
+        conn = connect_postgres()
+        try:
+            ensure_content_sha256_column(schema=DEFAULT_INDEX_SCHEMA, conn=conn)
+            logger.info("RAG schema migrations applied successfully.")
+        finally:
+            conn.close()
+    except Exception:
+        logger.exception("RAG schema migration failed")
+
+
 def create_app() -> FastAPI:
+    from riskagent.skill_docs import initialize_skill_catalog
+
+    # Skill metadata and executable handlers are a startup contract.  A broken
+    # required Skill must fail before the application advertises readiness.
+    initialize_skill_catalog()
     app = FastAPI(title="ProspectAlpha RiskAgent API", version="0.1.0")
     app.add_middleware(
         CORSMiddleware,
@@ -91,6 +120,7 @@ def create_app() -> FastAPI:
 
         try:
             init_db()
+            _run_rag_schema_migrations()
             recovered = recover_interrupted_prospectus_jobs()
             if recovered:
                 logger.warning(
@@ -140,6 +170,7 @@ def create_app() -> FastAPI:
     app.include_router(chat.general_router)
     app.include_router(documents.router)
     app.include_router(analysis.router)
+    app.include_router(backtests.router)
     app.include_router(knowledge.router)
     app.include_router(skills.router)
     app.router.routes.extend(

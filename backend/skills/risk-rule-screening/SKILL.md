@@ -1,6 +1,10 @@
 ---
 name: risk-rule-screening
+version: 1.0.0
 description: 用数据库中的 143 条港股 IPO 风险规则对招股书文本做规则预筛，产出候选风险条目。当需要初筛风险信号、按专家能力域分配规则、或解释某条 finding 由哪条规则触发时使用。
+owners: [orchestrator]
+execution: prompt_only
+failure_policy: required
 ---
 
 # 风险规则预筛

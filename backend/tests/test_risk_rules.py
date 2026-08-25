@@ -4,9 +4,12 @@ from pathlib import Path
 from riskagent.risk_rules import RiskRuleCreate, RiskRuleRepository, RiskRuleUpdate
 from riskagent.skills.risk_extract import evaluate_text_against_rules
 
+SEED_PATH = Path(__file__).parents[1] / "configs" / "hk_ipo_risk_rules_v1.json"
+SEED_RULE_COUNT = len(json.loads(SEED_PATH.read_text(encoding="utf-8"))["rules"])
+
 
 def _repo(tmp_path: Path) -> RiskRuleRepository:
-    src = Path(__file__).parents[1] / "configs" / "hk_ipo_risk_rules_v1.json"
+    src = SEED_PATH
     data = json.loads(src.read_text(encoding="utf-8"))
     path = tmp_path / "risk_rules.yaml"
     repo = RiskRuleRepository(path)
@@ -18,7 +21,9 @@ def test_repository_loads_bootstrap_rules(tmp_path):
     repo = _repo(tmp_path)
     rule_set = repo.load()
 
-    assert rule_set.totals == {"dimension_count": 3, "category_count": 28, "rule_count": 147}
+    assert rule_set.totals["rule_count"] == SEED_RULE_COUNT
+    assert rule_set.totals["dimension_count"] == 3
+    assert rule_set.totals["category_count"] >= 28
     assert rule_set.rules[0].rule_id == "HKIPO-001"
 
 
@@ -38,15 +43,15 @@ def test_repository_crud_recalculates_totals(tmp_path):
         )
     )
 
-    assert created.rule_id == "HKIPO-148"
-    assert repo.load().totals["rule_count"] == 148
+    assert created.rule_id == f"HKIPO-{SEED_RULE_COUNT + 1:03d}"
+    assert repo.load().totals["rule_count"] == SEED_RULE_COUNT + 1
 
     updated = repo.update_rule(created.rule_id, RiskRuleUpdate(risk_item="更新风险", enabled=False))
     assert updated.risk_item == "更新风险"
     assert updated.enabled is False
 
     repo.delete_rule(created.rule_id)
-    assert repo.load().totals["rule_count"] == 147
+    assert repo.load().totals["rule_count"] == SEED_RULE_COUNT
 
 
 def test_agent_text_evaluation_uses_rules(tmp_path):

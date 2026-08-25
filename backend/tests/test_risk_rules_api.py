@@ -12,6 +12,9 @@ from riskagent.risk_rules import RiskRuleRepository
 def test_risk_rules_api_crud(tmp_path, monkeypatch):
     src = Path(__file__).parents[1] / "configs" / "hk_ipo_risk_rules_v1.json"
     data = json.loads(src.read_text(encoding="utf-8"))
+    # The seed workbook evolves; derive the expectation from the seed itself so
+    # rule-library growth does not turn into test drift.
+    expected_rule_count = len(data["rules"])
     store = tmp_path / "risk_rules.yaml"
     RiskRuleRepository(store)._write_data(data)
     monkeypatch.setenv("RISK_RULES_PATH", str(store))
@@ -21,7 +24,7 @@ def test_risk_rules_api_crud(tmp_path, monkeypatch):
     response = client.get("/risk-rules")
     assert response.status_code == 200
     payload = response.json()
-    assert payload["totals"]["rule_count"] == 147
+    assert payload["totals"]["rule_count"] == expected_rule_count
 
     response = client.post(
         "/risk-rules",
@@ -46,7 +49,7 @@ def test_risk_rules_api_crud(tmp_path, monkeypatch):
 
     response = client.delete(f"/risk-rules/{rule_id}")
     assert response.status_code == 204
-    assert client.get("/risk-rules").json()["totals"]["rule_count"] == 147
+    assert client.get("/risk-rules").json()["totals"]["rule_count"] == expected_rule_count
 
 
 def test_risk_rules_repository_seeds_empty_database(tmp_path):
@@ -56,8 +59,14 @@ def test_risk_rules_repository_seeds_empty_database(tmp_path):
 
     rule_set = repo.load()
 
+    src = Path(__file__).parents[1] / "configs" / "hk_ipo_risk_rules_v1.json"
+    data = json.loads(src.read_text(encoding="utf-8"))
     assert rule_set.rule_set_id == "hk_ipo_prospectus_risk_framework_v1"
-    assert rule_set.totals == {"dimension_count": 3, "category_count": 28, "rule_count": 147}
+    assert rule_set.totals == {
+        "dimension_count": len(data["dimensions"]),
+        "category_count": len({item["category"] for item in data["rules"]}),
+        "rule_count": len(data["rules"]),
+    }
 
 
 def test_risk_rules_api_missing_rule_returns_404(tmp_path, monkeypatch):

@@ -22,14 +22,14 @@ export const Route = createFileRoute("/analyses/")({
       { title: "我的分析 · ProspectAlpha IPO RiskAgent" },
       {
         name: "description",
-        content: "全部已完成的港股 IPO 风险分析报告，结论可溯源，证据可沉淀。",
+        content: "全部已完成的港股IPO风险穿透预警报告，结论可溯源，证据可沉淀。",
       },
     ],
   }),
   component: AnalysesIndex,
 });
 
-const filters = ["全部", "高风险", "中风险", "低风险", "未评级", "专家级", "近 7 天"] as const;
+const filters = ["全部", "极高风险", "高风险", "中风险", "低风险", "极低风险", "未评级", "专家级", "近 7 天"] as const;
 type AnalysisFilter = (typeof filters)[number];
 type AnalysisSort = "newest" | "oldest" | "evidence";
 
@@ -65,9 +65,11 @@ function AnalysesIndex() {
       ) {
         return false;
       }
+      if (activeFilter === "极高风险" && analysis.riskLevel !== "very_high") return false;
       if (activeFilter === "高风险" && analysis.riskLevel !== "high") return false;
-      if (activeFilter === "中风险" && analysis.riskLevel !== "mid") return false;
+      if (activeFilter === "中风险" && analysis.riskLevel !== "medium") return false;
       if (activeFilter === "低风险" && analysis.riskLevel !== "low") return false;
+      if (activeFilter === "极低风险" && analysis.riskLevel !== "very_low") return false;
       if (activeFilter === "未评级" && analysis.riskLevel !== "unrated") return false;
       if (activeFilter === "专家级" && analysis.mode !== "expert") return false;
       if (activeFilter === "近 7 天" && Date.parse(analysis.createdAt) < sevenDaysAgo) return false;
@@ -101,7 +103,7 @@ function AnalysesIndex() {
         <div>
           <h1 className="font-serif text-3xl font-semibold">我的分析</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            所有已完成的港股 IPO 风险分析报告 · 结论可溯源、证据可沉淀
+            所有已完成的港股IPO风险穿透预警报告 · 结论可溯源、证据可沉淀
           </p>
         </div>
         <Link
@@ -144,6 +146,12 @@ function AnalysesIndex() {
         </select>
       </div>
 
+      {analyses.length > 0 && (
+        <p className="mt-3 text-xs text-muted-foreground">
+          显示 {visibleAnalyses.length}/{analyses.length} 条分析
+        </p>
+      )}
+
       <div className="mt-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
         {visibleAnalyses.map((a) => (
           <article
@@ -168,7 +176,7 @@ function AnalysesIndex() {
               </div>
             </div>
             <div className="flex flex-1 flex-col p-4">
-              <h3 className="font-medium leading-snug">{a.name} · IPO 风险报告</h3>
+              <h3 className="font-medium leading-snug">{a.name} · 港股IPO风险穿透预警报告</h3>
               <p className="mt-1 text-xs text-muted-foreground">
                 {a.industry} · 上市 {a.listingDate}
               </p>
@@ -264,5 +272,12 @@ function AnalysesIndex() {
 }
 
 function riskRatingLabel(level: AnalysisSummary["riskLevel"]) {
-  return { high: "高风险", mid: "中风险", low: "低风险", unrated: "未评级" }[level];
+  return {
+    very_high: "极高风险",
+    high: "高风险",
+    medium: "中风险",
+    low: "低风险",
+    very_low: "极低风险",
+    unrated: "未评级",
+  }[level];
 }

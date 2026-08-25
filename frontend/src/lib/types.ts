@@ -1,4 +1,18 @@
-export type RiskLevel = "high" | "mid" | "low" | "unrated";
+export type RiskLevel = "very_high" | "high" | "medium" | "low" | "very_low" | "unrated";
+
+/** Map legacy 3-level values to the new 5-level system for backward compatibility. */
+export function normalizeRiskLevel(level: string): RiskLevel {
+  const map: Record<string, RiskLevel> = {
+    high: "very_high",
+    mid: "medium",
+    low: "low",
+    very_high: "very_high",
+    very_low: "very_low",
+    medium: "medium",
+    unrated: "unrated",
+  };
+  return map[level] ?? "unrated";
+}
 
 export interface AnalysisSummary {
   id: string;
@@ -41,8 +55,66 @@ export interface BacktestSummary {
   lift10: number;
   recall: number;
   createdAt: string;
-  status: "完成" | "运行中" | "失败";
+  status: "完成" | "运行中" | "失败" | "构建候选中" | "待确认" | "待运行";
   author: string;
+  candidateSetId?: string | null;
+  jobId?: string | null;
+}
+
+export interface BacktestCandidate {
+  code: string;
+  listingDate: string;
+  scoreId: string | null;
+  sourceRunId: string | null;
+  status: "proposed" | "included" | "excluded";
+  reason: string | null;
+}
+
+export interface BacktestCandidatePreview {
+  windCode: string;
+  companyName: string | null;
+  listingDate: string;
+  scoreId: string;
+  sourceRunId: string;
+  analysisAsOfDate: string;
+  score: number;
+  riskLevel: RiskLevel;
+}
+
+export interface BacktestJob {
+  id: string;
+  backtestId: string;
+  kind: string;
+  status: "queued" | "running" | "completed" | "failed";
+  progress: number;
+  stage: string;
+  error: string | null;
+}
+
+export interface BacktestDetailResponse {
+  summary: BacktestSummary;
+  protocol: Record<string, unknown>;
+  candidates?: BacktestCandidate[];
+  jobs?: BacktestJob[];
+  visuals?: BacktestDetailData;
+  weightComparison?: Record<string, Record<string, number>>;
+  ablationResults?: Record<string, Record<string, number>>;
+  industryCohorts?: { code: string; name: string; samples: number; status: string; auc?: number; ks?: number; lift_top20?: number; recall?: number }[];
+  samples?: { code: string; name: string; score: number; risk: RiskLevel; actualDecline: boolean; breaking: boolean; returnPct: number; maxDrawdownPct: number; reason: string; analysisRunId?: string; analysisAsOfDate?: string; industryProfile?: Record<string, unknown>; specificRisks?: Record<string, unknown>[]; outcomeProfile?: Record<string, unknown>; retrospectiveAttribution?: Record<string, unknown> }[];
+  artifact?: string | null;
+}
+
+export interface MarketSnapshotOption {
+  snapshotId: string;
+  createdAt: string;
+  priceStart: string | null;
+  priceEnd: string | null;
+  securities: number;
+  priceRows: number;
+  t5Labels: number;
+  eligibleSamples: number;
+  canCreateBacktest: boolean;
+  unavailableReason: string | null;
 }
 
 export interface DashboardStats {
@@ -64,9 +136,15 @@ export interface HomepageExample {
 
 export interface ReportData {
   id: string;
+  riskLevel: RiskLevel;
   markdown: string;
   reviewStatus: string;
   createdAt: string;
+  themes: Record<string, unknown>[];
+  exploratoryFindings: Record<string, unknown>[];
+  counterevidence: Record<string, unknown>[];
+  limitations: string[];
+  evidenceIndex: Record<string, unknown>[];
   toc: string[];
   radar: { dim: string; score: number }[];
   pie: { name: string; value: number }[];

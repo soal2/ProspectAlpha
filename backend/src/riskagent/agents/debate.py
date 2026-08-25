@@ -5,6 +5,11 @@ peers' findings (round 1), revises their own findings (round 2), then the L3
 red-team arbiter (周慎言 / ``zhou_shenyan_redteam_agent``) issues an
 :class:`ArbiterRuling` that decides whether the run may proceed.
 
+When the arbiter rules ``request_supplement`` with flagged findings, an
+optional round 3 (focused debate) is triggered. Only the experts involved in
+the contested findings participate in a targeted exchange — no full
+cross-qualification re-run.
+
 Resilience:
     Every LLM call goes through
     :func:`riskagent.agents.llm_resilience.call_llm_with_resilience`, which adds
@@ -53,6 +58,22 @@ CRITIQUE_SYSTEM_PROMPT = """\
 REVISION_SYSTEM_PROMPT = """\
 你是 ProspectAlpha 多 Agent 团队中的「{agent_name}」专家。第二轮立论要求你综合同侪质证意见，对自身 finding 进行修订。
 保留有证据支撑的判断，调整被合理质疑的部分，并明示新增或移除的证据与 finding。只输出 JSON：
+{{"agent_name":"{agent_name}","original_finding_ids":[str],"revised_summary":str,
+"added_evidence_ids":[str],"removed_finding_ids":[str],"revision_reason":str}}
+"""
+
+
+FOCUSED_DEBATE_CRITIQUE_PROMPT = """\
+你是 ProspectAlpha 多 Agent 团队中的「{critic_agent}」专家。仲裁官已标记以下 finding 存在争议，要求你进行第三轮聚焦质证。
+你只需针对被标记的争议 finding 发表意见，不得扩大质证范围。基于招股书原文证据与风险规则，给出严谨的质证意见。只输出 JSON：
+{{"critic_agent":"{critic_agent}","target_agent":str,"finding_ids":[str],
+"critique_summary":str,"suggested_revisions":[str],"severity":"info"|"minor"|"major"|"blocker"}}
+"""
+
+
+FOCUSED_DEBATE_RESPONSE_PROMPT = """\
+你是 ProspectAlpha 多 Agent 团队中的「{agent_name}」专家。第三轮聚焦辩论中，仲裁官标记了你的 finding 存在争议。
+请针对聚焦质证意见做出回应，补充证据或调整立论。只输出 JSON：
 {{"agent_name":"{agent_name}","original_finding_ids":[str],"revised_summary":str,
 "added_evidence_ids":[str],"removed_finding_ids":[str],"revision_reason":str}}
 """
@@ -134,6 +155,77 @@ async def _generate_critique(
     return PeerCritique.model_validate(raw).model_dump()
 
 
+async def _generate_focused_critique(
+    *,
+    critic_agent: str,
+    target_agent: str,
+    contested_findings: list[dict[str, Any]],
+    live_call: Any = None,
+) -> dict[str, Any]:
+    """Round 3: targeted critique on arbiter-flagged contested findings only."""
+    system = FOCUSED_DEBATE_CRITIQUE_PROMPT.format(critic_agent=critic_agent)
+    user_payload = json.dumps(
+        {
+            "critic_agent": critic_agent,
+            "target_agent": target_agent,
+            "contested_findings": contested_findings,
+            "context": "focused_debate_round",
+        },
+        ensure_ascii=False,
+    )
+    try:
+        raw = await call_llm_with_resilience(
+            messages=[{"role": "system", "content": system}, {"role": "user", "content": user_payload}],
+            temperature=0.2,
+            context={"phase": "focused_debate_critique", "critic": critic_agent, "target": target_agent},
+            on_delta=live_call.delta if live_call else None,
+            on_response=live_call.complete if live_call else None,
+        )
+    except Exception as exc:
+        if live_call:
+            live_call.fail(exc)
+        raise
+    raw.setdefault("critic_agent", critic_agent)
+    raw.setdefault("target_agent", target_agent)
+    raw.setdefault("finding_ids", [str(f.get("finding_id")) for f in contested_findings if f.get("finding_id")])
+    return PeerCritique.model_validate(raw).model_dump()
+
+
+async def _generate_focused_response(
+    *,
+    agent_name: str,
+    contested_findings: list[dict[str, Any]],
+    focused_critiques: list[dict[str, Any]],
+    live_call: Any = None,
+) -> dict[str, Any]:
+    """Round 3: targeted response to focused critique on contested findings."""
+    system = FOCUSED_DEBATE_RESPONSE_PROMPT.format(agent_name=agent_name)
+    user_payload = json.dumps(
+        {
+            "agent_name": agent_name,
+            "contested_findings": contested_findings,
+            "focused_critiques_received": focused_critiques,
+            "context": "focused_debate_response",
+        },
+        ensure_ascii=False,
+    )
+    try:
+        raw = await call_llm_with_resilience(
+            messages=[{"role": "system", "content": system}, {"role": "user", "content": user_payload}],
+            temperature=0.2,
+            context={"phase": "focused_debate_response", "agent_name": agent_name},
+            on_delta=live_call.delta if live_call else None,
+            on_response=live_call.complete if live_call else None,
+        )
+    except Exception as exc:
+        if live_call:
+            live_call.fail(exc)
+        raise
+    raw.setdefault("agent_name", agent_name)
+    raw.setdefault("original_finding_ids", [str(f.get("finding_id")) for f in contested_findings if f.get("finding_id")])
+    return FindingRevision.model_validate(raw).model_dump()
+
+
 async def _generate_revision(
     *,
     agent_name: str,
@@ -207,7 +299,14 @@ async def run_debate_phase(
     arbiter_agent_name: str = "zhou_shenyan_redteam_agent",
     live_call_factory: Callable[[str], Any] | None = None,
 ) -> DebatePhaseResult:
-    """Run the 2-round peer debate and arbiter ruling.
+    """Run the multi-round peer debate and arbiter ruling.
+
+    The debate has up to 3 rounds:
+      - Round 1: each agent critiques every other agent's findings.
+      - Round 2: each agent revises their findings based on critiques received.
+      - Arbiter ruling by L3 red-team agent.
+      - Round 3 (optional): focused debate on contested findings only, triggered
+        when the arbiter rules ``request_supplement`` with flagged finding IDs.
 
     Partial-failure tolerance: if some critiques or revisions fail but at least
     one succeeds, the debate continues and the failed items are recorded in
@@ -334,6 +433,117 @@ async def run_debate_phase(
             detail=f"{type(exc).__name__}: {exc}",
         ) from exc
 
+    # --- Round 3: Focused debate on contested findings (if arbiter requested supplement) ---
+    focused_critiques: list[dict[str, Any]] = []
+    focused_responses: list[dict[str, Any]] = []
+    needs_focused_debate = ruling.decision == "request_supplement" and bool(ruling.flagged_finding_ids)
+
+    if needs_focused_debate:
+        contested_finding_ids = set(ruling.flagged_finding_ids)
+        logger.info(
+            "debate_round3_triggered",
+            extra={
+                "phase": "focused_debate",
+                "contested_finding_ids": sorted(contested_finding_ids),
+                "reason": "arbiter_request_supplement",
+            },
+        )
+
+        # Build index of contested findings and identify involved agents
+        finding_index = _finding_index(findings)
+        contested_findings_by_agent: dict[str, list[dict[str, Any]]] = {}
+        for fid in contested_finding_ids:
+            finding = finding_index.get(fid)
+            if finding:
+                agent_name = str(finding.get("agent_name") or "")
+                if agent_name:
+                    contested_findings_by_agent.setdefault(agent_name, []).append(finding)
+
+        # Round 3a: focused critiques — each non-flagged agent critiques contested findings
+        flagged_agents = set(contested_findings_by_agent.keys())
+        critiquing_agents = [a for a in agents if a not in flagged_agents]
+        round3a_tasks = []
+        round3a_pairs: list[tuple[str, str | None]] = []
+        for critic in critiquing_agents:
+            for target_agent, target_contested in contested_findings_by_agent.items():
+                round3a_tasks.append(
+                    _generate_focused_critique(
+                        critic_agent=critic,
+                        target_agent=target_agent,
+                        contested_findings=target_contested,
+                        live_call=live_call_factory(critic) if live_call_factory else None,
+                    )
+                )
+                round3a_pairs.append((critic, target_agent))
+
+        round3a_raw = await asyncio.gather(*round3a_tasks, return_exceptions=True) if round3a_tasks else []
+        round3a_successes, r3a_failures, r3a_exc = _split_gather_results(
+            round3a_raw, round3a_pairs, "focused_debate_critique"
+        )
+        focused_critiques = round3a_successes
+        failure_log.setdefault("focused_debate_critique", []).extend(r3a_failures)
+        partial_failure_count += len(r3a_failures)
+
+        rounds.append({
+            "round": 3,
+            "round_type": "focused_debate",
+            "kind": "focused_critique",
+            "contested_finding_ids": sorted(contested_finding_ids),
+            "items": focused_critiques,
+        })
+
+        # Round 3b: focused responses — flagged agents respond to focused critiques
+        critiques_by_target: dict[str, list[dict[str, Any]]] = {}
+        for critique in focused_critiques:
+            critiques_by_target.setdefault(str(critique["target_agent"]), []).append(critique)
+
+        round3b_tasks = []
+        round3b_pairs: list[tuple[str, str | None]] = []
+        for target_agent, target_contested in contested_findings_by_agent.items():
+            round3b_tasks.append(
+                _generate_focused_response(
+                    agent_name=target_agent,
+                    contested_findings=target_contested,
+                    focused_critiques=critiques_by_target.get(target_agent, []),
+                    live_call=live_call_factory(target_agent) if live_call_factory else None,
+                )
+            )
+            round3b_pairs.append((target_agent, None))
+
+        round3b_raw = await asyncio.gather(*round3b_tasks, return_exceptions=True) if round3b_tasks else []
+        round3b_successes, r3b_failures, r3b_exc = _split_gather_results(
+            round3b_raw, round3b_pairs, "focused_debate_response"
+        )
+        focused_responses = round3b_successes
+        failure_log.setdefault("focused_debate_response", []).extend(r3b_failures)
+        partial_failure_count += len(r3b_failures)
+
+        rounds.append({
+            "round": 3,
+            "round_type": "focused_debate",
+            "kind": "focused_response",
+            "contested_finding_ids": sorted(contested_finding_ids),
+            "items": focused_responses,
+        })
+
+        logger.info(
+            "debate_round3_completed",
+            extra={
+                "phase": "focused_debate",
+                "focused_critiques": len(focused_critiques),
+                "focused_responses": len(focused_responses),
+            },
+        )
+    else:
+        logger.info(
+            "debate_round3_skipped",
+            extra={
+                "phase": "focused_debate",
+                "reason": "no_request_supplement_or_no_flagged_findings",
+                "arbiter_decision": ruling.decision,
+            },
+        )
+
     history = {
         "company_name": company_name,
         "arbiter_agent_name": arbiter_agent_name,
@@ -342,6 +552,7 @@ async def run_debate_phase(
         "ruling": ruling.model_dump(),
         "module_result_count": len(module_results or []),
         "failures": failure_log,
+        "focused_debate_triggered": needs_focused_debate,
     }
     return DebatePhaseResult(
         critiques=round1_critiques,

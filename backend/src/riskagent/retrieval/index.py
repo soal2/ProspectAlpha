@@ -46,6 +46,7 @@ class ChunkSearchResult:
     vector_score: float = 0.0
     text_score: float = 0.0
     score: float = 0.0
+    content_sha256: str = ""
 
 
 class ChunkIndexer(Protocol):
@@ -196,6 +197,7 @@ CREATE TABLE IF NOT EXISTS {schema_sql}.prospectus_chunks (
     mineru_img_path      TEXT,
     table_html           TEXT,
     metadata             JSONB DEFAULT '{{}}',
+    content_sha256       TEXT NOT NULL DEFAULT '',
     created_at           TIMESTAMPTZ DEFAULT NOW()
 )
             """
@@ -212,6 +214,7 @@ CREATE INDEX IF NOT EXISTS prospectus_chunks_embedding_hnsw
             """
         )
         cur.execute(f"CREATE INDEX IF NOT EXISTS prospectus_chunks_tsv_gin ON {schema_sql}.prospectus_chunks USING GIN (content_tsv)")
+        cur.execute(f"CREATE INDEX IF NOT EXISTS prospectus_chunks_sha256_idx ON {schema_sql}.prospectus_chunks (content_sha256)")
         cur.execute(
             f"""
 CREATE OR REPLACE FUNCTION {schema_sql}.update_prospectus_chunk_tsv()
@@ -231,6 +234,30 @@ BEFORE INSERT OR UPDATE ON {schema_sql}.prospectus_chunks
 FOR EACH ROW EXECUTE FUNCTION {schema_sql}.update_prospectus_chunk_tsv()
             """
         )
+    conn.commit()
+
+
+def ensure_content_sha256_column(*, schema: str, conn) -> None:
+    """Add content_sha256 column to existing prospectus_chunks table if missing."""
+    schema_sql = _quote_ident(schema)
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = %s AND table_name = 'prospectus_chunks' AND column_name = 'content_sha256'
+            """,
+            (schema,),
+        )
+        if cur.fetchone() is None:
+            cur.execute(
+                f"ALTER TABLE {schema_sql}.prospectus_chunks "
+                f"ADD COLUMN content_sha256 TEXT NOT NULL DEFAULT ''"
+            )
+            cur.execute(
+                f"CREATE INDEX IF NOT EXISTS prospectus_chunks_sha256_idx "
+                f"ON {schema_sql}.prospectus_chunks (content_sha256)"
+            )
     conn.commit()
 
 
@@ -260,6 +287,7 @@ class PostgresChunkIndexer:
                 embedding_dim=self.embedding_dim,
                 text_search_config=self.text_search_config,
             )
+            ensure_content_sha256_column(schema=self.schema, conn=self.conn)
 
     def close(self) -> None:
         if self.owns_connection:
@@ -566,8 +594,8 @@ ON CONFLICT (document_id) DO UPDATE SET
 INSERT INTO {schema_sql}.prospectus_chunks
     (chunk_id, document_id, doc_key, chunk_type, text, embedding, page_idx,
      source_file, source_item_indices, bbox_refs, merged_bboxes, image_path,
-     mineru_img_path, table_html, metadata)
-VALUES (%s, %s, %s, %s, %s, %s::vector, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s, %s, %s, %s::jsonb)
+     mineru_img_path, table_html, metadata, content_sha256)
+VALUES (%s, %s, %s, %s, %s, %s::vector, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s, %s, %s, %s::jsonb, %s)
 ON CONFLICT (chunk_id) DO UPDATE SET
     document_id = EXCLUDED.document_id,
     doc_key = EXCLUDED.doc_key,
@@ -582,7 +610,8 @@ ON CONFLICT (chunk_id) DO UPDATE SET
     image_path = EXCLUDED.image_path,
     mineru_img_path = EXCLUDED.mineru_img_path,
     table_html = EXCLUDED.table_html,
-    metadata = EXCLUDED.metadata
+    metadata = EXCLUDED.metadata,
+    content_sha256 = EXCLUDED.content_sha256
                     """,
                     (
                         chunk.chunk_id,
@@ -600,6 +629,7 @@ ON CONFLICT (chunk_id) DO UPDATE SET
                         chunk.mineru_img_path,
                         chunk.table_html,
                         json.dumps(chunk.metadata or {}, ensure_ascii=False),
+                        chunk.content_sha256,
                     ),
                 )
 
@@ -627,7 +657,8 @@ merged_bboxes,
 image_path,
 mineru_img_path,
 table_html,
-metadata
+metadata,
+content_sha256
 """
 
 
@@ -659,6 +690,7 @@ def _chunk_from_dict(payload: dict[str, Any]) -> DocumentChunk:
         mineru_img_path=payload.get("mineru_img_path"),
         table_html=payload.get("table_html"),
         metadata=payload.get("metadata") or {},
+        content_sha256=payload.get("content_sha256", ""),
     )
 
 
@@ -678,6 +710,7 @@ def _search_result(row: Any) -> ChunkSearchResult:
         mineru_img_path,
         table_html,
         metadata,
+        content_sha256,
         vector_score,
         text_score,
         score,
@@ -697,6 +730,7 @@ def _search_result(row: Any) -> ChunkSearchResult:
         mineru_img_path=mineru_img_path,
         table_html=table_html,
         metadata=metadata if isinstance(metadata, dict) else {},
+        content_sha256=str(content_sha256 or ""),
         vector_score=float(vector_score or 0.0),
         text_score=float(text_score or 0.0),
         score=float(score or 0.0),
