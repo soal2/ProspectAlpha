@@ -9,6 +9,7 @@ import os
 from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import HTMLResponse, StreamingResponse
 
+from riskagent.reporting import ensure_risk_report_html
 from riskagent.analysis_runs import (
     AnalysisRun,
     AnalysisRunCreate,
@@ -307,19 +308,46 @@ def get_analysis_report(run_id: str) -> ReportDraft:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found") from exc
 
 
+@router.get("/{run_id}/report.html")
+def get_analysis_report_html(run_id: str, download: bool = False) -> HTMLResponse:
+    """Serve the standalone HTML report. ``/report.html`` is the public URL."""
+
+    return _analysis_report_html_response(run_id, download=download)
+
+
 @router.get("/{run_id}/report/artifact")
 def download_analysis_report_artifact(run_id: str, download: bool = False) -> HTMLResponse:
+    return _analysis_report_html_response(run_id, download=download)
+
+
+def _analysis_report_html_response(run_id: str, *, download: bool) -> HTMLResponse:
     try:
         run = _repo().get(run_id)
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found") from exc
     if run.status != "completed":
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Run status is {run.status}, not completed")
-    if run.report is None or not run.report.html:
+    if run.report is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report artifact not found")
+    html = ensure_risk_report_html(
+        company_name=run.company_name,
+        run_id=run.run_id,
+        report_id=run.report.report_id,
+        created_at=run.report.created_at,
+        risk_level=run.report.overall_risk_level,
+        html=run.report.html,
+        summary=run.report.summary,
+        markdown=run.report.markdown,
+        themes=run.report.themes,
+        exploratory_findings=run.report.exploratory_findings,
+        counterevidence=run.report.counterevidence,
+        limitations=run.report.limitations,
+        evidence_index=run.report.evidence_index,
+    )
+    run.report.html = html
     disposition = "attachment" if download else "inline"
     return HTMLResponse(
-        content=run.report.html,
+        content=html,
         headers={
             "Content-Disposition": f"{disposition}; filename=risk-report-{run_id}.html",
             "X-Content-Type-Options": "nosniff",

@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 from riskagent.parsing import (
@@ -476,6 +477,21 @@ chunker:
 
     assert settings.pdf_processor.device == "cuda:2"
     assert request.device == "cuda:2"
+
+
+def test_mineru_model_source_uses_canonical_name(monkeypatch):
+    monkeypatch.setenv("MINERU_MODEL_SOURCE", "modelscope")
+    monkeypatch.setenv("MINER_MODEL_SOURCE", "huggingface")
+
+    assert mineru_runtime_health()["model_source"] == "modelscope"
+
+
+def test_legacy_miner_model_source_alias_is_promoted(monkeypatch):
+    monkeypatch.delenv("MINERU_MODEL_SOURCE", raising=False)
+    monkeypatch.setenv("MINER_MODEL_SOURCE", "modelscope")
+
+    assert mineru_runtime_health()["model_source"] == "modelscope"
+    assert os.environ["MINERU_MODEL_SOURCE"] == "modelscope"
 
 
 def test_mineru_health_detects_modelscope_models_directory(tmp_path, monkeypatch):

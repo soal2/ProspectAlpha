@@ -121,5 +121,28 @@ def test_report_artifact_rejects_incomplete_or_reportless_run(monkeypatch):
     client = TestClient(create_app())
     monkeypatch.setattr(analysis_api, "_repo", lambda: _ReportRepository(_run(status="risk_identification")))
     assert client.get("/analysis-runs/run_report/report/artifact").status_code == 409
+    assert client.get("/analysis-runs/run_report/report.html").status_code == 409
     monkeypatch.setattr(analysis_api, "_repo", lambda: _ReportRepository(_run(with_report=False)))
     assert client.get("/analysis-runs/run_report/report/artifact").status_code == 404
+    assert client.get("/analysis-runs/run_report/report.html").status_code == 404
+
+
+def test_report_html_route_generates_missing_html(monkeypatch):
+    run = _run()
+    assert run.report is not None
+    run.report.html = "  "
+    run.report.summary = "收入连续下滑"
+    monkeypatch.setattr(analysis_api, "_repo", lambda: _ReportRepository(run))
+    client = TestClient(create_app())
+
+    page = client.get("/analysis-runs/run_report/report.html")
+    artifact = client.get("/analysis-runs/run_report/report/artifact")
+    download = client.get("/analysis-runs/run_report/report.html?download=1")
+
+    assert page.status_code == 200
+    assert page.headers["content-type"].startswith("text/html")
+    assert "收入连续下滑" in page.text
+    assert page.text.startswith("<!doctype html>")
+    assert artifact.text == page.text
+    assert download.headers["content-disposition"].startswith("attachment")
+    assert "risk-report-run_report.html" in download.headers["content-disposition"]

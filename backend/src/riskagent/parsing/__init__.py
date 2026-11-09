@@ -23,7 +23,9 @@ from riskagent.parsing.pdf_parser import (
     PdfProcessorFactory,
     process_pdf_with_mineru,
     mineru_runtime_health,
+    resolve_mineru_model_source,
 )
+from riskagent.parsing.table_fallback import content_list_for_chunking
 
 __all__ = [
     "BlockChunker",
@@ -44,4 +46,6 @@ __all__ = [
     "load_rag_pipeline_settings",
     "process_pdf_with_mineru",
     "mineru_runtime_health",
+    "resolve_mineru_model_source",
+    "content_list_for_chunking",
 ]

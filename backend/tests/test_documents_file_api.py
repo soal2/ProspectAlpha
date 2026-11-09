@@ -150,7 +150,10 @@ def test_pdf_upload_defers_blocks_until_page_progress_is_reported(tmp_path) -> N
     assert [item[0] for item in progress] == [1, 2]
     assert all(item[1] == 2 for item in progress)
     assert progress[-1][2] == len(blocks)
-    assert repository.get(asset.document_id).block_count == len(blocks)
+    stored = repository.get(asset.document_id)
+    assert stored.block_count == len(blocks)
+    assert stored.text_chars == sum(len(block.text) for block in blocks)
+    assert stored.text_chars > 0
 
 
 def test_local_object_store_get_bytes(tmp_path) -> None:
@@ -227,9 +230,11 @@ def test_registered_postgres_document_is_visible_without_reparsing(tmp_path) -> 
     assert duplicate_upload.document_id == registration.document_id
 
     listed = repository.list_assets()
-    assert [(item.document_id, item.block_count) for item in listed] == [
-        (registration.document_id, 1)
+    extracted = "真实招股书风险因素"
+    assert [(item.document_id, item.block_count, item.text_chars) for item in listed] == [
+        (registration.document_id, 1, len(extracted))
     ]
+    assert repository.get(registration.document_id).text_chars == len(extracted)
     content, content_type, filename = repository.get_file(registration.document_id)
     assert content == pdf_path.read_bytes()
     assert content_type == "application/pdf"

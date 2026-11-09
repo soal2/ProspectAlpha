@@ -60,7 +60,7 @@ backend/src/riskagent/
 ├── prediction/       # Scorecard and future model service
 ├── backtesting/      # Evaluation and historical validation
 ├── reporting/        # Markdown / HTML / PDF report generation
-├── providers/        # embedding / object_store / vector_store abstractions
+├── providers/        # embedding / object_store abstractions
 ├── workers/          # Analysis task execution (inline + RQ worker)
 ├── database.py       # SQLAlchemy engine / session / Base
 ├── models.py         # Runtime and reference-data ORM
@@ -141,7 +141,7 @@ See `AGENTS.md` for repository-wide collaboration rules.
 | --- | --- | --- |
 | API service | Adopted | FastAPI |
 | Structured data | Adopted | PostgreSQL (prod) / SQLite (default) + SQLAlchemy |
-| Vector retrieval | Adopted | Qdrant (default in-memory, switchable) |
+| Vector retrieval | Adopted | PostgreSQL / pgvector + pg_jieba |
 | Object storage | Adopted | MinIO or local filesystem |
 | Async tasks | Adopted | RQ + Redis |
 | PDF parsing | Adopted | PyMuPDF, pdfplumber, optional OCR |

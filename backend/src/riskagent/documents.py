@@ -36,6 +36,7 @@ from riskagent.parsing import (
     PdfProcessorFactory,
     build_chunk_request,
     build_pdf_process_request,
+    content_list_for_chunking,
     load_rag_pipeline_settings,
 )
 from riskagent.parsing.chunker import BBoxRef, MergedBBox
@@ -304,9 +305,11 @@ class DocumentRepository:
                 registered = session.get(ProspectusDocumentRow, document_id)
             if registered is None:
                 raise KeyError(document_id)
+            block_count, text_chars = self._indexed_chunk_stats(document_id)
             return _asset_from_registered_row(
                 registered,
-                block_count=self._indexed_chunk_count(document_id),
+                block_count=block_count,
+                text_chars=text_chars,
             )
         item = self._load_all().get(document_id)
         if item is None:
@@ -337,8 +340,12 @@ class DocumentRepository:
             seen_ids: set[str] = set()
             seen_hashes: set[str] = set()
             for registered in registered_rows:
-                block_count = self._indexed_chunk_count(registered.document_id)
-                asset = _asset_from_registered_row(registered, block_count=block_count)
+                block_count, text_chars = self._indexed_chunk_stats(registered.document_id)
+                asset = _asset_from_registered_row(
+                    registered,
+                    block_count=block_count,
+                    text_chars=text_chars,
+                )
                 assets.append(asset)
                 seen_ids.add(asset.document_id)
                 seen_hashes.add(asset.file_sha256)
@@ -394,23 +401,30 @@ class DocumentRepository:
                     select(DocumentAssetRow).where(DocumentAssetRow.file_sha256 == file_sha256)
                 )
             if registered is not None:
-                block_count = self._indexed_chunk_count(registered.document_id)
+                block_count, text_chars = self._indexed_chunk_stats(registered.document_id)
                 if block_count > 0:
-                    return _asset_from_registered_row(registered, block_count=block_count)
+                    return _asset_from_registered_row(
+                        registered,
+                        block_count=block_count,
+                        text_chars=text_chars,
+                    )
             return _asset_from_row(row) if row else None
         for item in self._load_all().values():
             if item["file_sha256"] == file_sha256:
                 return DocumentAsset.model_validate(item)
         return None
 
-    def _indexed_chunk_count(self, document_id: str) -> int:
+    def _indexed_chunk_stats(self, document_id: str) -> tuple[int, int]:
+        """Return ``(chunk_count, text_chars)`` for chunks already stored in pgvector."""
+
         indexer = self.chunk_indexer or PostgresChunkIndexer(ensure=False)
         try:
             try:
-                return indexer.indexed_chunk_count(document_id)
+                count = int(indexer.indexed_chunk_count(document_id))
+                return count, _text_chars_from_indexer(indexer, document_id, count)
             except Exception as exc:
                 if "does not exist" in str(exc).lower() or "undefinedtable" in type(exc).__name__.lower():
-                    return 0
+                    return 0, 0
                 raise
         finally:
             if self.chunk_indexer is None:
@@ -604,13 +618,17 @@ def process_prospectus_document(
         if request.enable_image_vlm
         else None
     )
+    chunk_content_list = content_list_for_chunking(
+        content_list_path=parsed.content_list_path,
+        pdf_path=registration.raw_pdf_path,
+    )
     chunked = ChunkerFactory(image_describer=active_image_describer).create(
         settings.chunker.name
     ).chunk(
         build_chunk_request(
             doc_key=registration.doc_key,
             document_id=registration.document_id,
-            content_list_path=parsed.content_list_path,
+            content_list_path=chunk_content_list,
             output_dir=chunk_output_dir,
             settings=settings.chunker,
         )
@@ -935,6 +953,9 @@ def _upsert_asset(session: Session, asset: DocumentAsset) -> None:
 
 
 def _asset_from_row(row: DocumentAssetRow, include_blocks: bool = True) -> DocumentAsset:
+    text_chars = int(row.text_chars or 0)
+    if text_chars <= 0 and row.blocks:
+        text_chars = sum(len(block.text or "") for block in row.blocks)
     return DocumentAsset(
         document_id=row.document_id,
         filename=row.filename,
@@ -943,7 +964,7 @@ def _asset_from_row(row: DocumentAssetRow, include_blocks: bool = True) -> Docum
         storage_uri=row.storage_uri,
         file_size_bytes=row.file_size_bytes,
         page_count=row.page_count,
-        text_chars=row.text_chars,
+        text_chars=text_chars,
         block_count=row.block_count,
         processing_status="ready" if row.block_count > 0 else "uploaded",
         source_url=row.source_url,
@@ -952,10 +973,25 @@ def _asset_from_row(row: DocumentAssetRow, include_blocks: bool = True) -> Docum
     )
 
 
+def _text_chars_from_indexer(indexer: Any, document_id: str, count: int) -> int:
+    """Sum extracted chunk text without requiring a second full chunk load when possible."""
+
+    direct = getattr(indexer, "indexed_text_chars", None)
+    if callable(direct):
+        return max(0, int(direct(document_id) or 0))
+    if count <= 0:
+        return 0
+    listed = getattr(indexer, "list_document_chunks", None)
+    if not callable(listed):
+        return 0
+    return sum(len(str(getattr(chunk, "text", "") or "")) for chunk in listed(document_id))
+
+
 def _asset_from_registered_row(
     row: ProspectusDocumentRow,
     *,
     block_count: int,
+    text_chars: int = 0,
 ) -> DocumentAsset:
     raw_path = Path(row.raw_pdf_path)
     if not raw_path.is_absolute():
@@ -972,7 +1008,7 @@ def _asset_from_registered_row(
         storage_uri=raw_path.as_uri(),
         file_size_bytes=row.file_size_bytes,
         page_count=page_count,
-        text_chars=0,
+        text_chars=max(0, int(text_chars)),
         block_count=block_count,
         processing_status=(
             "ready"

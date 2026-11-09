@@ -174,6 +174,7 @@ def get_document(document_id: str) -> DocumentAsset:
         if isinstance(document, ProspectusRegistration):
             with fitz.open(document.raw_pdf_path) as pdf:
                 page_count = pdf.page_count
+                text_chars = sum(len(page.get_text() or "") for page in pdf)
             return DocumentAsset(
                 document_id=document.document_id,
                 filename=document.original_filename,
@@ -182,7 +183,7 @@ def get_document(document_id: str) -> DocumentAsset:
                 storage_uri=f"/documents/{document.document_id}/file",
                 file_size_bytes=document.file_size_bytes,
                 page_count=page_count,
-                text_chars=0,
+                text_chars=text_chars,
                 block_count=0,
                 source_url=document.source_url,
                 created_at=datetime.now(timezone.utc).isoformat(),

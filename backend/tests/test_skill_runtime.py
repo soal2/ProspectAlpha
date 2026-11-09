@@ -1,3 +1,6 @@
+import pytest
+
+from riskagent.database import BACKEND_ROOT
 from riskagent.skill_docs import build_skill_catalog
 from riskagent.dataset_registry import lookup_subscription_history
 from riskagent.skill_runtime import (
@@ -73,6 +76,14 @@ def test_sentiment_freezes_bocha_results_as_research_artifacts():
     assert artifacts[0]["source_hash"]
 
 
+_IPO_WORKBOOK = BACKEND_ROOT / "skills" / "sentiment_scorer" / "references" / "IPO_data.xlsx"
+_requires_ipo_workbook = pytest.mark.skipif(
+    not _IPO_WORKBOOK.is_file(),
+    reason="IPO_data.xlsx is a local gitignored dataset and is not in this checkout",
+)
+
+
+@_requires_ipo_workbook
 def test_subscription_history_uses_versioned_local_dataset():
     history = lookup_subscription_history("6871")
     assert history is not None
@@ -80,6 +91,7 @@ def test_subscription_history_uses_versioned_local_dataset():
     assert history["subscription_ratio"] == 3713.8495
 
 
+@_requires_ipo_workbook
 def test_sentiment_matches_local_history_without_structured_fallback():
     handler = SentimentScorerHandler(_FakeBocha())
     result = handler.invoke(
@@ -93,6 +105,7 @@ def test_sentiment_matches_local_history_without_structured_fallback():
     assert result.result["subscription_heat"]["stock_code"] == "6871.HK"
 
 
+@_requires_ipo_workbook
 def test_valuation_uses_versioned_historical_peers_by_industry():
     result = ValuationCheckerHandler().invoke(
         _invocation(

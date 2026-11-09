@@ -335,6 +335,19 @@ class PostgresChunkIndexer:
             row = cur.fetchone()
         return int(row[0]) if row else 0
 
+    def indexed_text_chars(self, document_id: str) -> int:
+        """Character length of extracted chunk text for one indexed prospectus."""
+
+        schema_sql = _quote_ident(self.schema)
+        with self.conn.cursor() as cur:
+            cur.execute(
+                f"SELECT COALESCE(SUM(CHAR_LENGTH(text)), 0) "
+                f"FROM {schema_sql}.prospectus_chunks WHERE document_id = %s",
+                (document_id,),
+            )
+            row = cur.fetchone()
+        return int(row[0] or 0) if row else 0
+
     def list_document_chunks(self, document_id: str) -> list[ChunkSearchResult]:
         """Return already-indexed chunks without embedding or ranking calls."""
         schema_sql = _quote_ident(self.schema)

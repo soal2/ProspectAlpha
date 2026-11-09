@@ -142,6 +142,9 @@ def create_app() -> FastAPI:
             parser_health["model_cache_present"],
             parser_health["message"],
         )
+        # Unit tests set this so importing the app never calls a live embedding API.
+        if os.getenv("PROSPECTALPHA_SKIP_DOTENV") == "1":
+            return
         embedding_key = (
             os.getenv("EMBEDDING_API_KEY", "").strip()
             or os.getenv("DASHSCOPE_API_KEY", "").strip()

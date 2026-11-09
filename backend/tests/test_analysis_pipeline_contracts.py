@@ -166,6 +166,9 @@ def test_analysis_api_exposes_minimal_pipeline_resources(
     )
     assert document_response.status_code == 201
     document = document_response.json()
+    assert document["text_chars"] == len(
+        "风险因素\n招股书披露对赌、赎回、关联交易和供应商集中度风险。"
+    )
     assert set(document) == {
         "document_id",
         "filename",
@@ -208,7 +211,9 @@ def test_analysis_api_exposes_minimal_pipeline_resources(
     assert response.status_code == 201
     payload = response.json()
     assert "input_payload" not in payload
-    assert payload["rule_snapshot"]["totals"]["rule_count"] == 147
+    assert payload["rule_snapshot"]["totals"]["rule_count"] == (
+        _rule_repo().load().totals["rule_count"]
+    )
     assert payload["status"] == "ready"
     assert payload["findings"] == []
 
