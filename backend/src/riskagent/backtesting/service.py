@@ -1,4 +1,10 @@
-"""Versioned IPO outcome labels, scorecard and backtest services."""
+"""Versioned IPO outcome labels and backtest services.
+
+The hidden-first scorecard lives in ``riskagent.prediction``.
+``calculate_hidden_first_score``, ``SCORECARD_VERSION``, ``WEIGHT_PROFILE``,
+``SEVERITY_FACTORS``, ``EVIDENCE_FACTORS`` and ``_score_bucket`` stay
+importable here for existing callers.
+"""
 
 from __future__ import annotations
 
@@ -19,8 +25,17 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
-from riskagent.common.risk_levels import RiskLevel as _RISK_LEVELS_ENUM, score_to_risk_level
+from riskagent.common.risk_levels import RiskLevel as _RISK_LEVELS_ENUM
 from riskagent.database import Base, SessionLocal, init_db
+from riskagent.prediction import (  # aliases: implementation lives in prediction/
+    EVIDENCE_FACTORS,
+    SCORECARD_VERSION,
+    SEVERITY_FACTORS,
+    WEIGHT_PROFILE,
+    calculate_hidden_first_score,
+    hidden_first_scorecard,
+    score_bucket as _score_bucket,
+)
 from riskagent.models import (
     BacktestCandidateSampleRow,
     BacktestCandidateSetRow,
@@ -37,10 +52,6 @@ from riskagent.models import (
 from riskagent.research import HypothesisResearchModule
 from riskagent.reporting import render_backtest_audit_html
 
-SCORECARD_VERSION = "ipo-risk-v2-hidden-first"
-WEIGHT_PROFILE = {"D1": 15.0, "D2": 30.0, "D3": 35.0, "EXT": 20.0}
-SEVERITY_FACTORS = {"high": 1.0, "medium": 0.67, "low": 0.33}
-EVIDENCE_FACTORS = {"direct": 1.0, "inferential": 0.75, "lead": 0.5, "contradicted": 0.0}
 HORIZONS = (1, 5, 20, 60)
 LISTING_DATE_TOLERANCE_DAYS = 3
 _RISK_LEVELS = tuple(_RISK_LEVELS_ENUM)
@@ -178,76 +189,6 @@ def _code(value: str | None) -> str:
 
 def _date_key(value: str | None) -> str:
     return re.sub(r"[^0-9]", "", str(value or ""))[:8]
-
-
-def _score_bucket(item: dict[str, Any]) -> str:
-    dimension = str(item.get("dimension_code") or "").upper()
-    origin = str(item.get("origin") or "rule")
-    if dimension == "EXT":
-        return "EXT"
-    if dimension == "D3" or origin == "text_signal":
-        return "D3"
-    if dimension == "D1" or any(term in dimension for term in ("FIN", "CASHFLOW", "ACCOUNT")):
-        return "D1"
-    return "D2"
-
-
-def calculate_hidden_first_score(findings: list[dict[str, Any]]) -> dict[str, Any]:
-    """Pure v2 scorecard calculation; confidence is intentionally ignored."""
-
-    raw: dict[str, list[float]] = {key: [] for key in WEIGHT_PROFILE}
-    for item in findings:
-        bucket = _score_bucket(item)
-        if str(item.get("hypothesis_status") or "") == "refuted":
-            factor = 0.0
-        elif bucket == "EXT":
-            status = str(item.get("hypothesis_status") or "")
-            factor = (
-                1.0
-                if status == "corroborated" and not item.get("counter_evidence_ids")
-                else 0.5
-                if status == "disputed"
-                or (item.get("external_evidence_ids") and item.get("counter_evidence_ids"))
-                else 0.0
-            )
-        else:
-            factor = SEVERITY_FACTORS.get(
-                str(item.get("severity") or "").lower(), 0.0
-            ) * EVIDENCE_FACTORS.get(
-                str(item.get("evidence_grade") or "direct"), 0.0
-            )
-        raw[bucket].append(factor)
-    contributions = {
-        bucket: round(
-            weight * min(1.0, sum(sorted(raw[bucket], reverse=True)[:3]) / 3),
-            2,
-        )
-        for bucket, weight in WEIGHT_PROFILE.items()
-    }
-    baseline_d1 = round(
-        100 * min(1.0, sum(sorted(raw["D1"], reverse=True)[:3]) / 3),
-        2,
-    )
-    total = round(sum(contributions.values()), 2)
-    limitations = (
-        ["未取得上市前独立外部共振证据；EXT 贡献为 0，不按中性值填补。"]
-        if contributions["EXT"] == 0
-        else []
-    )
-    return {
-        "score": total,
-        "risk_level": score_to_risk_level(total).value,
-        "breakdown": {
-            **contributions,
-            "baseline_d1": baseline_d1,
-            "without_d2": round(total - contributions["D2"], 2),
-            "without_d3": round(total - contributions["D3"], 2),
-            "without_ext": round(total - contributions["EXT"], 2),
-        },
-        "limitations": limitations,
-        "scorecard_version": SCORECARD_VERSION,
-        "weight_profile": WEIGHT_PROFILE,
-    }
 
 
 def _date_gap(start: str, end: str) -> int | None:
@@ -459,7 +400,21 @@ class BacktestService:
         text_signal_snapshot: dict[str, Any] | None = None,
         research_snapshot_ids: list[str] | None = None,
     ) -> dict[str, Any]:
-        result = calculate_hidden_first_score(findings)
+        """Score admitted findings and persist the numeric snapshot.
+
+        The returned payload keeps the historical score fields and adds
+        ``components`` plus ``rule_contributions`` for evidence display.
+        The stored breakdown stays the numeric legacy shape.
+        """
+
+        explained = hidden_first_scorecard().score(
+            findings,
+            features={
+                "industry_profile": industry_profile or {},
+                "text_signal_snapshot": text_signal_snapshot or {},
+            },
+        )
+        result = explained.as_legacy_dict()
         with self.session_factory() as session:
             session.merge(
                 RiskScoreSnapshotRow(
@@ -483,7 +438,7 @@ class BacktestService:
                 )
             )
             session.commit()
-        return result
+        return explained.as_dict()
 
     def score_for_analysis_run(self, run: Any) -> dict[str, Any]:
         """Freeze a report's explainable score using only its frozen inputs/findings."""

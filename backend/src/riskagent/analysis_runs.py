@@ -3973,16 +3973,14 @@ def _report_sections(markdown: str) -> list[dict[str, str]]:
 
 
 def _overall_risk_level(findings: list[RiskFinding]) -> str:
-    """Apply the same deterministic hidden-first scorecard used by backtesting."""
+    """Apply the deterministic hidden-first scorecard owned by prediction."""
     if not findings:
         return "unrated"
-    from riskagent.backtesting.service import calculate_hidden_first_score
+    from riskagent.prediction import hidden_first_scorecard
 
-    return str(
-        calculate_hidden_first_score(
-            [finding.model_dump(mode="json") for finding in findings]
-        )["risk_level"]
-    )
+    return hidden_first_scorecard().score(
+        [finding.model_dump(mode="json") for finding in findings]
+    ).risk_level
 
 
 def _research_artifacts_from_modules(
