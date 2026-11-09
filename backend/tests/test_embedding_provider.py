@@ -61,7 +61,7 @@ def test_create_embedding_client_rejects_unknown_provider():
 
 
 def test_dashscope_embedding_client_real_call():
-    api_key = os.getenv("DASHSCOPE_API_KEY")
+    api_key = os.getenv("DASHSCOPE_API_KEY", "").strip()
     if not api_key:
         pytest.skip("DASHSCOPE_API_KEY is required for the real DashScope embedding call.")
 
@@ -72,7 +72,13 @@ def test_dashscope_embedding_client_real_call():
         api_key=api_key,
     )
 
-    embeddings = client.encode([input_texts, input_texts2])
+    try:
+        embeddings = client.encode([input_texts, input_texts2])
+    except EmbeddingConfigError as exc:
+        message = str(exc)
+        if any(token in message for token in ("status=401", "InvalidApiKey", "Unauthorized")):
+            pytest.skip(f"DASHSCOPE_API_KEY is not usable: {message}")
+        raise
 
     assert len(embeddings) == 2
     assert embeddings[0]

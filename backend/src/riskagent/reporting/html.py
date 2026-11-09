@@ -19,6 +19,55 @@ a{color:#2563eb;word-break:break-all}.grid{display:grid;grid-template-columns:re
 """
 
 
+def ensure_risk_report_html(
+    *,
+    company_name: str,
+    run_id: str,
+    report_id: str,
+    created_at: str,
+    risk_level: str,
+    html: str = "",
+    summary: str = "",
+    markdown: str = "",
+    themes: list[Any] | None = None,
+    exploratory_findings: list[Any] | None = None,
+    counterevidence: list[Any] | None = None,
+    limitations: list[Any] | None = None,
+    evidence_index: list[Any] | None = None,
+) -> str:
+    """Return stored HTML, or render it from the persisted report fields.
+
+    Completed runs always keep markdown and the structured report envelope.
+    Older rows can have an empty ``html`` field; this rebuilds a standalone
+    page from those fields and does not call a model.
+    """
+
+    if html and html.strip():
+        return html
+    document = {
+        "summary": (summary or "").strip() or _plain_markdown(markdown),
+        "themes": themes or [],
+        "exploratory_findings": exploratory_findings or [],
+        "counterevidence": counterevidence or [],
+        "limitations": limitations or ["无额外限制。"],
+        "evidence_index": evidence_index or [],
+    }
+    return render_risk_report_html(
+        company_name=company_name,
+        run_id=run_id,
+        report_id=report_id,
+        created_at=created_at,
+        risk_level=risk_level,
+        document=document,
+    )
+
+
+def _plain_markdown(markdown: str) -> str:
+    lines = [line for line in (markdown or "").splitlines() if not line.startswith("#")]
+    text = "\n".join(lines).strip()
+    return text or (markdown or "").strip() or "未提供。"
+
+
 def render_risk_report_html(*, company_name: str, run_id: str, report_id: str, created_at: str, risk_level: str, document: dict[str, Any]) -> str:
     """Render a persisted risk-report document without invoking model code."""
 

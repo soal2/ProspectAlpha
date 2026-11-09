@@ -146,6 +146,8 @@ analysis_runs 状态机（analysis_runs.py）
 | `DOCUMENT_PARSING_TASK_TIMEOUT_SECONDS` | 单个 MinerU 子进程最长运行时间，超时后终止并标记为可恢复中断 |
 | `DOCUMENT_PARSING_CPU_THREADS` | CPU 推理时每个解析进程的 OMP/MKL 线程数，默认 `2` |
 | `DOCUMENT_QUEUE_NAME` | RQ 文档解析队列名，默认 `documents` |
+| `MINERU_MODEL_SOURCE` | MinerU 模型源：`auto`、`huggingface` 或 `modelscope`。名称是 `MINERU_MODEL_SOURCE`；旧名 `MINER_MODEL_SOURCE` 只作为别名 |
+| `MINERU_TABLE_ENABLE` | `true` 时使用 MinerU 表格模型；`false` 时改用 pdfplumber / PyMuPDF 抽取表格 |
 | `MINERU_DEVICE` | `auto`、`cpu`、`mps`、`cuda` 或 `cuda:<index>`；Apple Silicon Mac 建议 `mps`，NVIDIA 部署建议 `cuda` |
 | `MINERU_CUDA_DEVICE` | 当 `MINERU_DEVICE=cuda` 时使用的逻辑设备号，默认 `0` |
 | `MINERU_CUDA_VISIBLE_DEVICES` | 可选，传给独立解析进程的 `CUDA_VISIBLE_DEVICES` |

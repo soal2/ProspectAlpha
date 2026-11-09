@@ -150,7 +150,10 @@ def test_pdf_upload_defers_blocks_until_page_progress_is_reported(tmp_path) -> N
     assert [item[0] for item in progress] == [1, 2]
     assert all(item[1] == 2 for item in progress)
     assert progress[-1][2] == len(blocks)
-    assert repository.get(asset.document_id).block_count == len(blocks)
+    stored = repository.get(asset.document_id)
+    assert stored.block_count == len(blocks)
+    assert stored.text_chars == sum(len(block.text) for block in blocks)
+    assert stored.text_chars > 0
 
 
 def test_local_object_store_get_bytes(tmp_path) -> None:
@@ -227,9 +230,11 @@ def test_registered_postgres_document_is_visible_without_reparsing(tmp_path) -> 
     assert duplicate_upload.document_id == registration.document_id
 
     listed = repository.list_assets()
-    assert [(item.document_id, item.block_count) for item in listed] == [
-        (registration.document_id, 1)
+    extracted = "真实招股书风险因素"
+    assert [(item.document_id, item.block_count, item.text_chars) for item in listed] == [
+        (registration.document_id, 1, len(extracted))
     ]
+    assert repository.get(registration.document_id).text_chars == len(extracted)
     content, content_type, filename = repository.get_file(registration.document_id)
     assert content == pdf_path.read_bytes()
     assert content_type == "application/pdf"
@@ -282,9 +287,22 @@ def test_run_evidence_backfills_document_id_from_block_id() -> None:
     assert mineru.bbox_coordinate_space == "normalized_1000"
 
 
+def _wait_for_status(client: TestClient, run_id: str, expected: str) -> dict:
+    last: dict = {}
+    for _ in range(200):
+        last = client.get(f"/analysis-runs/{run_id}").json()
+        if last.get("status") == expected:
+            return last
+        if last.get("status") == "failed":
+            raise AssertionError(last.get("error_summary") or last)
+        time.sleep(0.1)
+    raise AssertionError(f"analysis run did not reach {expected}: {last.get('status')}")
+
+
 def test_pipeline_evidence_carries_document_id(
     tmp_path, monkeypatch, analysis_repo_factory
 ) -> None:
+    monkeypatch.setenv("ANALYSIS_API_EXECUTION_MODE", "inline")
     monkeypatch.setenv("ANALYSIS_RUNS_PATH", str(tmp_path / "runs.yaml"))
     monkeypatch.setenv("EVIDENCE_LIBRARY_PATH", str(tmp_path / "evidence_library.yaml"))
     monkeypatch.setenv("DOCUMENTS_PATH", str(tmp_path / "documents.yaml"))
@@ -321,23 +339,12 @@ def test_pipeline_evidence_carries_document_id(
     ).json()["run_id"]
     proposed = client.post(f"/analysis-runs/{run_id}/start").json()
     assert proposed["status"] in {"queued", "awaiting_industry_confirmation"}
-    for _ in range(200):
-        current = client.get(f"/analysis-runs/{run_id}").json()
-        if current["status"] == "awaiting_industry_confirmation":
-            break
-        time.sleep(0.1)
-    else:
-        raise AssertionError("analysis run did not reach industry confirmation")
+    _wait_for_status(client, run_id, "awaiting_industry_confirmation")
     client.post(
         f"/analysis-runs/{run_id}/industry-profile/confirm",
         json={},
     )
-    for _ in range(200):
-        if client.get(f"/analysis-runs/{run_id}").json()["status"] == "completed":
-            break
-        time.sleep(0.1)
-    else:
-        raise AssertionError("analysis run did not complete")
+    _wait_for_status(client, run_id, "completed")
 
     evidence = client.get(f"/analysis-runs/{run_id}/evidence").json()
     assert evidence
