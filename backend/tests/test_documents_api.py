@@ -36,6 +36,35 @@ def _registration(tmp_path: Path) -> ProspectusRegistration:
     )
 
 
+def test_registration_metadata_counts_extractable_text(tmp_path, monkeypatch):
+    pdf_path = tmp_path / "prospectus.pdf"
+    with fitz.open() as pdf:
+        page = pdf.new_page()
+        page.insert_text((72, 72), "Risk Factors: supplier concentration", fontsize=11)
+        pdf.save(pdf_path)
+    with fitz.open(pdf_path) as pdf:
+        expected_chars = sum(len(page.get_text() or "") for page in pdf)
+    registration = ProspectusRegistration(
+        document_id="doc_text",
+        doc_key="text",
+        original_filename="prospectus.pdf",
+        raw_pdf_path=pdf_path,
+        content_type="application/pdf",
+        file_sha256="hash",
+        file_size_bytes=pdf_path.stat().st_size,
+        source_url=None,
+        status="registered",
+    )
+    monkeypatch.setattr(
+        "riskagent.api.documents._repo", lambda: _DocumentRepository(registration)
+    )
+
+    payload = TestClient(create_app()).get("/documents/doc_text").json()
+
+    assert expected_chars > 0
+    assert payload["text_chars"] == expected_chars
+
+
 def test_document_metadata_and_pdf_routes(tmp_path, monkeypatch):
     registration = _registration(tmp_path)
     monkeypatch.setattr(

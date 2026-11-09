@@ -38,13 +38,9 @@ services:
           type: keyvalue
           name: prospectalpha-redis
           property: connectionString
-      - key: QDRANT_HOSTPORT
-        fromService:
-          type: pserv
-          name: prospectalpha-qdrant
-          property: hostport
-      - key: VECTOR_STORE_PROVIDER
-        value: qdrant
+      # Prospectus vectors live in prospectalpha-postgres via pgvector.
+      - key: MINERU_MODEL_SOURCE
+        value: auto
       - key: MINIO_ENDPOINT
         fromService:
           type: pserv
@@ -95,18 +91,6 @@ services:
     maxmemoryPolicy: noeviction
     persistenceMode: journal-snapshot
     ipAllowList: []
-
-  - type: pserv
-    name: prospectalpha-qdrant
-    runtime: image
-    region: singapore
-    plan: starter
-    image:
-      url: docker.io/qdrant/qdrant:v1.12.1
-    disk:
-      name: qdrant-data
-      mountPath: /qdrant/storage
-      sizeGB: 10
 
   - type: pserv
     name: prospectalpha-minio

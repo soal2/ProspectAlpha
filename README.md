@@ -8,7 +8,7 @@ ProspectAlpha 是一个面向港股 IPO 的可解释 RiskAgent 系统，用于�
 
 推送到 `master` 后，`.github/workflows/deploy-frontend-pages.yml` 会将前端发布到 GitHub Pages。首次使用前，请在仓库 **Settings → Pages** 将 Source 设为 **GitHub Actions**。后端 Render 服务完成首个部署后，在 **Settings → Secrets and variables → Actions → Variables** 新建仓库变量 `VITE_API_BASE_URL`，值为 Render API 的公开 HTTPS 地址（不要以 `/` 结尾），然后手动运行一次 `Deploy frontend to GitHub Pages` 工作流。
 
-后端由根目录 [`render.yaml`](render.yaml) 定义：Render 会创建 FastAPI 与 RQ Worker 共用的 Web Service、Postgres、Redis 兼容 Key Value、私有 Qdrant 和私有 MinIO。创建 Blueprint 时，Render 会要求填写 OpenAI 兼容模型与嵌入服务的地址、模型名和密钥；这些机密不提交到仓库。部署完成后的访问地址为 `https://soal2.github.io/ProspectAlpha/`。GitHub Pages/Actions 只能托管静态前端，不能运行 FastAPI、RQ、Redis 或数据库。
+后端由根目录 [`render.yaml`](render.yaml) 定义：Render 会创建 FastAPI 与 RQ Worker 共用的 Web Service、启用 pgvector 的 Postgres、Redis 兼容 Key Value 和私有 MinIO。招股书向量写入该 Postgres 的 pgvector 扩展。创建 Blueprint 时，Render 会要求填写 OpenAI 兼容模型与嵌入服务的地址、模型名和密钥；这些机密不提交到仓库。部署完成后的访问地址为 `https://soal2.github.io/ProspectAlpha/`。GitHub Pages/Actions 只能托管静态前端，不能运行 FastAPI、RQ、Redis 或数据库。
 
 ![项目全景图](assets/项目全景图.png)
 
@@ -55,7 +55,7 @@ backend/src/riskagent/
 ├── prediction/       # 规则评分卡与后续模型服务
 ├── backtesting/      # 回测评估与历史验证
 ├── reporting/        # Markdown / HTML / PDF 报告生成
-├── providers/        # embedding / object_store / vector_store 抽象
+├── providers/        # embedding / object_store 抽象
 ├── workers/          # 分析任务执行（inline + RQ worker）
 ├── database.py       # SQLAlchemy 引擎 / 会话 / Base
 ├── models.py         # 运行时与参考数据 ORM
@@ -119,7 +119,7 @@ IPO 风险结论只有在复核人员能看到原始依据时才有价值。Pros
 | --- | --- | --- |
 | API 服务 | 已采用 | FastAPI |
 | 结构化数据 | 已采用 | PostgreSQL（生产）/ SQLite（默认）+ SQLAlchemy |
-| 向量检索 | 已采用 | Qdrant（默认 in-memory，可切换） |
+| 向量检索 | 已采用 | PostgreSQL / pgvector + pg_jieba |
 | 对象存储 | 已采用 | MinIO 或本地文件系统 |
 | 异步任务 | 已采用 | RQ + Redis |
 | PDF 解析 | 已采用 | PyMuPDF、pdfplumber、可选 OCR |

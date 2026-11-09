@@ -122,11 +122,27 @@ class PdfProcessorFactory:
         return processor()
 
 
+def resolve_mineru_model_source() -> str:
+    """Return the MinerU model source using the canonical env var name.
+
+    ``MINERU_MODEL_SOURCE`` is the name MinerU and this service both read.
+    ``MINER_MODEL_SOURCE`` is accepted only as a legacy alias and is copied onto
+    the canonical variable so downstream MinerU calls see one setting.
+    """
+
+    canonical = os.getenv("MINERU_MODEL_SOURCE", "").strip()
+    legacy = os.getenv("MINER_MODEL_SOURCE", "").strip()
+    source = canonical or legacy or "auto"
+    if not canonical and legacy:
+        os.environ["MINERU_MODEL_SOURCE"] = legacy
+    return source.lower() or "auto"
+
+
 def mineru_runtime_health() -> dict[str, object]:
     """Return a non-networking readiness check for the local MinerU runtime."""
 
     installed = find_spec("mineru") is not None
-    model_source = os.getenv("MINERU_MODEL_SOURCE", "auto").strip().lower() or "auto"
+    model_source = resolve_mineru_model_source()
     device = os.getenv("MINERU_DEVICE", "auto").strip().lower() or "auto"
     if device == "cuda":
         device = f"cuda:{os.getenv('MINERU_CUDA_DEVICE', '0').strip() or '0'}"
@@ -274,6 +290,7 @@ def _run_mineru(
 
 
 def _apply_mineru_env(output_dir: Path) -> None:
+    resolve_mineru_model_source()
     cache_dir = output_dir / ".cache"
     env_defaults = {
         "MPLCONFIGDIR": str(cache_dir / "matplotlib"),
