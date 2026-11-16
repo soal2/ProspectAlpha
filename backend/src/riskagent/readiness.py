@@ -9,11 +9,14 @@ from __future__ import annotations
 
 from riskagent.migrations import current_revision, head_revision, rag_status
 from riskagent.workers.heartbeat import (
-    HEARTBEAT_KEY,
     execution_modes,
-    read_heartbeat,
+    heartbeat_is_fresh,
+    heartbeat_key,
     redis_required,
+    required_queue_names,
 )
+
+_PUBLIC_CHECKS = ("schema", "rag", "redis", "worker")
 
 
 def readiness_report(
@@ -96,16 +99,39 @@ def readiness_report(
                 }
                 return {"ready": False, "checks": checks}
         checks["redis"] = {"status": "ok"}
-        heartbeat = read_heartbeat(client)
-        if not heartbeat:
-            checks["worker"] = {
-                "status": "failed",
-                "detail": (
-                    f"已配置 RQ。启动脚本会拉起 worker，但 Redis 键 {HEARTBEAT_KEY} "
-                    "还没有新鲜心跳。这不表示部署里没有 worker 进程。"
-                ),
-            }
+        worker_check = _worker_check(client, required_queue_names(selected_modes))
+        checks["worker"] = worker_check
+        if worker_check["status"] != "ok":
             ready = False
-        else:
-            checks["worker"] = {"status": "ok", "heartbeat_at": heartbeat}
     return {"ready": ready, "checks": checks}
+
+
+def public_readiness_body(report: dict[str, object]) -> dict[str, object]:
+    """Probe body with statuses only. No exception text, URLs, or heartbeat payloads."""
+
+    checks = report.get("checks") if isinstance(report.get("checks"), dict) else {}
+    public_checks: dict[str, str] = {}
+    for name in _PUBLIC_CHECKS:
+        item = checks.get(name) if isinstance(checks, dict) else None
+        status = item.get("status") if isinstance(item, dict) else None
+        public_checks[name] = str(status or "unknown")
+    return {"ready": bool(report.get("ready")), "checks": public_checks}
+
+
+def _worker_check(client, queues: list[str]) -> dict[str, object]:
+    stale: list[str] = []
+    for queue_name in queues:
+        raw = client.get(heartbeat_key(queue_name))
+        if not heartbeat_is_fresh(raw, queue_name=queue_name):
+            stale.append(queue_name)
+    if stale:
+        return {
+            "status": "failed",
+            "queues": stale,
+            "detail": (
+                "已配置 RQ。启动脚本会拉起 worker，但这些队列没有未过期心跳："
+                + "、".join(stale)
+                + "。这不表示部署里没有 worker 进程。"
+            ),
+        }
+    return {"status": "ok", "queues": queues}

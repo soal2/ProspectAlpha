@@ -113,19 +113,21 @@ def create_app() -> FastAPI:
     def ready():
         """Schema and configured worker readiness.
 
-        ``/health`` stays the public minimal liveness probe. The auth stream
-        currently exempts only ``/health``. If that change merges, ``/ready``
-        will require the bearer token unless that stream also exempts it.
-        A deployment probe that cannot send the token needs that exemption;
-        this process does not change the auth rules.
+        The JSON body is only ``ready`` plus ``ok`` / ``failed`` /
+        ``not_required`` statuses. It is safe for an unauthenticated probe.
+        ``/health`` remains liveness and does not read Redis. This route does
+        not change auth rules; the other stream can exempt ``/ready`` the same
+        way as ``/health``.
         """
 
-        from riskagent.readiness import readiness_report
+        from riskagent.readiness import public_readiness_body, readiness_report
 
         report = readiness_report(migration_error=migration_error())
+        body = public_readiness_body(report)
         if not report["ready"]:
-            return JSONResponse(status_code=503, content=report)
-        return report
+            logger.warning("Readiness check failed: %s", report)
+            return JSONResponse(status_code=503, content=body)
+        return body
 
     @app.on_event("startup")
     def _probe_embedding_provider() -> None:

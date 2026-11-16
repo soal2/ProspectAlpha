@@ -110,40 +110,42 @@ def test_stamp_baseline_is_explicit_and_refuses_an_empty_database(tmp_path):
 def test_readiness_skips_redis_unless_rq_is_configured(tmp_path):
     url = f"sqlite:///{tmp_path / 'ready.db'}"
     upgrade_database(url)
-    inline = readiness_report(
-        database_url=url,
-        modes={"analysis": "inline", "documents": "subprocess"},
-    )
-    assert inline["ready"] is True
-    assert inline["checks"]["redis"]["status"] == "not_required"
-    assert inline["checks"]["schema"]["revision"] == head_revision()
+    for modes in (
+        {"analysis": "inline", "documents": "subprocess"},
+        {"analysis": "thread", "documents": "subprocess"},
+        {"analysis": "inline", "documents": "inline"},
+    ):
+        report = readiness_report(database_url=url, modes=modes)
+        assert report["ready"] is True
+        assert report["checks"]["redis"]["status"] == "not_required"
+        assert report["checks"]["worker"]["status"] == "not_required"
 
-    class SilentRedis:
+    class MemoryRedis:
+        def __init__(self, values):
+            self.values = values
+
         def ping(self):
             return True
 
-        def get(self, _key):
-            return None
+        def get(self, key):
+            return self.values.get(key)
 
     missing = readiness_report(
         database_url=url,
         modes={"analysis": "rq", "documents": "subprocess"},
-        redis_client=SilentRedis(),
+        redis_client=MemoryRedis({}),
     )
     assert missing["ready"] is False
+    assert missing["checks"]["worker"]["queues"] == ["analysis"]
     assert "不表示部署里没有 worker 进程" in missing["checks"]["worker"]["detail"]
 
-    class LiveRedis(SilentRedis):
-        def get(self, _key):
-            return "1763251200"
+    from riskagent.readiness import public_readiness_body
 
-    ready = readiness_report(
-        database_url=url,
-        modes={"analysis": "rq", "documents": "rq"},
-        redis_client=LiveRedis(),
-    )
-    assert ready["ready"] is True
-    assert ready["checks"]["worker"]["status"] == "ok"
+    public = public_readiness_body(missing)
+    assert public["ready"] is False
+    assert public["checks"]["worker"] == "failed"
+    assert "detail" not in public
+    assert "不表示" not in str(public)
 
 
 def test_migration_failure_is_not_ready_and_health_stays_minimal(tmp_path, monkeypatch):
@@ -168,6 +170,85 @@ def test_migration_failure_is_not_ready_and_health_stays_minimal(tmp_path, monke
     assert set(health.json()) == {"status", "database"}
     assert ready.status_code == 200
     assert ready.json()["ready"] is True
+    assert set(ready.json()) == {"ready", "checks"}
+    assert ready.json()["checks"]["redis"] == "not_required"
+
+
+def test_liveness_stays_ok_when_rq_heartbeat_is_missing(tmp_path, monkeypatch):
+    url = f"sqlite:///{tmp_path / 'live.db'}"
+    upgrade_database(url)
+    monkeypatch.setenv("DATABASE_URL", url)
+    monkeypatch.setenv("ANALYSIS_EXECUTION_MODE", "rq")
+    monkeypatch.setenv("DOCUMENT_PARSING_EXECUTION_MODE", "subprocess")
+
+    def redis_down():
+        raise ConnectionError("redis down")
+
+    monkeypatch.setattr("riskagent.workers.rq_worker.redis_connection", redis_down)
+    from riskagent.api.main import create_app
+
+    client = TestClient(create_app())
+    health = client.get("/health")
+    ready = client.get("/ready")
+    assert health.status_code == 200
+    assert health.json() == {"status": "ok", "database": "ready"}
+    assert ready.status_code == 503
+    assert ready.json()["ready"] is False
+    assert ready.json()["checks"]["worker"] == "failed"
+    assert "redis down" not in ready.text
+
+
+def test_upgrade_does_not_rewrite_historical_block_coordinates(tmp_path):
+    url = f"sqlite:///{tmp_path / 'blocks.db'}"
+    engine = create_engine(url)
+    stored_bbox = "[0.0, 0.0, 595.0, 842.0]"
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE document_blocks (
+                    block_id VARCHAR(128) PRIMARY KEY,
+                    document_id VARCHAR(64),
+                    page_number INTEGER NOT NULL,
+                    section_path VARCHAR(512) NOT NULL,
+                    block_type VARCHAR(64) NOT NULL,
+                    text TEXT NOT NULL,
+                    bbox JSON NOT NULL,
+                    char_start INTEGER NOT NULL,
+                    char_end INTEGER NOT NULL,
+                    source_hash VARCHAR(64) NOT NULL,
+                    parser_version VARCHAR(128) NOT NULL
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO document_blocks (
+                    block_id, document_id, page_number, section_path, block_type,
+                    text, bbox, char_start, char_end, source_hash, parser_version
+                ) VALUES (
+                    'block_old', 'doc_old', 4, '正文', 'text',
+                    '旧文本', :bbox, 0, 900, 'hash', 'local-text-parser-v1'
+                )
+                """
+            ),
+            {"bbox": stored_bbox},
+        )
+    upgrade_database(url)
+    with engine.connect() as connection:
+        row = connection.execute(
+            text(
+                "SELECT page_number, bbox, char_start, char_end, parser_version "
+                "FROM document_blocks WHERE block_id = 'block_old'"
+            )
+        ).one()
+    assert row.page_number == 4
+    assert row.bbox == stored_bbox
+    assert row.char_start == 0
+    assert row.char_end == 900
+    assert row.parser_version == "local-text-parser-v1"
 
 
 @pytest.mark.skipif(

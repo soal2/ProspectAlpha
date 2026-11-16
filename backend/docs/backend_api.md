@@ -69,11 +69,19 @@ Response:
 
 ### `GET /ready`
 
-Readiness. Returns 200 only when the Alembic revision is head, an existing PostgreSQL RAG table has `content_sha256` when that table is present, and Redis plus `prospectalpha:worker:heartbeat` are fresh when `ANALYSIS_EXECUTION_MODE=rq` or `DOCUMENT_PARSING_EXECUTION_MODE=rq`.
+Readiness. Returns 200 only when the Alembic revision is head, an existing PostgreSQL RAG table has `content_sha256` when that table is present, and each RQ queue in use has a fresh `prospectalpha:worker:heartbeat:<queue>` value. The analysis queue is required only when `ANALYSIS_EXECUTION_MODE=rq`. The document queue is required only when `DOCUMENT_PARSING_EXECUTION_MODE=rq`. A heartbeat older than its 30 second TTL, or one that names a different queue, is stale.
 
-Inline, thread, and subprocess modes do not require Redis. A migration failure returns 503. The Render start script already starts the worker; a missing heartbeat means the key has not been written, not that the worker process is absent from the deployment.
+Inline, thread, and subprocess modes do not require Redis. A migration or heartbeat failure returns 503. `/health` does not consult Redis, so a stale worker does not by itself fail liveness.
 
-The auth change in the other stream exempts `/health` only. `/ready` is intentionally separate. If that auth change merges first, a probe that cannot send `Authorization` needs `/ready` exempted there as well. This endpoint does not change auth rules.
+The response is probe-safe:
+
+```json
+{"ready": false, "checks": {"schema": "ok", "rag": "not_required", "redis": "ok", "worker": "failed"}}
+```
+
+Check values are `ok`, `failed`, or `not_required`. Exception text is logged on the server and is not part of this body. The auth stream can exempt `GET /ready` together with `GET /health`. This endpoint does not change auth rules.
+
+Render and compose still probe `/health` only. Point a separate readiness probe at `/ready` when that adaptation is reviewed; this change does not edit those deployment files.
 
 ## Analysis Options
 

@@ -6,9 +6,9 @@
 
 1. 配置 `DATABASE_URL`。SQLite 与 PostgreSQL 都支持这条升级路径。PostgreSQL 上的 RAG 只在 `prospectus_chunks` 已经存在时补 `content_sha256`，向量索引定义仍在 `retrieval/index.py`，这里不另写一份。
 2. 执行迁移：`python -m riskagent.migrations upgrade`。Render 的 `scripts/start_render.sh` 会先调用 `init_reference_data()`，其中已经包含这次升级，然后再启动 worker 和 API。迁移失败时该脚本会退出，进程不会报就绪。
-3. 启动 worker。`start_render.sh` 已经用 `prospect-alpha-worker &` 启动它，不需要再声称部署里没有 worker。RQ 模式下 worker 会立刻写入 Redis 键 `prospectalpha:worker:heartbeat`，每 10 秒刷新，30 秒过期。
-4. 启动 API。直接用 uvicorn 启动时，迁移失败不会让进程退出：`GET /health` 仍可做存活检查，`GET /ready` 返回 503。
-5. 存活探针继续用 `GET /health`（`SELECT 1`）。就绪探针用 `GET /ready`。当前 `render.yaml` 和 compose 的健康检查仍指向 `/health`，这次没有改线上部署配置。
+3. 启动 worker。`start_render.sh` 已经用 `prospect-alpha-worker &` 启动它。该进程消费 `ANALYSIS_QUEUE_NAME`（默认 `analysis`）和 `DOCUMENT_QUEUE_NAME`（默认 `documents`），并给每个队列写 Redis 键 `prospectalpha:worker:heartbeat:<queue>`。值是 `{"queue","beat_at"}`，TTL 30 秒，工作循环阻塞在长任务里时后台线程仍每 10 秒刷新。
+4. 启动 API。直接用 uvicorn 启动时，迁移失败不会让进程退出：`GET /health` 仍只做 `SELECT 1`，不会因为没有心跳而变成 503。`GET /ready` 在迁移失败、修订不到 head，或已配置的 RQ 队列心跳过期时返回 503。
+5. 存活探针继续用 `GET /health`。就绪探针要用 `GET /ready`。这次没有改 `render.yaml` 或 compose：它们的健康检查仍然打 `/health`，所以当前线上部署探针不会发现 worker 心跳缺失。要让部署把未就绪挡在流量之外，需要另行把就绪探针指到 `GET /ready`，并保留 `/health` 作为存活检查。不要把 `/health` 改成就绪检查，否则数据库短暂不可用和 worker 心跳会搅在同一次重启判断里。
 
 `inline`、`thread`、`subprocess` 不要求 Redis，也不要求 worker 心跳。只有 `ANALYSIS_EXECUTION_MODE=rq` 或 `DOCUMENT_PARSING_EXECUTION_MODE=rq` 才检查 Redis 和心跳。
 
@@ -43,4 +43,16 @@ def downgrade() -> None:
 
 ## 与鉴权流的衔接
 
-`/health` 保持公开的最小存活检查。另一条流如果只放行 `/health`，`/ready` 在令牌启用后会要求 `Authorization`。不能带令牌的就绪探针需要那条流同时放行 `/ready`。本改动不修改鉴权规则。
+`GET /ready` 的响应只有：
+
+```json
+{"ready": true, "checks": {"schema": "ok", "rag": "not_required", "redis": "not_required", "worker": "not_required"}}
+```
+
+状态只有 `ok`、`failed`、`not_required`。没有异常文本、连接串或心跳原文，可以作为和 `/health` 一样的公开探针。鉴权流若启用令牌，需要同时放行 `GET /ready`，否则探针无法匿名访问。本改动不写鉴权规则。
+
+分数快照的下一份修订使用 `down_revision = "0002_extension_pattern"`。本基线不改 `document_blocks.page_number` 的已有值，也不给历史坐标补写定位。
+
+## 历史块坐标
+
+`document_blocks.page_number` 仍是非空整数。升级不会改写已有页码、bbox 或字符区间。旧的整页假框继续原样留在库里；是否可信由读取方标记，迁移本身不把它们改成某种新的定位。
