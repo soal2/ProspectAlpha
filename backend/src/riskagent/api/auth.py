@@ -378,7 +378,7 @@ def body_limit_for(content_type: str) -> int:
 
 
 def _public_path(path: str, method: str) -> bool:
-    if path == "/health":
+    if path in {"/health", "/ready"}:
         return True
     if path == "/auth/login" and method == "POST":
         return True

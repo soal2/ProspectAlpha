@@ -178,10 +178,15 @@ def test_login_rate_limit(monkeypatch) -> None:
     assert "Retry-After" in blocked.headers
 
 
-def test_health_stays_open_when_auth_is_required(monkeypatch) -> None:
+def test_health_and_ready_stay_open_when_auth_is_required(monkeypatch) -> None:
     _enable(monkeypatch)
-    response = TestClient(create_app()).get("/health")
-    assert response.status_code != 401
+    client = TestClient(create_app())
+    health = client.get("/health")
+    ready = client.get("/ready")
+    assert health.status_code != 401
+    assert ready.status_code != 401
+    assert "password" not in ready.text.lower()
+    assert "secret" not in ready.text.lower()
 
 
 def test_body_limit_counts_bytes_without_content_length() -> None:
