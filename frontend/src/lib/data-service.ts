@@ -1,3 +1,4 @@
+import { ApiError, apiErrorFromResponse, isNotFound } from "./api-error";
 import { apiRequestHeaders, redirectToLogin } from "./auth-session";
 import { API_BASE_URL } from "./env";
 import type {
@@ -471,7 +472,7 @@ async function fetchBackendReport(id: string): Promise<BackendReport | null> {
 
 async function fetchTraceData(id: string): Promise<TraceData | null> {
   try {
-    return apiRequest<TraceData>(`/analysis-runs/${id}/trace`);
+    return await apiRequest<TraceData>(`/analysis-runs/${id}/trace`);
   } catch (err) {
     if (isNotFound(err)) return null;
     throw err;
@@ -608,7 +609,7 @@ async function fetchKnowledgeData(): Promise<KnowledgeData> {
 
 async function fetchBacktestDetailData(id: string): Promise<BacktestDetailResponse | null> {
   try {
-    return apiRequest<BacktestDetailResponse>(`/backtests/${id}`);
+    return await apiRequest<BacktestDetailResponse>(`/backtests/${id}`);
   } catch (err) {
     if (isNotFound(err)) return null;
     throw err;
@@ -674,14 +675,10 @@ async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (response.status === 401) redirectToLogin();
   if (!response.ok) {
-    throw new Error(await responseError(response));
+    throw await apiErrorFromResponse(response);
   }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
-}
-
-function isNotFound(err: unknown) {
-  return err instanceof Error && err.message.includes("404");
 }
 
 async function fetchRiskRulesData(): Promise<RiskRulesData> {
@@ -757,7 +754,7 @@ export async function uploadMarketData(files: { security: File; company: File; p
     credentials: "include",
     headers: apiRequestHeaders(undefined, "POST"),
   });
-  if (!response.ok) throw new Error((await response.json().catch(() => ({ detail: response.statusText }))).detail ?? "市场数据上传失败");
+  if (!response.ok) throw await apiErrorFromResponse(response);
   return response.json() as Promise<{ snapshot_id: string; labels_created: number }>;
 }
 
@@ -834,8 +831,7 @@ export async function startAnalysisRun(runId: string) {
     return getAnalysisRun(runId);
   }
   if (!response.ok) {
-    const text = await response.text();
-    throw new Error(text || `Request failed: ${response.status}`);
+    throw await apiErrorFromResponse(response);
   }
   return response.json() as Promise<AnalysisRun>;
 }
@@ -937,10 +933,8 @@ export async function askDocument(
     body: JSON.stringify({ question, top_k: options.topK ?? 6 }),
     signal: options.signal,
   });
-  if (!response.ok || !response.body) {
-    throw new Error(await responseError(response));
-  }
-  const reader = response.body.getReader();
+  const body = await requireStreamBody(response);
+  const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
   let answer = "";
@@ -975,15 +969,11 @@ export async function askDocument(
   return { answer, citations };
 }
 
-async function responseError(response: Response) {
-  const text = await response.text().catch(() => "");
-  if (!text) return `Request failed: ${response.status}`;
-  try {
-    const parsed = JSON.parse(text) as { detail?: string };
-    return `Request failed (${response.status}): ${parsed.detail || text}`;
-  } catch {
-    return `Request failed (${response.status}): ${text}`;
-  }
+async function requireStreamBody(response: Response): Promise<ReadableStream<Uint8Array>> {
+  if (response.status === 401) redirectToLogin();
+  if (!response.ok) throw await apiErrorFromResponse(response);
+  if (!response.body) throw new ApiError(response.status, "响应没有内容", null);
+  return response.body;
 }
 
 // General LLM chat — SSE stream from POST /chat (no document required)
@@ -1017,11 +1007,8 @@ export async function chatWithAssistant(
     body: JSON.stringify({ message, history }),
     signal: options.signal,
   });
-  if (!response.ok || !response.body) {
-    const text = await response.text().catch(() => "");
-    throw new Error(text || `Request failed: ${response.status}`);
-  }
-  const reader = response.body.getReader();
+  const body = await requireStreamBody(response);
+  const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
   let reply = "";
@@ -1077,11 +1064,8 @@ export async function streamAnalysisRun(
     headers: apiRequestHeaders({ accept: "text/event-stream" }, "GET"),
     signal: options.signal,
   });
-  if (!response.ok || !response.body) {
-    const text = await response.text().catch(() => "");
-    throw new Error(text || `Request failed: ${response.status}`);
-  }
-  const reader = response.body.getReader();
+  const body = await requireStreamBody(response);
+  const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
   while (true) {

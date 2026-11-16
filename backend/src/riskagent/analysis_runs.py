@@ -1441,6 +1441,15 @@ class AnalysisRunRepository:
                     "company_name": run.company_name,
                     "data_cutoff_date": run.data_cutoff_date,
                 }
+                structured_payload["prospectus_blocks"] = [
+                    {
+                        "block_id": block.block_id,
+                        "page_number": block.page_number,
+                        "section_path": block.section_path,
+                        "text": block.text,
+                    }
+                    for block in run.document_blocks
+                ]
                 cashflow_extraction = extract_cashflow_periods(run.document_blocks)
                 if cashflow_extraction:
                     structured_payload["cashflow_periods"] = cashflow_extraction.periods

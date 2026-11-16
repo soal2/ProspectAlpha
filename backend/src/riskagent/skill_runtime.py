@@ -646,23 +646,60 @@ def _source_type(url: str, title: str) -> Literal["news", "social", "analyst", "
 class LegalComplianceHandler:
     def invoke(self, invocation: SkillInvocation) -> SkillResult:
         started = _now()
-        refs = [str(item) for item in invocation.structured_inputs.get("legal_evidence_refs", [])]
-        issues = invocation.structured_inputs.get("legal_issues")
-        if not isinstance(issues, list) or not issues:
+        from riskagent.features.legal import extract_legal_disclosures
+        from riskagent.features.market import extract_pre_ipo_market_window
+
+        cutoff = invocation_cutoff(invocation)
+        blocks = invocation.structured_inputs.get("prospectus_blocks") or []
+        extraction = extract_legal_disclosures(
+            blocks if isinstance(blocks, list) else [],
+            data_cutoff_date=cutoff,
+        )
+        market_window = extract_pre_ipo_market_window(
+            invocation.structured_inputs.get("market_prices")
+            if isinstance(invocation.structured_inputs.get("market_prices"), list)
+            else None,
+            data_cutoff_date=cutoff,
+        )
+        supplied = invocation.structured_inputs.get("legal_issues")
+        supplied_issues = supplied if isinstance(supplied, list) else []
+        pre_cutoff = extraction["pre_cutoff_disclosures"]
+        undated = extraction["undated_disclosures"]
+        evidence = [str(item["evidence_block_id"]) for item in pre_cutoff if item.get("evidence_block_id")]
+        if not pre_cutoff and not undated and not supplied_issues:
             return _result(
                 invocation,
                 started_at=started,
                 status="insufficient_data",
-                summary="未取得可核验的法务条款或适用规则，不能推断违法。",
+                risk_level="unrated",
+                summary="招股书未抽到截止日前的诉讼、对赌赎回或关联交易披露；缺失不等于低风险。",
+                result={
+                    "disclosures": [],
+                    "missing_categories": extraction["missing_categories"],
+                    "missing_is_not_low_risk": True,
+                    "market_window": market_window,
+                    "data_cutoff_date": cutoff or None,
+                },
+                limitations=["未发现可核验披露时不输出低风险结论。"],
             )
         return _result(
             invocation,
             started_at=started,
-            status="completed" if refs else "partial",
-            summary=f"已对 {len(issues)} 项法务事项完成结构化核查。",
-            result={"issues": issues},
-            evidence_refs=refs,
-            limitations=[] if refs else ["法务事项尚未全部绑定招股书原文证据。"],
+            status="completed" if evidence else "partial",
+            risk_level="unrated",
+            summary=f"已抽取 {len(pre_cutoff)} 项有日期的截止日前法务披露；缺失类别不按低风险处理。",
+            result={
+                "disclosures": pre_cutoff,
+                "undated_disclosures": undated,
+                "post_cutoff_excluded_count": extraction["post_cutoff_excluded_count"],
+                "missing_categories": extraction["missing_categories"],
+                "missing_is_not_low_risk": True,
+                "supplied_issue_count": len(supplied_issues),
+                "market_window": market_window,
+                "data_cutoff_date": cutoff or None,
+            },
+            evidence_refs=evidence,
+            limitations=[] if evidence else ["外部传入的法务事项没有招股书块级证据。"],
         )
 
 
