@@ -68,6 +68,8 @@ def test_upgrade_preserves_historic_rows_and_blocks_baseline_downgrade(tmp_path)
     assert row.processing_attempts == 0
 
     command.downgrade(_config(url), "-1")
+    assert current_revision(url) == "0002_extension_pattern"
+    command.downgrade(_config(url), "-1")
     assert current_revision(url) == "0001_baseline"
     with pytest.raises(RuntimeError, match="不受支持"):
         command.downgrade(_config(url), "base")
@@ -105,6 +107,23 @@ def test_stamp_baseline_is_explicit_and_refuses_an_empty_database(tmp_path):
         assert connection.execute(
             text("SELECT document_id FROM prospectus_documents WHERE document_id = 'doc_keep'")
         ).scalar_one() == "doc_keep"
+
+
+def test_score_snapshot_revision_follows_extension_pattern(tmp_path):
+    url = f"sqlite:///{tmp_path / 'scores.db'}"
+    command.upgrade(_config(url), "0002_extension_pattern")
+    engine = create_engine(url)
+    with engine.connect() as connection:
+        before = {row[1] for row in connection.execute(text("PRAGMA table_info(risk_score_snapshots)"))}
+    assert "content_hash" not in before
+    assert upgrade_database(url) == "0003_score_snapshot_version"
+    with engine.connect() as connection:
+        after = {row[1] for row in connection.execute(text("PRAGMA table_info(risk_score_snapshots)"))}
+        samples = {row[1] for row in connection.execute(text("PRAGMA table_info(backtest_candidate_samples)"))}
+    assert "content_hash" in after
+    assert "pinned_score" in samples
+    command.downgrade(_config(url), "-1")
+    assert current_revision(url) == "0002_extension_pattern"
 
 
 def test_readiness_skips_redis_unless_rq_is_configured(tmp_path):
