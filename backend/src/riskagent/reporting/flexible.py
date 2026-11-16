@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from riskagent.provenance import format_evidence_location
+from riskagent.research.core import is_pre_cutoff_evidence
 
 
 def build_report_document(run: Any, integrated: Any) -> dict[str, Any]:
@@ -124,6 +125,7 @@ def build_report_document(run: Any, integrated: Any) -> dict[str, Any]:
             "eligible_pre_cutoff": item.eligible_pre_cutoff,
         }
         for item in run.research_sources
+        if is_pre_cutoff_evidence(item)
     )
     limitations = list(
         dict.fromkeys(

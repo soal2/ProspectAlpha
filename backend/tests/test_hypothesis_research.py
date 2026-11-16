@@ -1,8 +1,12 @@
 import asyncio
+import json
+from types import SimpleNamespace
 
 import httpx
 
 from riskagent.hidden_risk import ResearchBudget, RiskHypothesis
+from riskagent.prediction.scorecard import WEIGHT_PROFILE, calculate_hidden_first_score
+from riskagent.reporting.flexible import build_report_document
 from riskagent.research import (
     BochaAdapter,
     BochaConfig,
@@ -11,6 +15,8 @@ from riskagent.research import (
     SafeFetcher,
     SearchHit,
     SearchResponse,
+    is_pre_cutoff_evidence,
+    research_ids_for_scoring,
 )
 
 
@@ -100,6 +106,156 @@ def test_post_cutoff_source_never_corroborates_prelisting_hypothesis():
     assert result.hypotheses[0].status == "reported"
     assert not result.hypotheses[0].external_evidence_ids
     assert all(not item.eligible_pre_cutoff for item in result.sources)
+
+
+def test_unknown_and_post_cutoff_sources_stay_out_of_evidence_and_score():
+    class MixedAdapter:
+        name = "mixed"
+
+        def available(self) -> bool:
+            return True
+
+        async def search(self, query):
+            return SearchResponse(
+                provider="mixed",
+                hits=[
+                    SearchHit(
+                        url="https://example.com/before",
+                        title="测试公司经销增长可能依赖压货",
+                        summary="库存",
+                        published_at="2024-01-02",
+                    ),
+                    SearchHit(
+                        url="https://example.com/after",
+                        title="测试公司截止后处罚",
+                        summary="处罚公告",
+                        published_at="2025-02-02",
+                    ),
+                    SearchHit(
+                        url="https://example.com/unknown",
+                        title="测试公司日期不明诉讼",
+                        summary="诉讼",
+                        published_at=None,
+                    ),
+                ],
+            )
+
+    class MixedFetcher:
+        async def fetch(self, url: str) -> FetchOutcome:
+            published = {
+                "https://example.com/before": "2024-01-02",
+                "https://example.com/after": "2025-02-02",
+            }.get(url)
+            return FetchOutcome(
+                requested_url=url,
+                final_url=url,
+                accessible=True,
+                title=url.rsplit("/", 1)[-1],
+                text="测试公司经销增长可能依赖压货，库存风险已有外部事件支持",
+                published_at=published,
+                content_hash=url,
+                bytes_read=16,
+            )
+
+    result = asyncio.run(
+        HypothesisResearchModule(MixedAdapter(), MixedFetcher()).run(
+            company_name="测试公司",
+            hypotheses=[_hypothesis()],
+            budget=ResearchBudget.for_depth("quick"),
+            data_cutoff_date="2024-12-31",
+        )
+    )
+    hypothesis = result.hypotheses[0]
+    assert hypothesis.status == "corroborated"
+    admitted_ids = set(hypothesis.external_evidence_ids)
+    before = [item for item in result.sources if item.url.endswith("/before")]
+    after = [item for item in result.sources if item.url.endswith("/after")]
+    unknown = [item for item in result.sources if item.url.endswith("/unknown")]
+    assert any(item.source_id in admitted_ids and item.query_kind == "support" for item in before)
+    assert all(item.source_id not in admitted_ids for item in [*after, *unknown])
+    assert all(item.eligible_pre_cutoff for item in before)
+    assert all(not item.eligible_pre_cutoff for item in [*after, *unknown])
+
+    admitted = {
+        "dimension_code": "EXT",
+        "origin": "external",
+        "severity": "high",
+        "evidence_grade": "direct",
+        "hypothesis_status": hypothesis.status,
+        "external_evidence_ids": hypothesis.external_evidence_ids,
+        "counter_evidence_ids": hypothesis.counter_evidence_ids,
+    }
+    withheld = {**admitted, "hypothesis_status": "reported", "external_evidence_ids": []}
+    assert calculate_hidden_first_score([admitted])["breakdown"]["EXT"] > calculate_hidden_first_score([withheld])["breakdown"]["EXT"]
+    assert "example.com/after" not in json.dumps(admitted)
+    assert "example.com/unknown" not in json.dumps(admitted)
+    assert set(research_ids_for_scoring(result.sources)) == {"https://example.com/before"}
+    assert WEIGHT_PROFILE == {"D1": 15.0, "D2": 30.0, "D3": 35.0, "EXT": 20.0}
+
+    document = build_report_document(
+        SimpleNamespace(
+            evidence=[],
+            findings=[],
+            hypotheses=[],
+            research_sources=result.sources,
+            research_limitations=[],
+            company_name="测试公司",
+        ),
+        SimpleNamespace(risk_themes=[], executive_summary="摘要", limitations=[]),
+    )
+    index_blob = json.dumps(document["evidence_index"], ensure_ascii=False)
+    assert "example.com/before" in index_blob
+    assert "example.com/after" not in index_blob
+    assert "example.com/unknown" not in index_blob
+    assert "测试公司截止后处罚" not in index_blob
+    assert "测试公司日期不明诉讼" not in index_blob
+
+
+def test_post_listing_attribution_is_not_pre_cutoff_evidence():
+    class PostAdapter:
+        name = "post"
+
+        def available(self) -> bool:
+            return True
+
+        async def search(self, query):
+            return SearchResponse(
+                provider="post",
+                hits=[
+                    SearchHit(
+                        url="https://example.com/post-event",
+                        title="测试公司上市后处罚",
+                        published_at="2025-06-01",
+                    )
+                ],
+            )
+
+    class PostFetcher:
+        async def fetch(self, url: str) -> FetchOutcome:
+            return FetchOutcome(
+                requested_url=url,
+                final_url=url,
+                accessible=True,
+                title="上市后处罚",
+                text="测试公司上市后处罚成立",
+                published_at="2025-06-01",
+                content_hash="post-hash",
+                bytes_read=8,
+            )
+
+    result = asyncio.run(
+        HypothesisResearchModule(PostAdapter(), PostFetcher()).research_retrospective(
+            company_name="测试公司",
+            risk_titles=["经销增长可能依赖压货"],
+            listing_date="2025-01-01",
+        )
+    )
+
+    assert result["sources"]
+    assert all(item["attribution"] == "post_listing" for item in result["sources"])
+    assert all(item["eligible_pre_cutoff"] is False for item in result["sources"])
+    assert all(not is_pre_cutoff_evidence(item) for item in result["sources"])
+    assert research_ids_for_scoring(result["sources"]) == []
 
 
 def test_search_cache_is_cutoff_scoped_and_reuses_public_results():

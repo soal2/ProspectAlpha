@@ -50,9 +50,13 @@ export interface BacktestSummary {
   model: string;
   modelVersion: string;
   samples: number;
-  auc: number;
-  ks: number;
-  lift10: number;
+  evaluationScope?: "single_company" | "cohort";
+  auc: number | null;
+  ks: number | null;
+  aucReason?: string | null;
+  ksReason?: string | null;
+  lift10: number | null;
+  liftTop20?: number | null;
   recall: number;
   createdAt: string;
   status: "完成" | "运行中" | "失败" | "构建候选中" | "待确认" | "待运行";

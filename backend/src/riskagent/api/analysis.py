@@ -9,6 +9,7 @@ import os
 from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import HTMLResponse, StreamingResponse
 
+from riskagent.api.limits import ensure_within_count, max_analysis_runs
 from riskagent.reporting import ensure_risk_report_html
 from riskagent.analysis_runs import (
     AnalysisRun,
@@ -44,7 +45,11 @@ def _api_dispatch_mode() -> str:
 @router.post("", response_model=AnalysisRun, status_code=status.HTTP_201_CREATED)
 def create_analysis_run(payload: AnalysisRunCreate) -> AnalysisRun:
     try:
-        return _repo().create_draft(payload)
+        repo = _repo()
+        run_limit = max_analysis_runs()
+        if run_limit > 0:
+            ensure_within_count(len(repo.list_runs()), run_limit, "分析任务")
+        return repo.create_draft(payload)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 

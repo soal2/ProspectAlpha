@@ -3,11 +3,13 @@ import {
   Outlet,
   Link,
   createRootRouteWithContext,
+  useNavigate,
   useRouter,
+  useRouterState,
   HeadContent,
   Scripts,
 } from "@tanstack/react-router";
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 import appCss from "../styles.css?url";
 import { isRetryableApiError } from "../lib/api-error";
@@ -16,6 +18,7 @@ import { SidebarProvider } from "@/components/ui/sidebar";
 import { AppSidebar } from "@/components/app-sidebar";
 import { AppHeader } from "@/components/app-header";
 import { Toaster } from "@/components/ui/sonner";
+import { refreshSession } from "@/lib/auth-session";
 
 function NotFoundComponent() {
   return (
@@ -125,20 +128,49 @@ function RootShell({ children }: { children: ReactNode }) {
 
 function RootComponent() {
   const { queryClient } = Route.useRouteContext();
+  const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const navigate = useNavigate();
+  const onLogin = pathname.endsWith("/login");
+  const [ready, setReady] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    refreshSession()
+      .then((session) => {
+        if (cancelled) return;
+        if (!session.authenticated && !onLogin) {
+          void navigate({ to: "/login" });
+        } else if (session.authenticated && !session.auth_disabled && onLogin) {
+          void navigate({ to: "/" });
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setReady(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [navigate, onLogin]);
+
+  if (!ready) return null;
   return (
     <QueryClientProvider client={queryClient}>
-      <SidebarProvider>
-        <div className="flex min-h-screen w-full bg-background">
-          <AppSidebar />
-          <div className="flex min-w-0 flex-1 flex-col">
-            <AppHeader />
-            <main className="min-w-0 flex-1">
-              <Outlet />
-            </main>
+      {onLogin ? (
+        <Outlet />
+      ) : (
+        <SidebarProvider>
+          <div className="flex min-h-screen w-full bg-background">
+            <AppSidebar />
+            <div className="flex min-w-0 flex-1 flex-col">
+              <AppHeader />
+              <main className="min-w-0 flex-1">
+                <Outlet />
+              </main>
+            </div>
           </div>
-        </div>
-        <Toaster />
-      </SidebarProvider>
+          <Toaster />
+        </SidebarProvider>
+      )}
     </QueryClientProvider>
   );
 }

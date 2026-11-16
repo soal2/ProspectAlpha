@@ -21,6 +21,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
 
 from riskagent.a2a import build_dynamic_expert_a2a_routes
+from riskagent.api.auth import SingleUserAuthMiddleware, router as auth_router, validate_auth_config
 from riskagent.agent_experts import AgentSpec, AgentSpecRepository
 from riskagent.api import agents, analysis, analysis_options, backtests, chat, documents, knowledge, risk_rules, skills
 from riskagent.seed_data import AGENT_EXPERTS, AGENT_SPECS
@@ -69,17 +70,19 @@ def _apply_startup_migrations() -> None:
 def create_app() -> FastAPI:
     from riskagent.skill_docs import initialize_skill_catalog
 
+    # Missing auth settings refuse startup. Production cannot opt out.
+    validate_auth_config()
     # Skill metadata and executable handlers are a startup contract.  A broken
     # required Skill must fail before the application advertises readiness.
     initialize_skill_catalog()
     app = FastAPI(title="ProspectAlpha RiskAgent API", version="0.1.0")
+    app.add_middleware(SingleUserAuthMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=_cors_origins(),
-        # Vite can move to another port when 5173 is occupied, and developers
-        # commonly alternate between localhost and 127.0.0.1. Keep loopback
-        # origins usable without weakening the configured production allowlist.
-        allow_origin_regex=LOCAL_DEVELOPMENT_ORIGIN_REGEX,
+        # Vite can move to another port when 5173 is occupied. Loopback stays
+        # available outside production; production uses only CORS_ALLOW_ORIGINS.
+        allow_origin_regex=None if os.getenv("APP_ENV", "").strip().lower() == "production" else LOCAL_DEVELOPMENT_ORIGIN_REGEX,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -185,6 +188,7 @@ def create_app() -> FastAPI:
         except Exception as exc:  # noqa: BLE001 - normalized startup failure
             raise RuntimeError(f"Embedding provider probe failed: {exc}") from exc
 
+    app.include_router(auth_router)
     app.include_router(risk_rules.router)
     app.include_router(agents.router)
     app.include_router(analysis_options.router)

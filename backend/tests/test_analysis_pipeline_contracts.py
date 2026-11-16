@@ -5,6 +5,7 @@ import fitz
 import pytest
 import yaml
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
 from riskagent.analysis_runs import AnalysisRunCreate, AnalysisRunInputPatch, IndustryProfileConfirmation
@@ -103,9 +104,15 @@ def test_completed_report_freezes_score_and_enters_t5_backtest(tmp_path, analysi
     assert completed.status == "completed"
     assert any(event["event_type"] == "risk_score_frozen" for event in completed.events)
     with repo.session_factory() as session:
-        score = session.get(RiskScoreSnapshotRow, f"score_{completed.run_id}")
-        assert score is not None
+        score = session.scalars(
+            select(RiskScoreSnapshotRow).where(RiskScoreSnapshotRow.run_id == completed.run_id)
+        ).one()
+        assert score.score_id != f"score_{completed.run_id}"
         assert score.wind_code == "0001.HK"
+        assert score.analysis_as_of_date == completed.data_cutoff_date
+        assert score.input_hash
+        assert score.evidence_hash
+        assert score.content_hash
 
     security = tmp_path / "security.csv"
     company = tmp_path / "company.csv"

@@ -1501,11 +1501,22 @@ class AnalysisRunRepository:
                 structured_payload = {
                     **payload_for_orchestra.structured_data,
                     "company_name": run.company_name,
+                    "data_cutoff_date": run.data_cutoff_date,
                 }
+                structured_payload["prospectus_blocks"] = [
+                    {
+                        "block_id": block.block_id,
+                        "page_number": block.page_number,
+                        "section_path": block.section_path,
+                        "text": block.text,
+                    }
+                    for block in run.document_blocks
+                ]
                 cashflow_extraction = extract_cashflow_periods(run.document_blocks)
                 if cashflow_extraction:
                     structured_payload["cashflow_periods"] = cashflow_extraction.periods
                     structured_payload["cashflow_evidence_refs"] = cashflow_extraction.evidence_refs
+                    structured_payload["cashflow_limitations"] = cashflow_extraction.limitations
                 run.events.append(
                     _event(
                         "tool_completed" if cashflow_extraction else "tool_skipped",
@@ -1533,6 +1544,7 @@ class AnalysisRunRepository:
                     text=text,
                     document_id=payload_for_orchestra.document_id or "",
                     stock_code=payload_for_orchestra.stock_code or "",
+                    data_cutoff_date=run.data_cutoff_date,
                     structured_inputs=structured_payload,
                     skill_snapshot=run.skill_snapshot,
                     document_block_ids=[item.block_id for item in run.document_blocks],

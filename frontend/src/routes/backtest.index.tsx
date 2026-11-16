@@ -111,7 +111,7 @@ function BacktestIndex() {
                 </td>
                 <td className="px-4 py-3 text-right tabular">{b.ks ? b.ks.toFixed(3) : "—"}</td>
                 <td className="px-4 py-3 text-right tabular">
-                  {b.lift10 ? `${b.lift10.toFixed(1)}×` : "—"}
+                  {(b.liftTop20 ?? b.lift10) ? `${(b.liftTop20 ?? b.lift10).toFixed(1)}×` : "—"}
                 </td>
                 <td className="px-4 py-3 text-right tabular">
                   {b.recall ? `${(b.recall * 100).toFixed(0)}%` : "—"}
