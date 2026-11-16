@@ -7,7 +7,7 @@ breakdown, the analysis/backtest wiring, and the slot for a future model.
 
 from __future__ import annotations
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 from riskagent.analysis_runs import _overall_risk_level
@@ -174,8 +174,9 @@ def test_backtest_service_persists_legacy_breakdown_and_returns_rules() -> None:
     legacy = calculate_hidden_first_score(TIANYUE_02631_FINDINGS)
     assert {key: result[key] for key in legacy} == legacy
     with factory() as session:
-        row = session.get(RiskScoreSnapshotRow, "score_tianyue")
-    assert row is not None
+        row = session.scalars(select(RiskScoreSnapshotRow).where(RiskScoreSnapshotRow.run_id == "tianyue")).one()
+    assert row.score_id != "score_tianyue"
+    assert row.content_hash
     assert row.total_score == 44.29
     assert row.risk_level == "medium"
     assert row.breakdown == legacy["breakdown"]

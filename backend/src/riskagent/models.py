@@ -288,6 +288,7 @@ class RiskScoreSnapshotRow(Base):
     text_signal_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
     weight_profile: Mapped[dict] = mapped_column(JSON, default=dict)
     research_snapshot_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    content_hash: Mapped[str] = mapped_column(String(64), default="")
     created_at: Mapped[str] = mapped_column(String(64))
 
 
@@ -354,6 +355,7 @@ class BacktestCandidateSampleRow(Base):
     source_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     inclusion_status: Mapped[str] = mapped_column(String(24), default="proposed")
     exclusion_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    pinned_score: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 
 class BacktestJobRow(Base):
