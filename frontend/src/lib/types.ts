@@ -198,6 +198,7 @@ export interface EvidenceFeedItem {
   conf: number;
   time: string;
   page?: number | null;
+  location?: string | null;
   snippet?: string | null;
   document_id?: string | null;
   bbox?: number[];
@@ -214,7 +215,8 @@ export interface TraceData {
 export interface EvidenceDetailItem {
   id: string;
   section: string;
-  page: number;
+  page: number | null;
+  location: string;
   conf: number;
   scoreKind: "retrieval" | "relevance" | "unavailable";
   snippet: string;
@@ -228,7 +230,8 @@ export interface KnowledgePreview {
   evidenceId: string;
   code: string;
   section: string;
-  page: number;
+  page: number | null;
+  location: string;
   linkedConclusions: string[];
 }
 
@@ -247,7 +250,8 @@ export interface KnowledgeEvidence {
   code: string;
   name: string;
   section: string;
-  page: number;
+  page: number | null;
+  location: string;
   conf: number;
   scoreKind: "retrieval" | "relevance" | "unavailable";
   snippet: string;

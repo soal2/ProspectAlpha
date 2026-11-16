@@ -94,7 +94,7 @@ function AnalysisEvidence() {
                 <span className="tabular font-medium text-foreground">[{e.id}]</span>
                 <span>·</span>
                 <span>
-                  {e.section} P.{e.page}
+                  {e.section} · {e.location}
                 </span>
                 <span className="ml-auto inline-flex items-center rounded-full bg-primary/8 px-2 py-0.5 font-medium text-primary tabular">
                   {e.scoreKind === "relevance"
@@ -133,9 +133,9 @@ function AnalysisEvidence() {
         {selected ? (
           <>
             <div className="mt-1 text-[11px] text-muted-foreground">
-              [{selected.id}] · {selected.section} · P.{selected.page}
+              [{selected.id}] · {selected.section} · {selected.location}
             </div>
-            {selected.documentId ? (
+            {selected.documentId && selected.page ? (
               <PdfViewer
                 inline
                 open
@@ -155,8 +155,8 @@ function AnalysisEvidence() {
                 title={`证据 ${selected.id} · ${selected.section}`}
               />
             ) : (
-              <div className="mt-4 grid aspect-[3/4] place-items-center rounded-lg border border-border bg-paper text-center text-xs text-muted-foreground">
-                该证据未关联 PDF 文档
+              <div className="mt-4 grid aspect-[3/4] place-items-center rounded-lg border border-border bg-paper px-4 text-center text-xs text-muted-foreground">
+                {selected.documentId ? `无 PDF 页。${selected.location}` : "该证据未关联 PDF 文档"}
               </div>
             )}
           </>

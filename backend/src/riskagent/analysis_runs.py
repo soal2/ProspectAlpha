@@ -72,6 +72,15 @@ from riskagent.reporting import (
     render_risk_report_html,
 )
 from riskagent.providers.llm import get_default_llm_client
+from riskagent.provenance import (
+    LEGACY_TEXT_PARSER_VERSION,
+    TEXT_OFFSET_PARSER_VERSION,
+    PdfRegion,
+    chunk_location_fields,
+    format_evidence_location,
+    iter_text_chunks,
+    passes_real_pdf_evidence,
+)
 from riskagent.research import HypothesisResearchModule, SourceCard, ToolAuditRecord
 from riskagent.workers.analysis import dispatch_analysis_job
 
@@ -79,7 +88,7 @@ from riskagent.workers.analysis import dispatch_analysis_job
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ANALYSIS_RUNS_PATH = BACKEND_ROOT / "data" / "processed" / "analysis_runs.yaml"
 DEFAULT_EVIDENCE_LIBRARY_PATH = BACKEND_ROOT / "data" / "processed" / "evidence_library.yaml"
-PARSER_VERSION = "local-text-parser-v1"
+PARSER_VERSION = TEXT_OFFSET_PARSER_VERSION
 _FILE_LOCKS: dict[str, threading.RLock] = {}
 _FILE_LOCKS_GUARD = threading.Lock()
 
@@ -199,16 +208,40 @@ class ExpertSelectionRequest(BaseModel):
 class DocumentBlock(BaseModel):
     block_id: str
     document_id: str
-    page_number: int
+    page_number: int | None = None
     section_path: str
     block_type: str = "text"
     text: str
-    bbox: list[float]
-    bbox_coordinate_space: Literal["pdf_points", "normalized_1000"] = "pdf_points"
+    bbox: list[float] = Field(default_factory=list)
+    bbox_coordinate_space: Literal["pdf_points", "normalized_1000"] | None = "pdf_points"
     char_start: int = 0
     char_end: int = 0
     source_hash: str
-    parser_version: str = PARSER_VERSION
+    parser_version: str = "pymupdf-v1"
+    locator_kind: Literal["pdf_page", "text_offset", "legacy_unknown"] = "pdf_page"
+    coordinates_are_pdf: bool = True
+    table_header: str | None = None
+    table_row: str | None = None
+    table_column: str | None = None
+    table_unit: str | None = None
+    pdf_regions: list[PdfRegion] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _clear_invented_pdf_location(self) -> "DocumentBlock":
+        if self.parser_version == LEGACY_TEXT_PARSER_VERSION and self.locator_kind != "text_offset":
+            # Keep the stored page, box, and offsets. They are not a reconstructed location.
+            self.locator_kind = "legacy_unknown"
+            self.coordinates_are_pdf = False
+            return self
+        if self.locator_kind == "text_offset" or self.parser_version == TEXT_OFFSET_PARSER_VERSION:
+            self.locator_kind = "text_offset"
+            self.page_number = None
+            self.bbox = []
+            self.bbox_coordinate_space = None
+            self.coordinates_are_pdf = False
+            self.pdf_regions = []
+            self.parser_version = TEXT_OFFSET_PARSER_VERSION
+        return self
 
 
 class RunEvidence(BaseModel):
@@ -216,7 +249,7 @@ class RunEvidence(BaseModel):
     finding_id: str
     document_block_id: str
     document_id: str = ""
-    page_number: int
+    page_number: int | None = None
     section_path: str
     text: str
     bbox: list[float] = Field(default_factory=list)
@@ -227,6 +260,14 @@ class RunEvidence(BaseModel):
     retrieval_score: float = 0.0
     relevance_score: float = 0.0
     verifier_status: str
+    locator_kind: Literal["pdf_page", "text_offset", "legacy_unknown"] = "pdf_page"
+    coordinates_are_pdf: bool = True
+    parser_version: str = ""
+    table_header: str | None = None
+    table_row: str | None = None
+    table_column: str | None = None
+    table_unit: str | None = None
+    pdf_regions: list[PdfRegion] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _backfill_document_id(self) -> "RunEvidence":
@@ -236,6 +277,21 @@ class RunEvidence(BaseModel):
             match = re.match(r"^block_(.+)_\d{4}_\d{3}$", self.document_block_id)
             if match:
                 self.document_id = match.group(1)
+        if self.parser_version == LEGACY_TEXT_PARSER_VERSION and self.locator_kind != "text_offset":
+            self.locator_kind = "legacy_unknown"
+            self.coordinates_are_pdf = False
+            return self
+        if self.locator_kind == "text_offset" or self.parser_version == TEXT_OFFSET_PARSER_VERSION:
+            self.locator_kind = "text_offset"
+            self.page_number = None
+            self.bbox = []
+            self.bbox_coordinate_space = None
+            self.coordinates_are_pdf = False
+            self.pdf_regions = []
+            self.parser_version = TEXT_OFFSET_PARSER_VERSION
+            return self
+        if self.page_number is not None and self.page_number < 1:
+            self.page_number = None
         if self.bbox_coordinate_space is None:
             self.bbox_coordinate_space = (
                 "normalized_1000"
@@ -988,7 +1044,8 @@ class AnalysisRunRepository:
                 retrieval_score = float(raw_chunk.get("retrieval_score") or 0)
             except (TypeError, ValueError):
                 continue
-            if page_number < 1 or len(bbox) not in {0, 4}:
+            text_offset = raw_chunk.get("locator_kind") == "text_offset"
+            if not text_offset and (page_number < 1 or len(bbox) not in {0, 4}):
                 continue
             coordinate_space = str(
                 raw_chunk.get("bbox_coordinate_space") or "pdf_points"
@@ -1004,19 +1061,24 @@ class AnalysisRunRepository:
                     finding_id="retrieval_candidate",
                     document_block_id=block_id,
                     document_id=document_id,
-                    page_number=page_number,
                     section_path=str(
                         raw_chunk.get("section_path") or "招股书原文"
                     ),
                     text=text_value,
-                    bbox=bbox,
-                    bbox_coordinate_space=coordinate_space,
                     source_hash=hashlib.sha256(
                         text_value.encode("utf-8")
                     ).hexdigest(),
                     retrieval_score=retrieval_score,
                     relevance_score=0.0,
                     verifier_status="retrieval_candidate",
+                    **_locator_from_mapping(
+                        {
+                            **raw_chunk,
+                            "page_number": None if text_offset else page_number,
+                            "bbox": [] if text_offset else bbox,
+                            "bbox_coordinate_space": None if text_offset else coordinate_space,
+                        }
+                    ),
                 )
             )
         return recovered
@@ -1227,8 +1289,8 @@ class AnalysisRunRepository:
                 "updated_at": _now(),
                 "pdf": {
                     "status": "completed",
-                    "parsed_pages": total_pages or max((item.page_number for item in run.document_blocks), default=0),
-                    "total_pages": total_pages or max((item.page_number for item in run.document_blocks), default=0),
+                    "parsed_pages": total_pages or _pdf_page_ceiling(run.document_blocks),
+                    "total_pages": total_pages or _pdf_page_ceiling(run.document_blocks),
                     "parsed_blocks": len(run.document_blocks),
                 },
                 "index": {
@@ -1300,8 +1362,8 @@ class AnalysisRunRepository:
                 "updated_at": _now(),
                 "pdf": {
                     "status": "completed",
-                    "parsed_pages": total_pages or max((item.page_number for item in run.document_blocks), default=0),
-                    "total_pages": total_pages or max((item.page_number for item in run.document_blocks), default=0),
+                    "parsed_pages": total_pages or _pdf_page_ceiling(run.document_blocks),
+                    "total_pages": total_pages or _pdf_page_ceiling(run.document_blocks),
                     "parsed_blocks": len(run.document_blocks),
                 },
                 "index": {
@@ -1633,7 +1695,7 @@ class AnalysisRunRepository:
                         "evidence_found",
                         finding.agent_name if finding else "evidence_extractor",
                         f"发现证据：{finding.title if finding else item.section_path}",
-                        f"{item.section_path} 第 {item.page_number} 页：{item.text[:80]}",
+                        f"{format_evidence_location(item)}：{item.text[:80]}",
                         stage_key="evidence_extraction",
                         skill_id=finding.skill_id if finding else None,
                         action_label="发现",
@@ -1643,8 +1705,16 @@ class AnalysisRunRepository:
                             "document_block_id": item.document_block_id,
                             "document_id": item.document_id,
                             "page_number": item.page_number,
+                            "locator_kind": item.locator_kind,
+                            "char_start": item.char_start,
+                            "char_end": item.char_end,
                             "bbox": item.bbox,
                             "bbox_coordinate_space": item.bbox_coordinate_space,
+                            "table_header": item.table_header,
+                            "table_row": item.table_row,
+                            "table_column": item.table_column,
+                            "table_unit": item.table_unit,
+                            "pdf_regions": [region.model_dump() for region in item.pdf_regions],
                             "retrieval_score": item.retrieval_score,
                             "relevance_score": item.relevance_score,
                         },
@@ -2140,11 +2210,19 @@ class AnalysisRunRepository:
                 section_path=block.section_path,
                 block_type=block.block_type,
                 text=block.text,
-                bbox=block.bbox,
-                char_start=0,
-                char_end=len(block.text),
+                bbox=list(block.bbox),
+                bbox_coordinate_space=block.bbox_coordinate_space,
+                char_start=block.char_start,
+                char_end=block.char_end,
                 source_hash=block.source_hash,
                 parser_version=block.parser_version,
+                locator_kind=block.locator_kind,
+                coordinates_are_pdf=block.coordinates_are_pdf,
+                table_header=block.table_header,
+                table_row=block.table_row,
+                table_column=block.table_column,
+                table_unit=block.table_unit,
+                pdf_regions=[region.model_dump() for region in block.pdf_regions],
             )
             for block in _parse_document_blocks("draft", payload, payload.document_text)
         ]
@@ -2227,17 +2305,13 @@ class AnalysisRunRepository:
                         finding_id=finding.finding_id,
                         document_block_id=candidate["block_id"],
                         document_id=str(candidate.get("document_id") or ""),
-                        page_number=candidate["page_number"],
                         section_path=candidate["section_path"],
                         text=_candidate_excerpt(candidate, limit=300),
-                        bbox=candidate["bbox"],
-                        bbox_coordinate_space=candidate["bbox_coordinate_space"],
-                        char_start=candidate["char_start"],
-                        char_end=candidate["char_end"],
                         source_hash=candidate["source_hash"],
                         retrieval_score=float(candidate.get("retrieval_score") or 0.0),
                         relevance_score=float(candidate.get("relevance_score") or 0.0),
                         verifier_status="pending",
+                        **_locator_from_mapping(candidate),
                     )
                 )
                 finding.evidence_ids.append(evidence_id)
@@ -2474,17 +2548,13 @@ class AnalysisRunRepository:
                     finding_id=target_finding.finding_id,
                     document_block_id=candidate["block_id"],
                     document_id=candidate["document_id"],
-                    page_number=candidate["page_number"],
                     section_path=candidate["section_path"],
                     text=_candidate_excerpt(candidate, limit=300),
-                    bbox=candidate["bbox"],
-                    bbox_coordinate_space=candidate["bbox_coordinate_space"],
-                    char_start=candidate["char_start"],
-                    char_end=candidate["char_end"],
                     source_hash=candidate["source_hash"],
                     retrieval_score=candidate["retrieval_score"],
                     relevance_score=candidate["relevance_score"],
                     verifier_status="pending",
+                    **_locator_from_mapping(candidate),
                 )
             )
         return evidence
@@ -2553,7 +2623,8 @@ class AnalysisRunRepository:
                 "dedupe_key": dedupe_key,
                 "source_run_id": run.run_id,
                 "document_block_id": item.document_block_id,
-                "page_number": item.page_number,
+                # evidence_library.page_number is NOT NULL. Zero means no PDF page.
+                "page_number": item.page_number if item.page_number is not None else 0,
                 "section_path": item.section_path,
                 "text": item.text,
                 "created_at": _now(),
@@ -3264,11 +3335,10 @@ def _speculative_findings_from_retrieval(
                     finding_id=finding_id,
                     document_block_id=chunk_id,
                     document_id=str(chunk.get("document_id") or ""),
-                    page_number=int(chunk.get("page_number") or 0),
                     section_path=str(chunk.get("section_path") or "招股书原文"),
                     text=text_value[:300],
-                    bbox=[float(value) for value in chunk.get("bbox") or []][:4],
                     source_hash=hashlib.sha256(text_value.encode("utf-8")).hexdigest(),
+                    **_locator_from_mapping(chunk),
                     retrieval_score=float(chunk.get("retrieval_score") or 0.0),
                     relevance_score=min(
                         _SPECULATIVE_MAX_RELEVANCE,
@@ -3341,25 +3411,28 @@ def _compact_rule_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
 
 def _parse_document_blocks(run_id: str, payload: AnalysisRunCreate, text: str) -> list[DocumentBlock]:
     document_id = payload.document_id or f"doc_{hashlib.sha256(text.encode('utf-8')).hexdigest()[:12]}"
-    chunks = _chunk_text(text)
     blocks = []
     section = "招股书正文"
-    for idx, chunk in enumerate(chunks, start=1):
-        maybe_section = _detect_section(chunk)
+    for idx, chunk in enumerate(iter_text_chunks(text), start=1):
+        maybe_section = _detect_section(chunk.text)
         if maybe_section:
             section = maybe_section
-        source_hash = hashlib.sha256(chunk.encode("utf-8")).hexdigest()
+        source_hash = hashlib.sha256(chunk.text.encode("utf-8")).hexdigest()
         blocks.append(
             DocumentBlock(
                 block_id=f"block_{run_id}_{idx:04d}",
                 document_id=document_id,
-                page_number=idx,
+                page_number=None,
                 section_path=section,
-                text=chunk,
-                bbox=[0.0, 0.0, 595.0, 842.0],
-                char_start=(idx - 1) * 900,
-                char_end=(idx - 1) * 900 + len(chunk),
+                text=chunk.text,
+                bbox=[],
+                bbox_coordinate_space=None,
+                char_start=chunk.char_start,
+                char_end=chunk.char_end,
                 source_hash=source_hash,
+                parser_version=TEXT_OFFSET_PARSER_VERSION,
+                locator_kind="text_offset",
+                coordinates_are_pdf=False,
             )
         )
     return blocks
@@ -3380,27 +3453,75 @@ def _run_blocks_from_document(
             section_path=block.section_path,
             block_type=block.block_type,
             text=block.text,
-            bbox=block.bbox,
+            bbox=list(block.bbox or []),
+            bbox_coordinate_space=block.bbox_coordinate_space,
             char_start=block.char_start,
             char_end=block.char_end,
             source_hash=block.source_hash,
             parser_version=block.parser_version,
+            locator_kind=block.locator_kind,
+            coordinates_are_pdf=block.coordinates_are_pdf,
+            table_header=block.table_header,
+            table_row=block.table_row,
+            table_column=block.table_column,
+            table_unit=block.table_unit,
+            pdf_regions=[
+                PdfRegion.model_validate(region) for region in (block.pdf_regions or [])
+            ],
         )
         for block in blocks
     ]
 
 
-def _chunk_text(text: str, *, size: int = 900) -> list[str]:
-    paragraphs = [part.strip() for part in re.split(r"\n{2,}|\f", text) if part.strip()]
-    if not paragraphs:
-        paragraphs = [text.strip()] if text.strip() else []
-    chunks: list[str] = []
-    for paragraph in paragraphs:
-        for start in range(0, len(paragraph), size):
-            chunk = paragraph[start : start + size].strip()
-            if chunk:
-                chunks.append(chunk)
-    return chunks or ["未提供可解析文本。"]
+def _pdf_page_ceiling(blocks: list[DocumentBlock]) -> int:
+    pages = [
+        block.page_number
+        for block in blocks
+        if block.locator_kind == "pdf_page"
+        and isinstance(block.page_number, int)
+        and block.page_number >= 1
+    ]
+    return max(pages, default=0)
+
+
+def _locator_from_block(block: DocumentBlock) -> dict[str, Any]:
+    return {
+        "locator_kind": block.locator_kind,
+        "page_number": block.page_number,
+        "bbox": list(block.bbox),
+        "bbox_coordinate_space": block.bbox_coordinate_space,
+        "coordinates_are_pdf": block.coordinates_are_pdf,
+        "parser_version": block.parser_version,
+        "table_header": block.table_header,
+        "table_row": block.table_row,
+        "table_column": block.table_column,
+        "table_unit": block.table_unit,
+        "pdf_regions": list(block.pdf_regions),
+        "char_start": block.char_start,
+        "char_end": block.char_end,
+    }
+
+
+def _locator_from_mapping(candidate: dict[str, Any]) -> dict[str, Any]:
+    locator_kind = candidate.get("locator_kind")
+    if locator_kind not in {"pdf_page", "text_offset", "legacy_unknown"}:
+        locator_kind = "pdf_page" if candidate.get("coordinates_are_pdf", True) else "legacy_unknown"
+    regions = candidate.get("pdf_regions") or []
+    return {
+        "locator_kind": locator_kind,
+        "page_number": candidate.get("page_number"),
+        "bbox": [float(value) for value in candidate.get("bbox") or []],
+        "bbox_coordinate_space": candidate.get("bbox_coordinate_space"),
+        "coordinates_are_pdf": bool(candidate.get("coordinates_are_pdf", locator_kind == "pdf_page")),
+        "parser_version": str(candidate.get("parser_version") or ""),
+        "table_header": candidate.get("table_header"),
+        "table_row": candidate.get("table_row"),
+        "table_column": candidate.get("table_column"),
+        "table_unit": candidate.get("table_unit"),
+        "pdf_regions": [PdfRegion.model_validate(item) for item in regions if isinstance(item, dict) or isinstance(item, PdfRegion)],
+        "char_start": int(candidate.get("char_start") or 0),
+        "char_end": int(candidate.get("char_end") or 0),
+    }
 
 
 def _detect_section(text: str) -> str | None:
@@ -3462,14 +3583,10 @@ def _findings_and_evidence_from_hypotheses(
                     finding_id=finding_id,
                     document_block_id=block.block_id,
                     document_id=block.document_id,
-                    page_number=block.page_number,
                     section_path=block.section_path,
                     text=block.text[:300],
-                    bbox=block.bbox,
-                    bbox_coordinate_space=block.bbox_coordinate_space,
-                    char_start=block.char_start,
-                    char_end=block.char_end,
                     source_hash=block.source_hash,
+                    **_locator_from_block(block),
                     retrieval_score=0.0,
                     relevance_score=(
                         0.75 if hypothesis.evidence_grade == "direct" else 0.58
@@ -3610,31 +3727,16 @@ def _dedupe_evidence(evidence: list[RunEvidence]) -> list[RunEvidence]:
 
 def _chunk_evidence_candidate(item: ChunkSearchResult) -> dict[str, Any]:
     metadata = item.metadata if isinstance(item.metadata, dict) else {}
-    region = next(
-        (
-            candidate
-            for candidate in item.merged_bboxes
-            if isinstance(candidate, dict)
-            and int(candidate.get("page_idx", -1)) == item.page_idx
-        ),
-        {},
-    )
     return {
         "block_id": item.chunk_id,
         "document_id": item.document_id,
-        "page_number": item.page_idx,
         "section_path": str(metadata.get("section_path") or item.chunk_type),
         "text": item.text,
-        "bbox": [float(value) for value in region.get("bbox", [])],
-        "bbox_coordinate_space": str(
-            metadata.get("bbox_coordinate_space") or "pdf_points"
-        ),
-        "char_start": int(metadata.get("char_start") or 0),
-        "char_end": int(metadata.get("char_end") or 0),
         "source_hash": str(
             metadata.get("source_hash")
             or hashlib.sha256(item.text.encode("utf-8")).hexdigest()
         ),
+        **chunk_location_fields(item),
         "retrieval_score": item.score,
         "vector_score": item.vector_score,
         "text_score": item.text_score,
@@ -3680,17 +3782,13 @@ def _block_candidates_for_finding(
             {
                 "block_id": block.block_id,
                 "document_id": block.document_id,
-                "page_number": block.page_number,
                 "section_path": block.section_path,
                 "text": block.text,
-                "bbox": block.bbox,
-                "bbox_coordinate_space": block.bbox_coordinate_space,
-                "char_start": block.char_start,
-                "char_end": block.char_end,
                 "source_hash": block.source_hash,
                 "retrieval_score": 0.0,
                 "relevance_score": score,
                 "score": score,
+                **_locator_from_block(block),
             }
         )
     candidates.sort(key=lambda item: item["score"], reverse=True)
@@ -3744,8 +3842,37 @@ def _quality_review(run: AnalysisRun) -> dict[str, Any]:
         if not linked:
             issues.append(f"{finding.finding_id} / {finding.title} 缺少 PDF 原文证据。")
             continue
-        if any(item.page_number <= 0 or not item.bbox or not item.source_hash for item in linked):
-            issues.append(f"{finding.finding_id} / {finding.title} 的页码、bbox 或 source_hash 不完整。")
+        for item in linked:
+            if item.locator_kind == "legacy_unknown":
+                issues.append(
+                    f"{finding.finding_id} / {finding.title} 的历史定位未核实，不能按真实 PDF 证据通过质检。"
+                )
+                continue
+            if item.locator_kind == "text_offset" or not item.coordinates_are_pdf:
+                if item.page_number is not None or item.bbox:
+                    issues.append(
+                        f"{finding.finding_id} / {finding.title} 的纯文本证据带有伪造的 PDF 页码或坐标。"
+                    )
+                elif not item.source_hash or item.char_end < item.char_start:
+                    issues.append(
+                        f"{finding.finding_id} / {finding.title} 的文本偏移或 source_hash 不完整。"
+                    )
+                else:
+                    issues.append(
+                        f"{finding.finding_id} / {finding.title} 的证据是纯文本偏移，没有 PDF 页码与坐标，不能按真实 PDF 证据通过质检。"
+                    )
+                continue
+            if not passes_real_pdf_evidence(
+                locator_kind=item.locator_kind,
+                page_number=item.page_number,
+                bbox=item.bbox,
+                source_hash=item.source_hash,
+                coordinates_are_pdf=item.coordinates_are_pdf,
+                parser_version=item.parser_version,
+            ):
+                issues.append(
+                    f"{finding.finding_id} / {finding.title} 的 PDF 页码、bbox 或 source_hash 不完整。"
+                )
     if run.report is None:
         issues.append("报告尚未生成。")
     else:
