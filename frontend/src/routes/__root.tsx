@@ -10,6 +10,7 @@ import {
 import { useEffect, type ReactNode } from "react";
 
 import appCss from "../styles.css?url";
+import { isRetryableApiError } from "../lib/api-error";
 import { reportLovableError } from "../lib/lovable-error-reporting";
 import { SidebarProvider } from "@/components/ui/sidebar";
 import { AppSidebar } from "@/components/app-sidebar";
@@ -46,8 +47,13 @@ function ErrorComponent({ error, reset }: { error: Error; reset: () => void }) {
   return (
     <div className="flex min-h-screen items-center justify-center bg-background px-4">
       <div className="max-w-md text-center">
-        <h1 className="text-xl font-semibold tracking-tight">这个页面加载失败</h1>
-        <p className="mt-2 text-sm text-muted-foreground">服务端遇到问题，你可以重试或返回首页。</p>
+        <h1 className="text-xl font-semibold tracking-tight">
+          {isRetryableApiError(error) ? "服务暂时不可用" : "这个页面加载失败"}
+        </h1>
+        <p className="mt-2 text-sm text-muted-foreground">{error.message}</p>
+        {isRetryableApiError(error) ? (
+          <p className="mt-1 text-sm text-muted-foreground">这是暂时性故障，可以重试。</p>
+        ) : null}
         <div className="mt-6 flex flex-wrap justify-center gap-2">
           <button
             onClick={() => {

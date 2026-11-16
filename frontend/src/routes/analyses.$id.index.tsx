@@ -28,6 +28,7 @@ import {
   type AnalysisRunEvent,
   type AnalysisProgress,
 } from "@/lib/data-service";
+import { isRetryableApiError } from "@/lib/api-error";
 import { evidenceLocationLabel, pdfPageNumber } from "@/lib/evidence-location";
 import { type Agent } from "@/lib/types";
 import { PdfViewer } from "@/components/pdf-viewer";
@@ -183,7 +184,11 @@ function RealtimeStream() {
       if (run.status === "ready") {
         setStarting(true);
         startPoll = setInterval(() => {
-          if (!cancelled) void refreshTrace().catch(() => undefined);
+          if (!cancelled) {
+            void refreshTrace().catch((error: unknown) => {
+              if (!cancelled && isRetryableApiError(error)) setStreamError(error.message);
+            });
+          }
         }, 2000);
         try {
           activeRun = await startAnalysisRun(id);
@@ -200,7 +205,9 @@ function RealtimeStream() {
       }
 
       if (terminalStatuses.has(activeRun.status) || pausedStatuses.has(activeRun.status)) {
-        await refreshTrace().catch(() => undefined);
+        await refreshTrace().catch((error: unknown) => {
+          if (!cancelled && isRetryableApiError(error)) setStreamError(error.message);
+        });
         return;
       }
 
