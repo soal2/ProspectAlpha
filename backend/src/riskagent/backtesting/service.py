@@ -17,6 +17,7 @@ import logging
 import re
 import uuid
 from datetime import datetime, timezone
+from itertools import groupby
 from io import TextIOWrapper
 from pathlib import Path
 from typing import Any
@@ -90,9 +91,13 @@ class BacktestSummary(BaseModel):
     model: str = "可解释规则评分卡"
     modelVersion: str = SCORECARD_VERSION
     samples: int
-    auc: float
-    ks: float
-    lift10: float
+    evaluationScope: str = "cohort"
+    auc: float | None = None
+    ks: float | None = None
+    aucReason: str | None = None
+    ksReason: str | None = None
+    lift10: float | None = None
+    liftTop20: float | None = None
     recall: float
     createdAt: str
     status: str
@@ -162,6 +167,36 @@ class _PinnedScore:
         self.score_id = payload.get("score_id") or ""
         self.run_id = payload.get("run_id") or ""
         self.analysis_as_of_date = payload.get("analysis_as_of_date") or ""
+
+
+def _binary_auc(positive_scores: list[float], negative_scores: list[float]) -> tuple[float | None, str | None]:
+    if not positive_scores or not negative_scores:
+        return None, "单一类别无法计算 AUC"
+    wins = sum(
+        1 if positive > negative else 0.5 if positive == negative else 0
+        for positive in positive_scores
+        for negative in negative_scores
+    )
+    return wins / (len(positive_scores) * len(negative_scores)), None
+
+
+def _grouped_ks(pairs: list[tuple[float, bool]]) -> tuple[float | None, str | None]:
+    """KS after collapsing identical scores, so tie order cannot change the value."""
+
+    positives = sum(flag for _score, flag in pairs)
+    negatives = len(pairs) - positives
+    if positives == 0 or negatives == 0:
+        return None, "单一类别无法计算 KS"
+    ordered = sorted(pairs, key=lambda item: -item[0])
+    seen_positive = 0
+    seen_negative = 0
+    best = 0.0
+    for _score, group in groupby(ordered, key=lambda item: item[0]):
+        tied = list(group)
+        seen_positive += sum(flag for _tied_score, flag in tied)
+        seen_negative += sum(not flag for _tied_score, flag in tied)
+        best = max(best, abs(seen_positive / positives - seen_negative / negatives))
+    return best, None
 
 
 def _stable_hash(value: Any) -> str:
@@ -552,6 +587,7 @@ class BacktestService:
         )
 
     def create_backtest(self, request: BacktestCreate) -> BacktestSummary:
+        """Create a one-company replay. Cohort metrics need two or more labeled samples."""
         with self.session_factory() as session:
             backtest_id = f"bt_{uuid.uuid4().hex[:12]}"
             snapshot = session.get(MarketDatasetSnapshotRow, request.snapshot_id)
@@ -826,7 +862,12 @@ class BacktestService:
             weight_comparison = {
                 "d1_only": baseline,
                 "hidden_first": full,
-                "uplift": {key: round(float(full[key]) - float(baseline[key]), 4) for key in ("auc", "ks", "lift_top20", "recall")},
+                "uplift": {
+                    key: None
+                    if full.get(key) is None or baseline.get(key) is None
+                    else round(float(full[key]) - float(baseline[key]), 4)
+                    for key in ("auc", "ks", "lift_top20", "recall")
+                },
             }
             metrics = {"samples": len(eligible), "precision": precision, "recall": recall, "f1": 2 * precision * recall / (precision + recall) if precision + recall else 0, "lift_top20": full["lift_top20"], "auc": full["auc"], "ks": full["ks"], "top_count": top_count, "snapshot_id": run.snapshot_id, "scorecard_version": SCORECARD_VERSION, "protocol": EVALUATION_PROTOCOL, "roc": roc, "lift": lift, "weight_comparison": weight_comparison, "ablation_results": ablations, "industry_cohorts": industry_cohorts, "input_hash": _stable_hash({"dataset": session.get(MarketDatasetSnapshotRow, run.snapshot_id).file_hashes, "candidates": [{"code": item.wind_code, "score": item.score_id, "label": item.label_id} for _, _, item in eligible]})}
             for label, score, candidate in eligible:
@@ -855,25 +896,39 @@ class BacktestService:
 
     @staticmethod
     def _variant_metrics(eligible, score_getter) -> dict[str, Any]:
-        ordered = sorted(eligible, key=lambda item: score_getter(item[1]), reverse=True)
-        top_count = max(1, (len(ordered) + 4) // 5)
-        positives = sum(label.significant_decline for label, *_ in ordered)
-        selected_positive = sum(label.significant_decline for label, *_ in ordered[:top_count])
-        precision = selected_positive / top_count
-        recall = selected_positive / positives if positives else 0.0
+        ordered = sorted(eligible, key=lambda item: (-float(score_getter(item[1])), str(item[2].wind_code) if len(item) > 2 else ""))
+        positives = sum(bool(label.significant_decline) for label, *_ in ordered)
         base = positives / len(ordered) if ordered else 0.0
-        positive_scores = [score_getter(score) for label, score, *_ in ordered if label.significant_decline]
-        negative_scores = [score_getter(score) for label, score, *_ in ordered if not label.significant_decline]
-        auc = 0.0 if not positive_scores or not negative_scores else sum(1 if p > n else 0.5 if p == n else 0 for p in positive_scores for n in negative_scores) / (len(positive_scores) * len(negative_scores))
-        seen_p = seen_n = 0
-        negatives = len(ordered) - positives
-        ks = 0.0
-        if positives and negatives:
-            for label, *_ in ordered:
-                seen_p += bool(label.significant_decline)
-                seen_n += not bool(label.significant_decline)
-                ks = max(ks, abs(seen_p / positives - seen_n / negatives))
-        return {"samples": len(ordered), "precision": precision, "recall": recall, "lift_top20": precision / base if base else 0.0, "auc": auc, "ks": ks, "top_count": top_count}
+        top20_count = max(1, (len(ordered) + 4) // 5) if ordered else 0
+        top10_count = max(1, (len(ordered) + 9) // 10) if ordered else 0
+        selected20 = sum(bool(label.significant_decline) for label, *_ in ordered[:top20_count])
+        selected10 = sum(bool(label.significant_decline) for label, *_ in ordered[:top10_count])
+        precision = selected20 / top20_count if top20_count else 0.0
+        recall = selected20 / positives if positives else 0.0
+        positive_scores = [float(score_getter(score)) for label, score, *_ in ordered if label.significant_decline]
+        negative_scores = [float(score_getter(score)) for label, score, *_ in ordered if not label.significant_decline]
+        auc, auc_reason = _binary_auc(positive_scores, negative_scores)
+        ks, ks_reason = _grouped_ks([(float(score_getter(score)), bool(label.significant_decline)) for label, score, *_ in ordered])
+        lift_top20 = (selected20 / top20_count) / base if base and top20_count else None
+        lift_top10 = (selected10 / top10_count) / base if base and top10_count else None
+        if len(ordered) < 2:
+            auc, auc_reason = None, "单公司回放不计算队列 AUC"
+            ks, ks_reason = None, "单公司回放不计算队列 KS"
+            lift_top10 = None
+            lift_top20 = None
+        return {
+            "samples": len(ordered),
+            "precision": precision,
+            "recall": recall,
+            "lift_top10": lift_top10,
+            "lift_top20": lift_top20,
+            "auc": auc,
+            "auc_reason": auc_reason,
+            "ks": ks,
+            "ks_reason": ks_reason,
+            "top_count": top20_count,
+            "evaluation_scope": "single_company" if len(ordered) < 2 else "cohort",
+        }
 
     def _retrospective_attribution(
         self,
@@ -978,27 +1033,50 @@ class BacktestService:
         return bool(security and (not start or (security.listing_date or "") >= start) and (not end or (security.listing_date or "") <= end))
 
     @staticmethod
-    def _auc(items: list[tuple[IpoOutcomeLabelRow, RiskScoreSnapshotRow]]) -> float:
-        positives = [score.total_score for label, score, *_ in items if label.significant_decline]
-        negatives = [score.total_score for label, score, *_ in items if not label.significant_decline]
-        if not positives or not negatives: return 0.0
-        return sum(1 if p > n else 0.5 if p == n else 0 for p in positives for n in negatives) / (len(positives) * len(negatives))
+    def _auc(items: list[tuple[IpoOutcomeLabelRow, RiskScoreSnapshotRow]]) -> float | None:
+        value, _reason = _binary_auc(
+            [score.total_score for label, score, *_ in items if label.significant_decline],
+            [score.total_score for label, score, *_ in items if not label.significant_decline],
+        )
+        return value
 
     @staticmethod
-    def _ks(items: list[tuple[IpoOutcomeLabelRow, RiskScoreSnapshotRow]]) -> float:
-        positives, negatives = sum(label.significant_decline for label, *_ in items), sum(not label.significant_decline for label, *_ in items)
-        if not positives or not negatives: return 0.0
-        seen_p = seen_n = 0; best = 0.0
-        for label, *_ in items:
-            seen_p += bool(label.significant_decline); seen_n += not bool(label.significant_decline)
-            best = max(best, abs(seen_p / positives - seen_n / negatives))
-        return best
+    def _ks(items: list[tuple[IpoOutcomeLabelRow, RiskScoreSnapshotRow]]) -> float | None:
+        value, _reason = _grouped_ks(
+            [(score.total_score, bool(label.significant_decline)) for label, score, *_ in items]
+        )
+        return value
 
     @staticmethod
     def _summary(row: BacktestRunRow, job_id: str | None = None) -> BacktestSummary:
-        metrics = row.metrics
+        metrics = row.metrics or {}
         labels = {"completed": "完成", "failed": "失败", "candidate_review": "待确认", "ready": "待运行", "candidate_pending": "构建候选中", "running": "运行中"}
-        return BacktestSummary(id=row.backtest_id, name=row.name, samples=int(metrics.get("samples", 0)), auc=round(float(metrics.get("auc", 0)), 4), ks=round(float(metrics.get("ks", 0)), 4), lift10=round(float(metrics.get("lift_top20", 0)), 3), recall=round(float(metrics.get("recall", 0)), 4), createdAt=row.created_at, status=labels.get(row.status, row.status), candidateSetId=row.candidate_set_id, jobId=job_id)
+        samples = int(metrics.get("samples", 0))
+        scope = str(metrics.get("evaluation_scope") or ("single_company" if samples < 2 else "cohort"))
+
+        def _optional(name: str) -> float | None:
+            value = metrics.get(name)
+            if value is None:
+                return None
+            return round(float(value), 4 if name in {"auc", "ks", "recall"} else 3)
+
+        return BacktestSummary(
+            id=row.backtest_id,
+            name=row.name,
+            samples=samples,
+            evaluationScope=scope,
+            auc=_optional("auc"),
+            ks=_optional("ks"),
+            aucReason=metrics.get("auc_reason"),
+            ksReason=metrics.get("ks_reason"),
+            lift10=_optional("lift_top10"),
+            liftTop20=_optional("lift_top20"),
+            recall=round(float(metrics.get("recall", 0) or 0), 4),
+            createdAt=row.created_at,
+            status=labels.get(row.status, row.status),
+            candidateSetId=row.candidate_set_id,
+            jobId=job_id,
+        )
 
 
 service = BacktestService()

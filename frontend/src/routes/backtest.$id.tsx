@@ -121,9 +121,10 @@ function BacktestDetail() {
       {/* KPI strip */}
       <div className="mt-6 grid gap-3 sm:grid-cols-3 lg:grid-cols-6">
         <Kpi label="样本量" value={b.samples.toString()} />
-        <Kpi label="AUC" value={b.auc.toFixed(3)} accent />
-        <Kpi label="KS" value={b.ks.toFixed(3)} />
-        <Kpi label="Lift@Top20%" value={`${b.lift10.toFixed(1)}×`} />
+        <Kpi label="AUC" value={b.auc == null ? "—" : b.auc.toFixed(3)} accent />
+        <Kpi label="KS" value={b.ks == null ? "—" : b.ks.toFixed(3)} />
+        <Kpi label="Lift@10%" value={b.lift10 == null ? "—" : `${b.lift10.toFixed(1)}×`} />
+        <Kpi label="Lift@Top20%" value={(b.liftTop20 ?? null) == null ? "—" : `${b.liftTop20.toFixed(1)}×`} />
         <Kpi label="T+5 下跌召回" value={`${(b.recall * 100).toFixed(0)}%`} />
         <Kpi label="节省工时" value={`${detail?.hoursSaved ?? 0} h`} />
       </div>
@@ -199,7 +200,7 @@ function BacktestDetail() {
           </div>
         </Card>
 
-        <Card title="ROC 曲线" caption={`AUC = ${b.auc.toFixed(3)}`}>
+        <Card title="ROC 曲线" caption={b.auc == null ? (b.aucReason ?? "AUC 不适用") : `AUC = ${b.auc.toFixed(3)}`}>
           <div className="h-72">
             <ResponsiveContainer width="100%" height="100%">
               <AreaChart data={detail?.roc ?? []}>
