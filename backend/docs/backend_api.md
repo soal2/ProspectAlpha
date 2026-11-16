@@ -256,14 +256,14 @@ Returns source-grounded evidence snippets for the run.
 
 Location fields:
 
-- `document_id`: source prospectus identifier
-- `page_number`: 0-based PDF page index
-- `bbox`: primary page-local MinerU bbox
-- `bbox_regions[]`: page-local bbox unions; regions from different pages are never merged
-- `bbox_coordinate_space`: MinerU normalized `1000 x 1000`, top-left origin
+- `locator_kind`: `pdf_page` or `text_offset`
+- `page_number`: 1-based PDF page when `locator_kind` is `pdf_page`; `null` for plain text
+- `bbox`: parser-produced page box for a PDF block; `[]` for plain text
+- `pdf_regions[]`: real pages touched by the evidence. Cross-page tables list each page instead of one invented box
+- `char_start` / `char_end`: offsets into the original plain text when `locator_kind` is `text_offset`
+- `table_header`, `table_row`, `table_column`, `table_unit`: present only when the source table actually has that value
 
-Clients display `page_number + 1`, request the PDF.js page with `page_number + 1`,
-and scale bbox coordinates from `bbox_coordinate_space` into the rendered viewport.
+Plain text does not receive a synthetic page number or a full-page bbox. Clients must not render `P.1` or open a PDF highlight when `page_number` is null.
 
 ### `GET /analysis-runs/{run_id}/findings`
 

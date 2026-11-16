@@ -1,3 +1,4 @@
+import { evidenceLocationLabel, pdfPageNumber } from "./evidence-location";
 import { API_BASE_URL } from "./env";
 import type {
   Agent,
@@ -309,17 +310,23 @@ type BackendEvidence = {
   finding_id: string;
   document_block_id: string;
   document_id: string;
-  page_number: number;
+  locator_kind?: "pdf_page" | "text_offset";
+  page_number: number | null;
   section_path: string;
   text: string;
   bbox: number[];
-  bbox_coordinate_space: "pdf_points" | "normalized_1000";
+  bbox_coordinate_space?: "pdf_points" | "normalized_1000" | null;
   char_start: number;
   char_end: number;
   source_hash: string;
   retrieval_score: number;
   relevance_score: number;
   verifier_status: string;
+  table_header?: string | null;
+  table_row?: string | null;
+  table_column?: string | null;
+  table_unit?: string | null;
+  pdf_regions?: { page_number: number; bbox: number[] }[];
 };
 
 type BackendAgent = Agent;
@@ -501,7 +508,18 @@ async function fetchEvidenceDetailItems(id: string): Promise<EvidenceDetailItem[
     return evidence.map((item) => ({
       id: item.evidence_id,
       section: item.section_path,
-      page: item.page_number,
+      page: pdfPageNumber(item.page_number, item.locator_kind),
+      location: evidenceLocationLabel({
+        locator_kind: item.locator_kind,
+        page_number: item.page_number,
+        char_start: item.char_start,
+        char_end: item.char_end,
+        table_header: item.table_header,
+        table_row: item.table_row,
+        table_column: item.table_column,
+        table_unit: item.table_unit,
+        pdf_regions: item.pdf_regions,
+      }),
       conf:
         item.verifier_status === "retrieval_candidate"
           ? item.retrieval_score
@@ -515,8 +533,8 @@ async function fetchEvidenceDetailItems(id: string): Promise<EvidenceDetailItem[
       snippet: item.text,
       risk: riskByFinding[item.finding_id] ?? evidenceStatusLabel(item.verifier_status),
       documentId: item.document_id,
-      bbox: item.bbox,
-      bboxCoordinateSpace: item.bbox_coordinate_space,
+      bbox: item.locator_kind === "text_offset" ? [] : item.bbox,
+      bboxCoordinateSpace: item.bbox_coordinate_space ?? undefined,
     }));
   } catch (err) {
     if (isNotFound(err)) return [];
@@ -560,7 +578,18 @@ async function fetchKnowledgeData(): Promise<KnowledgeData> {
       ),
       name: run.company_name,
       section: item.section_path,
-      page: item.page_number,
+      page: pdfPageNumber(item.page_number, item.locator_kind),
+      location: evidenceLocationLabel({
+        locator_kind: item.locator_kind,
+        page_number: item.page_number,
+        char_start: item.char_start,
+        char_end: item.char_end,
+        table_header: item.table_header,
+        table_row: item.table_row,
+        table_column: item.table_column,
+        table_unit: item.table_unit,
+        pdf_regions: item.pdf_regions,
+      }),
       conf:
         item.verifier_status === "retrieval_candidate"
           ? item.retrieval_score
@@ -574,8 +603,8 @@ async function fetchKnowledgeData(): Promise<KnowledgeData> {
       snippet: item.text,
       risk: riskByFinding[item.finding_id] ?? evidenceStatusLabel(item.verifier_status),
       documentId: item.document_id,
-      bbox: item.bbox,
-      bboxCoordinateSpace: item.bbox_coordinate_space,
+      bbox: item.locator_kind === "text_offset" ? [] : item.bbox,
+      bboxCoordinateSpace: item.bbox_coordinate_space ?? undefined,
       createdAt: run.created_at,
     }));
   });
@@ -599,7 +628,8 @@ async function fetchKnowledgeData(): Promise<KnowledgeData> {
       evidenceId: preview?.id ?? "",
       code: preview?.code ?? "",
       section: preview?.section ?? "",
-      page: preview?.page ?? 0,
+      page: preview?.page ?? null,
+      location: preview?.location ?? "无 PDF 页",
       linkedConclusions: preview ? [preview.risk] : [],
     },
   };
