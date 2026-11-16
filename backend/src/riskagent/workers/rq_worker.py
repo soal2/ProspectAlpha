@@ -19,21 +19,19 @@ def check_redis_ready() -> bool:
 def make_worker():
     from rq import Queue, Worker
 
+    from riskagent.workers.heartbeat import configured_rq_queue_names
+
     connection = redis_connection()
-    queue_names = list(
-        dict.fromkeys(
-            [
-                os.getenv("ANALYSIS_QUEUE_NAME", "analysis"),
-                os.getenv("DOCUMENT_QUEUE_NAME", "documents"),
-            ]
-        )
-    )
-    queues = [Queue(queue_name, connection=connection) for queue_name in queue_names]
+    queues = [Queue(queue_name, connection=connection) for queue_name in configured_rq_queue_names()]
     return Worker(queues, connection=connection)
 
 
 def main() -> None:
     check_redis_ready()
+    from riskagent.workers.heartbeat import configured_rq_queue_names, start_heartbeat
+
+    # Heartbeat the same queues Worker.work() will block on, including during a long job.
+    start_heartbeat(queues=configured_rq_queue_names())
     worker = make_worker()
     worker.work(with_scheduler=True)
 
