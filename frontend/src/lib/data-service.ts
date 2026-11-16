@@ -1,4 +1,4 @@
-import { API_BASE_URL } from "./env";
+import { API_BASE_URL, apiAuthHeaders } from "./env";
 import type {
   Agent,
   AnalysisSummary,
@@ -661,10 +661,10 @@ async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
   const isFormData = init?.body instanceof FormData;
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...init,
-    headers: {
+    headers: apiAuthHeaders({
       ...(isFormData ? {} : { "content-type": "application/json" }),
       ...(init?.headers ?? {}),
-    },
+    }),
   });
   if (!response.ok) {
     throw new Error(await responseError(response));
@@ -744,7 +744,11 @@ export async function uploadMarketData(files: { security: File; company: File; p
   body.append("security", files.security);
   body.append("company", files.company);
   body.append("prices", files.prices);
-  const response = await fetch(`${API_BASE_URL}/backtests/market-data/upload`, { method: "POST", body });
+  const response = await fetch(`${API_BASE_URL}/backtests/market-data/upload`, {
+    method: "POST",
+    body,
+    headers: apiAuthHeaders(),
+  });
   if (!response.ok) throw new Error((await response.json().catch(() => ({ detail: response.statusText }))).detail ?? "市场数据上传失败");
   return response.json() as Promise<{ snapshot_id: string; labels_created: number }>;
 }
@@ -814,7 +818,7 @@ export async function updateAnalysisInputs(runId: string, patch: AnalysisRunInpu
 export async function startAnalysisRun(runId: string) {
   const response = await fetch(`${API_BASE_URL}/analysis-runs/${runId}/start`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: apiAuthHeaders({ "content-type": "application/json" }),
   });
   if (response.status === 409) {
     return getAnalysisRun(runId);
@@ -918,7 +922,7 @@ export async function askDocument(
 ): Promise<AskResult> {
   const response = await fetch(`${API_BASE_URL}/documents/${documentId}/ask`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: apiAuthHeaders({ "content-type": "application/json" }),
     body: JSON.stringify({ question, top_k: options.topK ?? 6 }),
     signal: options.signal,
   });
@@ -997,7 +1001,7 @@ export async function chatWithAssistant(
 ): Promise<ChatResult> {
   const response = await fetch(`${API_BASE_URL}/chat`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: apiAuthHeaders({ "content-type": "application/json" }),
     body: JSON.stringify({ message, history }),
     signal: options.signal,
   });
@@ -1057,7 +1061,7 @@ export async function streamAnalysisRun(
   const after = options.after ? `?after=${options.after}` : "";
   const response = await fetch(`${API_BASE_URL}/analysis-runs/${runId}/stream${after}`, {
     method: "GET",
-    headers: { accept: "text/event-stream" },
+    headers: apiAuthHeaders({ accept: "text/event-stream" }),
     signal: options.signal,
   });
   if (!response.ok || !response.body) {

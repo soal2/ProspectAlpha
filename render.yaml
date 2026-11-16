@@ -64,6 +64,16 @@ services:
         value: prospect-alpha
       - key: CORS_ALLOW_ORIGINS
         value: https://soal2.github.io
+      - key: API_AUTH_TOKEN
+        sync: false
+      - key: API_MAX_UPLOAD_BYTES
+        value: "83886080"
+      - key: API_MAX_JSON_BYTES
+        value: "8388608"
+      - key: API_MAX_STORED_DOCUMENTS
+        value: "0"
+      - key: API_MAX_ANALYSIS_RUNS
+        value: "0"
       - key: A2A_PUBLIC_BASE_URL
         fromService:
           type: web

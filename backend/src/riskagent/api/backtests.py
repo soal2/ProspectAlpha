@@ -6,6 +6,7 @@ from pathlib import Path
 from fastapi import APIRouter, BackgroundTasks, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
+from riskagent.api.limits import ensure_upload_within_limit
 from riskagent.backtesting.service import (
     BacktestCreate,
     BacktestCandidatePreview,
@@ -38,8 +39,10 @@ async def upload_market_data(
     for key, upload in {"security": security, "company": company, "prices": prices}.items():
         if not upload.filename or not upload.filename.lower().endswith(".csv"):
             raise HTTPException(status_code=400, detail=f"{key} 必须是 CSV 文件")
+        content = await upload.read()
+        ensure_upload_within_limit(content)
         path = upload_dir / f"{key}.csv"
-        path.write_bytes(await upload.read())
+        path.write_bytes(content)
         paths[key] = str(path)
     try:
         return service.import_market_data(MarketImportRequest(security_csv=paths["security"], company_csv=paths["company"], prices_csv=paths["prices"]))

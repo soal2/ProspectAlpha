@@ -18,6 +18,11 @@ services:
       A2A_PUBLIC_BASE_URL: ${A2A_PUBLIC_BASE_URL:-http://localhost:8000}
       LANGGRAPH_CHECKPOINT_BACKEND: postgres
       CORS_ALLOW_ORIGINS: http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174
+      API_AUTH_TOKEN: ${API_AUTH_TOKEN:-}
+      API_MAX_UPLOAD_BYTES: ${API_MAX_UPLOAD_BYTES:-83886080}
+      API_MAX_JSON_BYTES: ${API_MAX_JSON_BYTES:-8388608}
+      API_MAX_STORED_DOCUMENTS: ${API_MAX_STORED_DOCUMENTS:-0}
+      API_MAX_ANALYSIS_RUNS: ${API_MAX_ANALYSIS_RUNS:-0}
       DATABASE_URL: postgresql+psycopg://prospect_alpha:prospect_alpha@postgres:5432/prospect_alpha
       REDIS_URL: redis://redis:6379/0
       MINIO_ENDPOINT: minio:9000

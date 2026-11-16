@@ -21,6 +21,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
 
 from riskagent.a2a import build_dynamic_expert_a2a_routes
+from riskagent.api.auth import SingleUserAuthMiddleware
 from riskagent.agent_experts import AgentSpec, AgentSpecRepository
 from riskagent.api import agents, analysis, analysis_options, backtests, chat, documents, knowledge, risk_rules, skills
 from riskagent.seed_data import AGENT_EXPERTS, AGENT_SPECS
@@ -74,6 +75,13 @@ def create_app() -> FastAPI:
     # required Skill must fail before the application advertises readiness.
     initialize_skill_catalog()
     app = FastAPI(title="ProspectAlpha RiskAgent API", version="0.1.0")
+    if os.getenv("APP_ENV", "").strip().lower() == "production" and not os.getenv("API_AUTH_TOKEN", "").strip():
+        logger.warning(
+            "API_AUTH_TOKEN is unset while APP_ENV=production. "
+            "Repository deployment manifests do not configure an authenticating gateway; "
+            "application auth stays disabled until a token is configured."
+        )
+    app.add_middleware(SingleUserAuthMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=_cors_origins(),

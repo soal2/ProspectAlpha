@@ -24,6 +24,7 @@ jobs:
     env:
       GITHUB_PAGES_DEPLOY: "true"
       VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL }}
+      VITE_API_AUTH_TOKEN: ${{ vars.VITE_API_AUTH_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2

@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { getReportData } from "@/lib/data-service";
-import { API_BASE_URL } from "@/lib/env";
+import { API_BASE_URL, apiAuthHeaders } from "@/lib/env";
 import { type RiskLevel } from "@/lib/types";
 import { RiskBadge } from "@/components/risk-badge";
 
@@ -247,7 +247,7 @@ function reportArtifactUrl(runId: string) {
 }
 
 async function downloadHtml(url: string, filename: string) {
-  const response = await fetch(`${url}?download=1`);
+  const response = await fetch(`${url}?download=1`, { headers: apiAuthHeaders() });
   if (!response.ok) throw new Error("报告下载失败");
   const blob = new Blob([await response.text()], { type: "text/html;charset=utf-8" });
   const objectUrl = URL.createObjectURL(blob);

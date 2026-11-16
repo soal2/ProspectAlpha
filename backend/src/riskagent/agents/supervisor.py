@@ -158,6 +158,7 @@ class AgentState(TypedDict, total=False):
     text: str
     document_id: str
     stock_code: str
+    data_cutoff_date: str
     structured_inputs: dict[str, Any]
     skill_snapshot: dict[str, Any]
     document_block_ids: list[str]
@@ -228,6 +229,7 @@ class AgentTeamSupervisor:
         text: str,
         document_id: str = "",
         stock_code: str = "",
+        data_cutoff_date: str = "",
         structured_inputs: dict[str, Any] | None = None,
         skill_snapshot: dict[str, Any] | None = None,
         document_block_ids: list[str] | None = None,
@@ -244,6 +246,8 @@ class AgentTeamSupervisor:
             "text": text,
             "document_id": document_id,
             "stock_code": stock_code,
+            "data_cutoff_date": data_cutoff_date
+            or str((structured_inputs or {}).get("data_cutoff_date") or ""),
             "structured_inputs": structured_inputs or {},
             "skill_snapshot": skill_snapshot or {},
             "document_block_ids": document_block_ids or [],
@@ -562,6 +566,7 @@ class AgentTeamSupervisor:
                             text=state["text"],
                             document_id=state.get("document_id", ""),
                             stock_code=state.get("stock_code", ""),
+                            data_cutoff_date=str(state.get("data_cutoff_date") or ""),
                             structured_inputs=state.get("structured_inputs", {}),
                             skill_snapshot=state.get("skill_snapshot", {}),
                             document_block_ids=state.get("document_block_ids", []),
@@ -716,6 +721,7 @@ class AgentTeamSupervisor:
                                 text=state["text"],
                                 document_id=state.get("document_id", ""),
                                 stock_code=state.get("stock_code", ""),
+                                data_cutoff_date=str(state.get("data_cutoff_date") or ""),
                                 structured_inputs=state.get("structured_inputs", {}),
                                 skill_snapshot=state.get("skill_snapshot", {}),
                                 document_block_ids=state.get("document_block_ids", []),
@@ -957,6 +963,7 @@ class AgentTeamSupervisor:
         text: str,
         document_id: str = "",
         stock_code: str = "",
+        data_cutoff_date: str = "",
         structured_inputs: dict[str, Any] | None = None,
         skill_snapshot: dict[str, Any] | None = None,
         document_block_ids: list[str] | None = None,
@@ -1016,6 +1023,8 @@ class AgentTeamSupervisor:
                     skill_version=str(metadata.get("version") or "0.0.0"),
                     stock_code=stock_code or None,
                     company_name=str((structured_inputs or {}).get("company_name") or ""),
+                    data_cutoff_date=data_cutoff_date
+                    or str((structured_inputs or {}).get("data_cutoff_date") or ""),
                     document_id=document_id,
                     document_block_ids=document_block_ids or [],
                     structured_inputs=structured_inputs or {},
