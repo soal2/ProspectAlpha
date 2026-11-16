@@ -141,6 +141,26 @@ def test_csrf_and_origin_block_mutations_before_work(monkeypatch) -> None:
     assert calls == []
 
 
+def test_expired_session_is_rejected(monkeypatch) -> None:
+    _enable(monkeypatch)
+    from riskagent.api import auth as auth_module
+
+    client = TestClient(create_app())
+    logged_in = client.post(
+        "/auth/login",
+        json={"username": "operator", "password": _PASSWORD},
+        headers=_ORIGIN,
+    )
+    assert logged_in.status_code == 200
+    with auth_module._LOCK:
+        for record in auth_module._SESSIONS.values():
+            record.expires_at = 0
+    again = client.get("/analysis-runs")
+    assert again.status_code == 401
+    assert _PASSWORD not in again.text
+    assert _SECRET not in again.text
+
+
 def test_logout_revokes_the_session(monkeypatch) -> None:
     _enable(monkeypatch)
     client = TestClient(create_app())

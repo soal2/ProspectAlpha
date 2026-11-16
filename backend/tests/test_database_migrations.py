@@ -110,18 +110,48 @@ def test_stamp_baseline_is_explicit_and_refuses_an_empty_database(tmp_path):
 
 
 def test_score_snapshot_revision_follows_extension_pattern(tmp_path):
+    from riskagent.models import BacktestCandidateSampleRow, RiskScoreSnapshotRow
+
+    assert "content_hash" in RiskScoreSnapshotRow.__table__.c
+    assert "pinned_score" in BacktestCandidateSampleRow.__table__.c
     url = f"sqlite:///{tmp_path / 'scores.db'}"
     command.upgrade(_config(url), "0002_extension_pattern")
     engine = create_engine(url)
-    with engine.connect() as connection:
+    with engine.begin() as connection:
         before = {row[1] for row in connection.execute(text("PRAGMA table_info(risk_score_snapshots)"))}
+        connection.execute(
+            text(
+                """
+                INSERT INTO risk_score_snapshots (
+                    score_id, run_id, wind_code, scorecard_version, total_score,
+                    risk_level, breakdown, limitations, analysis_as_of_date,
+                    input_hash, evidence_hash, finding_snapshot, industry_profile,
+                    text_signal_snapshot, weight_profile, research_snapshot_ids,
+                    created_at
+                ) VALUES (
+                    'score_old', 'run_old', '0001.HK', 'ipo-risk-v2-hidden-first', 10,
+                    'medium', '{}', '[]', '2020-01-01', 'input', 'evidence',
+                    '[]', '{}', '{}', '{}', '[]', '2020-01-01T00:00:00Z'
+                )
+                """
+            )
+        )
     assert "content_hash" not in before
     assert upgrade_database(url) == "0003_score_snapshot_version"
     with engine.connect() as connection:
         after = {row[1] for row in connection.execute(text("PRAGMA table_info(risk_score_snapshots)"))}
         samples = {row[1] for row in connection.execute(text("PRAGMA table_info(backtest_candidate_samples)"))}
+        preserved = connection.execute(
+            text(
+                "SELECT run_id, total_score, content_hash FROM risk_score_snapshots "
+                "WHERE score_id = 'score_old'"
+            )
+        ).one()
     assert "content_hash" in after
     assert "pinned_score" in samples
+    assert preserved.run_id == "run_old"
+    assert preserved.total_score == 10
+    assert preserved.content_hash == ""
     command.downgrade(_config(url), "-1")
     assert current_revision(url) == "0002_extension_pattern"
 
@@ -275,5 +305,87 @@ def test_upgrade_does_not_rewrite_historical_block_coordinates(tmp_path):
     reason="未配置 PROSPECTALPHA_TEST_POSTGRES_URL，跳过在线 PostgreSQL 升级。",
 )
 def test_postgres_upgrade_preserves_rows():
+    from sqlalchemy.engine import make_url
+
     url = os.environ["PROSPECTALPHA_TEST_POSTGRES_URL"]
-    assert upgrade_database(url) == head_revision()
+    if make_url(url).database != "prospectalpha_ephemeral":
+        assert upgrade_database(url) == head_revision()
+        return
+    engine = create_engine(url)
+    with engine.begin() as connection:
+        connection.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
+        connection.execute(text("CREATE SCHEMA public"))
+    command.upgrade(_config(url), "0002_extension_pattern")
+    with engine.begin() as connection:
+        score_columns = {
+            row[0]
+            for row in connection.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema = 'public' AND table_name = 'risk_score_snapshots'"
+                )
+            )
+        }
+        assert "content_hash" not in score_columns
+        connection.execute(
+            text(
+                """
+                INSERT INTO prospectus_documents (
+                    document_id, doc_key, original_filename, raw_pdf_path,
+                    content_type, file_sha256, file_size_bytes, status,
+                    processing_attempts
+                ) VALUES (
+                    'doc_old', 'old-key', 'old.pdf', '/tmp/old.pdf',
+                    'application/pdf', 'abc', 12, 'registered', 0
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO risk_score_snapshots (
+                    score_id, run_id, wind_code, scorecard_version, total_score,
+                    risk_level, breakdown, limitations, analysis_as_of_date,
+                    input_hash, evidence_hash, finding_snapshot, industry_profile,
+                    text_signal_snapshot, weight_profile, research_snapshot_ids,
+                    created_at
+                ) VALUES (
+                    'score_old', 'run_old', '0001.HK', 'ipo-risk-v2-hidden-first', 10,
+                    'medium', CAST('{}' AS json), CAST('[]' AS json), '2020-01-01',
+                    'input', 'evidence', CAST('[]' AS json), CAST('{}' AS json),
+                    CAST('{}' AS json), CAST('{}' AS json), CAST('[]' AS json),
+                    '2020-01-01T00:00:00Z'
+                )
+                """
+            )
+        )
+    assert upgrade_database(url) == "0003_score_snapshot_version"
+    with engine.connect() as connection:
+        document = connection.execute(
+            text(
+                "SELECT document_id, status FROM prospectus_documents "
+                "WHERE document_id = 'doc_old'"
+            )
+        ).one()
+        score = connection.execute(
+            text(
+                "SELECT run_id, total_score, content_hash FROM risk_score_snapshots "
+                "WHERE score_id = 'score_old'"
+            )
+        ).one()
+        sample_columns = {
+            row[0]
+            for row in connection.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema = 'public' AND table_name = 'backtest_candidate_samples'"
+                )
+            )
+        }
+    assert document.document_id == "doc_old"
+    assert document.status == "registered"
+    assert score.run_id == "run_old"
+    assert score.total_score == 10
+    assert score.content_hash == ""
+    assert "pinned_score" in sample_columns

@@ -5,7 +5,8 @@ Startup and ``python -m riskagent.migrations upgrade`` both call
 ``create_all`` or hand-written ``ALTER`` on the application startup path.
 
 ``stamp-baseline`` is explicit. It records ``0001_baseline`` only when every
-current ORM table and column is already present, and it does not delete rows.
+baseline table and column is already present. Columns added by later
+revisions are not required for the stamp. It does not delete rows.
 """
 
 from __future__ import annotations
