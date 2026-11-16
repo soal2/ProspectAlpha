@@ -11,6 +11,7 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as RiskRulesRouteImport } from './routes/risk-rules'
 import { Route as MonitorRouteImport } from './routes/monitor'
+import { Route as LoginRouteImport } from './routes/login'
 import { Route as IntakeRouteImport } from './routes/intake'
 import { Route as ExpertsRouteImport } from './routes/experts'
 import { Route as EvidenceRouteImport } from './routes/evidence'
@@ -36,6 +37,11 @@ const RiskRulesRoute = RiskRulesRouteImport.update({
 const MonitorRoute = MonitorRouteImport.update({
   id: '/monitor',
   path: '/monitor',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const LoginRoute = LoginRouteImport.update({
+  id: '/login',
+  path: '/login',
   getParentRoute: () => rootRouteImport,
 } as any)
 const IntakeRoute = IntakeRouteImport.update({
@@ -124,6 +130,7 @@ export interface FileRoutesByFullPath {
   '/evidence': typeof EvidenceRoute
   '/experts': typeof ExpertsRouteWithChildren
   '/intake': typeof IntakeRoute
+  '/login': typeof LoginRoute
   '/monitor': typeof MonitorRoute
   '/risk-rules': typeof RiskRulesRoute
   '/analyses/$id': typeof AnalysesIdRouteWithChildren
@@ -144,6 +151,7 @@ export interface FileRoutesByTo {
   '/evidence': typeof EvidenceRoute
   '/experts': typeof ExpertsRouteWithChildren
   '/intake': typeof IntakeRoute
+  '/login': typeof LoginRoute
   '/monitor': typeof MonitorRoute
   '/risk-rules': typeof RiskRulesRoute
   '/backtest/$id': typeof BacktestIdRoute
@@ -164,6 +172,7 @@ export interface FileRoutesById {
   '/evidence': typeof EvidenceRoute
   '/experts': typeof ExpertsRouteWithChildren
   '/intake': typeof IntakeRoute
+  '/login': typeof LoginRoute
   '/monitor': typeof MonitorRoute
   '/risk-rules': typeof RiskRulesRoute
   '/analyses/$id': typeof AnalysesIdRouteWithChildren
@@ -186,6 +195,7 @@ export interface FileRouteTypes {
     | '/evidence'
     | '/experts'
     | '/intake'
+    | '/login'
     | '/monitor'
     | '/risk-rules'
     | '/analyses/$id'
@@ -206,6 +216,7 @@ export interface FileRouteTypes {
     | '/evidence'
     | '/experts'
     | '/intake'
+    | '/login'
     | '/monitor'
     | '/risk-rules'
     | '/backtest/$id'
@@ -225,6 +236,7 @@ export interface FileRouteTypes {
     | '/evidence'
     | '/experts'
     | '/intake'
+    | '/login'
     | '/monitor'
     | '/risk-rules'
     | '/analyses/$id'
@@ -246,6 +258,7 @@ export interface RootRouteChildren {
   EvidenceRoute: typeof EvidenceRoute
   ExpertsRoute: typeof ExpertsRouteWithChildren
   IntakeRoute: typeof IntakeRoute
+  LoginRoute: typeof LoginRoute
   MonitorRoute: typeof MonitorRoute
   RiskRulesRoute: typeof RiskRulesRoute
   AnalysesIdRoute: typeof AnalysesIdRouteWithChildren
@@ -270,6 +283,13 @@ declare module '@tanstack/react-router' {
       path: '/monitor'
       fullPath: '/monitor'
       preLoaderRoute: typeof MonitorRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/login': {
+      id: '/login'
+      path: '/login'
+      fullPath: '/login'
+      preLoaderRoute: typeof LoginRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/intake': {
@@ -423,6 +443,7 @@ const rootRouteChildren: RootRouteChildren = {
   EvidenceRoute: EvidenceRoute,
   ExpertsRoute: ExpertsRouteWithChildren,
   IntakeRoute: IntakeRoute,
+  LoginRoute: LoginRoute,
   MonitorRoute: MonitorRoute,
   RiskRulesRoute: RiskRulesRoute,
   AnalysesIdRoute: AnalysesIdRouteWithChildren,

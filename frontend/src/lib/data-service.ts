@@ -1,4 +1,5 @@
-import { API_BASE_URL, apiAuthHeaders } from "./env";
+import { apiRequestHeaders, redirectToLogin } from "./auth-session";
+import { API_BASE_URL } from "./env";
 import type {
   Agent,
   AnalysisSummary,
@@ -659,13 +660,19 @@ async function fetchAnalysisOptions(): Promise<AnalysisOptions> {
 
 async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
   const isFormData = init?.body instanceof FormData;
+  const method = init?.method ?? "GET";
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...init,
-    headers: apiAuthHeaders({
-      ...(isFormData ? {} : { "content-type": "application/json" }),
-      ...(init?.headers ?? {}),
-    }),
+    credentials: "include",
+    headers: apiRequestHeaders(
+      {
+        ...(isFormData ? {} : { "content-type": "application/json" }),
+        ...(init?.headers ?? {}),
+      },
+      method,
+    ),
   });
+  if (response.status === 401) redirectToLogin();
   if (!response.ok) {
     throw new Error(await responseError(response));
   }
@@ -747,7 +754,8 @@ export async function uploadMarketData(files: { security: File; company: File; p
   const response = await fetch(`${API_BASE_URL}/backtests/market-data/upload`, {
     method: "POST",
     body,
-    headers: apiAuthHeaders(),
+    credentials: "include",
+    headers: apiRequestHeaders(undefined, "POST"),
   });
   if (!response.ok) throw new Error((await response.json().catch(() => ({ detail: response.statusText }))).detail ?? "市场数据上传失败");
   return response.json() as Promise<{ snapshot_id: string; labels_created: number }>;
@@ -818,8 +826,10 @@ export async function updateAnalysisInputs(runId: string, patch: AnalysisRunInpu
 export async function startAnalysisRun(runId: string) {
   const response = await fetch(`${API_BASE_URL}/analysis-runs/${runId}/start`, {
     method: "POST",
-    headers: apiAuthHeaders({ "content-type": "application/json" }),
+    credentials: "include",
+    headers: apiRequestHeaders({ "content-type": "application/json" }, "POST"),
   });
+  if (response.status === 401) redirectToLogin();
   if (response.status === 409) {
     return getAnalysisRun(runId);
   }
@@ -922,7 +932,8 @@ export async function askDocument(
 ): Promise<AskResult> {
   const response = await fetch(`${API_BASE_URL}/documents/${documentId}/ask`, {
     method: "POST",
-    headers: apiAuthHeaders({ "content-type": "application/json" }),
+    credentials: "include",
+    headers: apiRequestHeaders({ "content-type": "application/json" }, "POST"),
     body: JSON.stringify({ question, top_k: options.topK ?? 6 }),
     signal: options.signal,
   });
@@ -1001,7 +1012,8 @@ export async function chatWithAssistant(
 ): Promise<ChatResult> {
   const response = await fetch(`${API_BASE_URL}/chat`, {
     method: "POST",
-    headers: apiAuthHeaders({ "content-type": "application/json" }),
+    credentials: "include",
+    headers: apiRequestHeaders({ "content-type": "application/json" }, "POST"),
     body: JSON.stringify({ message, history }),
     signal: options.signal,
   });
@@ -1061,7 +1073,8 @@ export async function streamAnalysisRun(
   const after = options.after ? `?after=${options.after}` : "";
   const response = await fetch(`${API_BASE_URL}/analysis-runs/${runId}/stream${after}`, {
     method: "GET",
-    headers: apiAuthHeaders({ accept: "text/event-stream" }),
+    credentials: "include",
+    headers: apiRequestHeaders({ accept: "text/event-stream" }, "GET"),
     signal: options.signal,
   });
   if (!response.ok || !response.body) {

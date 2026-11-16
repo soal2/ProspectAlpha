@@ -8,6 +8,8 @@ from typing import Any
 import pytest
 
 os.environ.setdefault("PROSPECTALPHA_SKIP_DOTENV", "1")
+os.environ.setdefault("APP_ENV", "development")
+os.environ.setdefault("API_AUTH_DISABLED", "1")
 
 from riskagent.agent_experts import AgentSpec
 from riskagent.agents.orchestrator import StrategyDecision
