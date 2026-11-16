@@ -18,7 +18,16 @@ export default defineConfig({
   vite: {
     base: process.env.GITHUB_PAGES_DEPLOY === "true" ? "/ProspectAlpha/" : "/",
     resolve: { dedupe: ["react", "react-dom"] },
-    server: { port: 5173 },
+    server: {
+      port: 5173,
+      proxy: {
+        "/api": {
+          target: process.env.VITE_DEV_API_PROXY ?? "http://127.0.0.1:8000",
+          changeOrigin: true,
+          rewrite: (path: string) => path.replace(/^\/api/, ""),
+        },
+      },
+    },
     preview: { port: 5173 },
   },
 });

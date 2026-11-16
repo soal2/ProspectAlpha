@@ -453,6 +453,8 @@ class BacktestService:
         ]
         industry = getattr(run, "industry_profile", None)
         text_signals = getattr(run, "text_signal_snapshot", None)
+        from riskagent.research.core import research_ids_for_scoring
+
         artifacts = [
             item.model_dump() if hasattr(item, "model_dump") else item
             for item in getattr(run, "research_artifacts", [])
@@ -467,16 +469,7 @@ class BacktestService:
             findings=findings,
             industry_profile=industry.model_dump() if industry is not None else {},
             text_signal_snapshot=text_signals.model_dump() if text_signals is not None else {},
-            research_snapshot_ids=[
-                str(item.get("source_hash") or item.get("artifact_id"))
-                for item in artifacts
-                if item.get("source_hash") or item.get("artifact_id")
-            ]
-            + [
-                str(item.get("content_hash") or item.get("source_id"))
-                for item in research_sources
-                if item.get("content_hash") or item.get("source_id")
-            ],
+            research_snapshot_ids=research_ids_for_scoring([*artifacts, *research_sources]),
         )
         with self.session_factory() as session:
             frozen = session.get(RiskScoreSnapshotRow, f"score_{getattr(run, 'run_id')}")

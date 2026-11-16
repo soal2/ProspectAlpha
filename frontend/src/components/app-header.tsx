@@ -1,6 +1,7 @@
 import { SidebarTrigger } from "@/components/ui/sidebar";
-import { Link, useRouterState } from "@tanstack/react-router";
-import { ChevronRight, Search, Bell, HelpCircle } from "lucide-react";
+import { logout } from "@/lib/auth-session";
+import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
+import { ChevronRight, LogOut } from "lucide-react";
 
 const labels: Record<string, string> = {
   "": "工作台",
@@ -18,7 +19,13 @@ const labels: Record<string, string> = {
 
 export function AppHeader() {
   const pathname = useRouterState({ select: (r) => r.location.pathname });
+  const navigate = useNavigate();
   const segs = pathname.split("/").filter(Boolean);
+
+  async function onLogout() {
+    await logout();
+    await navigate({ to: "/login" });
+  }
 
   return (
     <header className="sticky top-0 z-30 flex h-14 items-center gap-3 border-b border-border bg-white/85 px-4 backdrop-blur supports-[backdrop-filter]:bg-white/70">
@@ -59,11 +66,13 @@ export function AppHeader() {
           <span className="size-1 rounded-full bg-[color:var(--gold)]" />
           Institutional
         </span> */}
-        <button className="grid size-9 place-items-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground">
-          <Bell className="size-4" />
-        </button>
-        <button className="grid size-9 place-items-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground">
-          <HelpCircle className="size-4" />
+        <button
+          type="button"
+          onClick={() => void onLogout()}
+          className="inline-flex h-9 items-center gap-1 rounded-md px-2 text-sm text-muted-foreground hover:bg-muted hover:text-foreground"
+        >
+          <LogOut className="size-4" />
+          退出
         </button>
       </div>
     </header>

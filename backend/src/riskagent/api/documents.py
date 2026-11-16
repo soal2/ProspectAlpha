@@ -14,6 +14,7 @@ from fastapi import APIRouter, File, Form, HTTPException, Response, UploadFile, 
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from riskagent.api.limits import ensure_upload_within_limit, ensure_within_count, max_stored_documents
 from riskagent.document_qa import DocumentQuestionAnswerer, DocumentQuestionError
 from riskagent.documents import (
     DocumentAsset,
@@ -50,7 +51,11 @@ class DocumentQuestionRequest(BaseModel):
 @router.post("", response_model=DocumentAsset, status_code=status.HTTP_201_CREATED)
 def create_document(payload: DocumentCreate) -> DocumentAsset:
     try:
-        return _repo().create(payload)
+        repo = _repo()
+        document_limit = max_stored_documents()
+        if document_limit > 0:
+            ensure_within_count(len(repo.list_assets()), document_limit, "文档")
+        return repo.create(payload)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
@@ -61,8 +66,12 @@ async def upload_document(
     source_url: str | None = Form(default=None),
 ) -> DocumentAsset:
     content = await file.read()
+    ensure_upload_within_limit(content)
     try:
         repo = _repo()
+        document_limit = max_stored_documents()
+        if document_limit > 0:
+            ensure_within_count(len(repo.list_assets()), document_limit, "文档")
         filename = file.filename or "prospectus.pdf"
         if repo.use_database:
             registration = await asyncio.to_thread(

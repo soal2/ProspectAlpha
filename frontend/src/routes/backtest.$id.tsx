@@ -16,6 +16,7 @@ import {
 } from "recharts";
 import { ArrowLeft, Download, RefreshCw, AlertTriangle, CheckCircle2 } from "lucide-react";
 import { getBacktests, getBacktestDetailData, reproduceBacktest, startBacktest } from "@/lib/data-service";
+import { apiRequestHeaders } from "@/lib/auth-session";
 import { API_BASE_URL } from "@/lib/env";
 import { type BacktestDetailResponse, type RiskLevel } from "@/lib/types";
 import { RiskBadge } from "@/components/risk-badge";
@@ -374,7 +375,10 @@ eval:
 }
 
 async function downloadAuditHtml(backtestId: string, name: string) {
-  const response = await fetch(`${API_BASE_URL}/backtests/${backtestId}/artifact?download=1`);
+  const response = await fetch(`${API_BASE_URL}/backtests/${backtestId}/artifact?download=1`, {
+    credentials: "include",
+    headers: apiRequestHeaders(undefined, "GET"),
+  });
   if (!response.ok) throw new Error("审计报告下载失败");
   const blob = new Blob([await response.text()], { type: "text/html;charset=utf-8" });
   const objectUrl = URL.createObjectURL(blob);
