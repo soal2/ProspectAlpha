@@ -69,7 +69,14 @@ def test_clarifying_patch_start_freezes_inputs_and_generates_artifacts(
     assert completed.findings
     assert completed.evidence
     assert completed.report is not None
-    assert completed.report.review_status == "draft"
+    assert completed.report.review_status == "needs_human_review"
+    assert all(item.locator_kind == "text_offset" for item in completed.evidence)
+    assert all(item.page_number is None and item.bbox == [] for item in completed.evidence)
+    assert any(
+        "不能按真实 PDF 证据通过质检" in event["summary"]
+        for event in completed.events
+        if event["event_type"] == "qa_issue_found"
+    )
     assert all(item.text for item in completed.evidence)
     evidence_library = yaml.safe_load((tmp_path / "evidence_library.yaml").read_text()) or []
     assert evidence_library

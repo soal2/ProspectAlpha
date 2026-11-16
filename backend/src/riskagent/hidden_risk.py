@@ -14,13 +14,26 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from riskagent.providers.embedding import EmbeddingClient, HashingEmbeddingClient, cosine_similarity
 
 
+def _pdf_pages(blocks: list[ProspectusBlock], evidence_ids: list[str] | set[str]) -> list[int]:
+    """Keep real PDF pages only. A missing page is omitted, not replaced with 0 or 1."""
+
+    pages: list[int] = []
+    for block in blocks:
+        if block.block_id not in evidence_ids:
+            continue
+        page = block.page_number
+        if isinstance(page, int) and page >= 1:
+            pages.append(page)
+    return pages
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
 class ProspectusBlock(Protocol):
     block_id: str
-    page_number: int
+    page_number: int | None
     section_path: str
     text: str
 
@@ -156,7 +169,7 @@ def infer_industry_profile(blocks: list[ProspectusBlock]) -> IndustryProfile:
             "行业画像仅用于风险检索和同行分组，需由用户确认后冻结。"
         ),
         evidence_ids=evidence_ids,
-        evidence_pages=[block.page_number for block in evidence if block.block_id in evidence_ids],
+        evidence_pages=_pdf_pages(evidence, evidence_ids),
         source="deterministic_fallback",
     )
 
@@ -209,9 +222,7 @@ async def infer_industry_profile_with_ai(
             "name": raw.get("name"),
             "rationale": raw.get("rationale"),
             "evidence_ids": evidence_ids,
-            "evidence_pages": [
-                block.page_number for block in usable if block.block_id in evidence_ids
-            ],
+            "evidence_pages": _pdf_pages(usable, evidence_ids),
             "source": "prospectus_ai",
         }
     )

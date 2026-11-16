@@ -23,6 +23,7 @@ from langgraph.types import Command, interrupt
 from pydantic import BaseModel, ConfigDict, Field
 
 from riskagent.a2a import MessageType, TeamRuntime
+from riskagent.provenance import chunk_location_fields
 from riskagent.a2a.runtime import STRATEGIC_AGENT
 from riskagent.a2a.storage import resolve_agent_runtime_root
 from riskagent.agent_experts import AgentSpec, AgentSpecRepository
@@ -1095,22 +1096,13 @@ class AgentTeamSupervisor:
                                 {
                                     "chunk_id": chunk.chunk_id,
                                     "document_id": chunk.document_id,
-                                    "page_number": chunk.page_idx,
                                     "section_path": str(
                                         chunk.metadata.get("section_path")
                                         or chunk.chunk_type
                                     ),
                                     "text": chunk.text[:300],
-                                    "bbox": (
-                                        chunk.merged_bboxes[0].get("bbox", [])
-                                        if chunk.merged_bboxes
-                                        else []
-                                    ),
-                                    "bbox_coordinate_space": str(
-                                        chunk.metadata.get("bbox_coordinate_space")
-                                        or "pdf_points"
-                                    ),
                                     "retrieval_score": chunk.score,
+                                    **chunk_location_fields(chunk),
                                 }
                                 for chunk in sorted(
                                     chunks_by_id.values(),
