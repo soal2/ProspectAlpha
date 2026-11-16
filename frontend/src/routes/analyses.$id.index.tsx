@@ -28,6 +28,8 @@ import {
   type AnalysisRunEvent,
   type AnalysisProgress,
 } from "@/lib/data-service";
+import { isRetryableApiError } from "@/lib/api-error";
+import { evidenceLocationLabel, pdfPageNumber } from "@/lib/evidence-location";
 import { type Agent } from "@/lib/types";
 import { PdfViewer } from "@/components/pdf-viewer";
 import { motion, AnimatePresence } from "framer-motion";
@@ -71,6 +73,7 @@ type EvidenceFeedItem = {
   conf: number;
   time: string;
   page?: number | null;
+  location?: string | null;
   snippet?: string | null;
   document_id?: string | null;
   bbox?: number[];
@@ -181,7 +184,11 @@ function RealtimeStream() {
       if (run.status === "ready") {
         setStarting(true);
         startPoll = setInterval(() => {
-          if (!cancelled) void refreshTrace().catch(() => undefined);
+          if (!cancelled) {
+            void refreshTrace().catch((error: unknown) => {
+              if (!cancelled && isRetryableApiError(error)) setStreamError(error.message);
+            });
+          }
         }, 2000);
         try {
           activeRun = await startAnalysisRun(id);
@@ -198,7 +205,9 @@ function RealtimeStream() {
       }
 
       if (terminalStatuses.has(activeRun.status) || pausedStatuses.has(activeRun.status)) {
-        await refreshTrace().catch(() => undefined);
+        await refreshTrace().catch((error: unknown) => {
+          if (!cancelled && isRetryableApiError(error)) setStreamError(error.message);
+        });
         return;
       }
 
@@ -656,6 +665,9 @@ function RealtimeStream() {
                   </span>
                 </div>
                 <div className="mt-1.5 text-xs font-medium leading-snug">{item.title}</div>
+                {item.location ? (
+                  <div className="mt-1 text-[11px] text-muted-foreground">{item.location}</div>
+                ) : null}
                 {item.snippet ? (
                   <p className="mt-1.5 line-clamp-3 text-[11px] leading-relaxed text-muted-foreground">
                     {item.snippet}
@@ -663,10 +675,10 @@ function RealtimeStream() {
                 ) : null}
                 <button
                   onClick={() => setViewerEvidence(item)}
-                  disabled={!item.document_id}
+                  disabled={!item.document_id || !item.page}
                   className="mt-2 inline-flex items-center gap-1 text-[11px] text-primary hover:underline disabled:cursor-not-allowed disabled:text-muted-foreground disabled:no-underline"
                 >
-                  查看原文 <ExternalLink className="size-3" />
+                  {item.page ? "查看 PDF 原文" : "无 PDF 页"} <ExternalLink className="size-3" />
                 </button>
               </div>
             ))}
@@ -683,16 +695,16 @@ function RealtimeStream() {
           </div>
         </aside>
       </div>
-      {viewerEvidence?.document_id ? (
+      {viewerEvidence?.document_id && viewerEvidence.page ? (
         <PdfViewer
           open={Boolean(viewerEvidence)}
           onOpenChange={(next) => {
             if (!next) setViewerEvidence(null);
           }}
           documentId={viewerEvidence.document_id}
-          page={viewerEvidence.page ?? 1}
+          page={viewerEvidence.page}
           highlight={
-            viewerEvidence.bbox?.length === 4 && viewerEvidence.page
+            viewerEvidence.bbox?.length === 4
               ? {
                   page: viewerEvidence.page,
                   bbox: viewerEvidence.bbox,
@@ -902,10 +914,9 @@ function mergeEvidenceFeed(
         title: event.title.replace("发现证据：", ""),
         conf: Number(payload.relevance_score ?? payload.retrieval_score ?? Number.NaN),
         time: event.created_at ? formatClock(event.created_at) : "近实时",
-        page: Number(payload.page_number ?? 0),
+        ...locationFields(payload),
         snippet: event.summary,
         document_id: payload.document_id ? String(payload.document_id) : null,
-        bbox: Array.isArray(payload.bbox) ? (payload.bbox as number[]) : undefined,
         scoreKind: "relevance" as const,
       };
     });
@@ -924,10 +935,9 @@ function mergeEvidenceFeed(
           title: `候选原文：${String(chunk.section_path ?? "招股书")}`,
           conf: Number(chunk.retrieval_score ?? Number.NaN),
           time: event.created_at ? formatClock(event.created_at) : "近实时",
-          page: Number(chunk.page_number ?? 0),
+          ...locationFields(chunk),
           snippet: String(chunk.text ?? ""),
           document_id: chunk.document_id ? String(chunk.document_id) : null,
-          bbox: Array.isArray(chunk.bbox) ? (chunk.bbox as number[]) : undefined,
           scoreKind: "retrieval" as const,
         },
       ];
@@ -944,6 +954,35 @@ function mergeEvidenceFeed(
     });
   });
   return [...byId.values()];
+}
+
+function locationFields(payload: Record<string, unknown>) {
+  const locator = typeof payload.locator_kind === "string" ? payload.locator_kind : null;
+  const page = pdfPageNumber(
+    typeof payload.page_number === "number" ? payload.page_number : null,
+    locator,
+  );
+  const bbox =
+    locator === "text_offset" || !Array.isArray(payload.bbox)
+      ? undefined
+      : (payload.bbox as number[]);
+  return {
+    page,
+    location: evidenceLocationLabel({
+      locator_kind: locator === "text_offset" || locator === "pdf_page" ? locator : null,
+      page_number: typeof payload.page_number === "number" ? payload.page_number : null,
+      char_start: typeof payload.char_start === "number" ? payload.char_start : null,
+      char_end: typeof payload.char_end === "number" ? payload.char_end : null,
+      table_header: typeof payload.table_header === "string" ? payload.table_header : null,
+      table_row: typeof payload.table_row === "string" ? payload.table_row : null,
+      table_column: typeof payload.table_column === "string" ? payload.table_column : null,
+      table_unit: typeof payload.table_unit === "string" ? payload.table_unit : null,
+      pdf_regions: Array.isArray(payload.pdf_regions)
+        ? (payload.pdf_regions as { page_number?: number | null; bbox?: number[] }[])
+        : [],
+    }),
+    bbox: page && bbox?.length === 4 ? bbox : undefined,
+  };
 }
 
 function formatClock(value: string) {

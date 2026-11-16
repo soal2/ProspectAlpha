@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from riskagent.features.financial import extract_cashflow_periods
+from riskagent.skill_runtime import CashflowAnalyzerHandler, SkillInvocation
 
 
 @dataclass
@@ -88,6 +89,160 @@ def test_returns_empty_when_nothing_matches():
     )
 
     assert not extract_cashflow_periods([block])
+
+
+_REVERSED_ANNUAL = _Block(
+    block_id="block_reversed",
+    page_number=12,
+    section_path="财务资料",
+    block_type="table",
+    text=(
+        "截至12月31日止年度\n"
+        "2024年 2023年 2022年\n"
+        "人民币千元\n"
+        "现金及现金等价物 300 200 100\n"
+        "经营活动产生的现金流量净额 (30) (20) (60)\n"
+    ),
+)
+
+_INTERIM_COMPARATIVE = _Block(
+    block_id="block_interim",
+    page_number=18,
+    section_path="财务资料",
+    block_type="table_html",
+    text=(
+        "<table>"
+        "<tr><td></td><td>截至12月31日止年度</td><td>截至6月30日止六个月</td></tr>"
+        "<tr><td></td><td>2023年</td><td>2024年</td></tr>"
+        "<tr><td>人民币千元</td><td></td><td></td></tr>"
+        "<tr><td>现金及现金等价物</td><td>120</td><td>30</td></tr>"
+        "<tr><td>经营活动产生的现金流量净额</td><td>(40)</td><td>(10)</td></tr>"
+        "</table>"
+    ),
+)
+
+_ZERO_CASH = _Block(
+    block_id="block_zero",
+    page_number=21,
+    section_path="财务资料",
+    block_type="table",
+    text=(
+        "截至12月31日止年度\n"
+        "2024年\n"
+        "人民币千元\n"
+        "现金及现金等价物 0\n"
+        "经营活动产生的现金流量净额 (12)\n"
+    ),
+)
+
+_UNIT_CONFLICT = _Block(
+    block_id="block_unit",
+    page_number=22,
+    section_path="财务资料",
+    block_type="table",
+    text=(
+        "截至12月31日止年度\n"
+        "2024年\n"
+        "现金及现金等价物（人民币千元） 1000\n"
+        "经营活动产生的现金流量净额（人民币万元） (10)\n"
+    ),
+)
+
+
+def test_reversed_annual_columns_keep_period_end_and_zero_is_retained():
+    result = extract_cashflow_periods([_REVERSED_ANNUAL])
+
+    assert [item["period_end"] for item in result.periods] == ["2024-12-31", "2023-12-31", "2022-12-31"]
+    assert {item["duration_months"] for item in result.periods} == {12}
+    assert result.currency == "CNY"
+    assert result.unit == "千元"
+    assert result.unit_consistent is True
+    assert result.periods[0]["evidence_block_id"] == "block_reversed"
+    assert result.periods[0]["evidence_page_number"] == 12
+    assert result.periods[0]["evidence_section_path"] == "财务资料"
+
+
+def test_interim_comparative_columns_keep_their_own_duration():
+    result = extract_cashflow_periods([_INTERIM_COMPARATIVE])
+
+    assert [(item["period_end"], item["duration_months"], item["cash_and_equivalents"]) for item in result.periods] == [
+        ("2023-12-31", 12, 120.0),
+        ("2024-06-30", 6, 30.0),
+    ]
+    assert result.unit == "千元"
+    assert result.currency == "CNY"
+
+
+def test_zero_cash_period_is_kept():
+    result = extract_cashflow_periods([_ZERO_CASH])
+
+    assert len(result.periods) == 1
+    assert result.periods[0]["cash_and_equivalents"] == 0
+    assert result.periods[0]["operating_cashflow"] == -12
+    assert result.periods[0]["ambiguous"] is False
+
+
+def test_conflicting_units_are_rejected_with_provenance():
+    result = extract_cashflow_periods([_UNIT_CONFLICT])
+
+    assert result.evidence_refs == ["block_unit"]
+    assert result.unit_consistent is False
+    assert result.periods[0]["ambiguous"] is True
+    assert any("单位" in item for item in result.limitations)
+    assert result.matched_rows[0]["block_id"] == "block_unit"
+    assert result.matched_rows[0]["page_number"] == 22
+
+
+def _cashflow_result(block):
+    extraction = extract_cashflow_periods([block])
+    invocation = SkillInvocation.model_validate(
+        {
+            "run_id": "run_cash",
+            "assignment_id": "module_cash",
+            "agent_name": "qin_bingwen_financial_agent",
+            "skill_id": "cashflow-analyzer",
+            "skill_version": "1.0.0",
+            "company_name": "测试公司",
+            "structured_inputs": {
+                "cashflow_periods": extraction.periods,
+                "cashflow_evidence_refs": extraction.evidence_refs,
+                "cashflow_limitations": extraction.limitations,
+            },
+        }
+    )
+    return extraction, CashflowAnalyzerHandler().invoke(invocation)
+
+
+def test_runway_uses_latest_dated_period_and_its_duration():
+    _extraction, reversed_result = _cashflow_result(_REVERSED_ANNUAL)
+    assert reversed_result.status == "completed"
+    assert reversed_result.result["latest_period_end"] == "2024-12-31"
+    assert reversed_result.result["duration_months"] == 12
+    assert reversed_result.result["cash_runway_months"] == 120
+    assert reversed_result.result["unit"] == "千元"
+    assert reversed_result.result["currency"] == "CNY"
+    assert reversed_result.evidence_refs == ["block_reversed"]
+
+    _interim, interim_result = _cashflow_result(_INTERIM_COMPARATIVE)
+    assert interim_result.result["latest_period_end"] == "2024-06-30"
+    assert interim_result.result["duration_months"] == 6
+    assert interim_result.result["cash_runway_months"] == 18
+
+
+def test_zero_cash_runway_is_zero_and_ambiguous_periods_have_no_runway():
+    _zero, zero_result = _cashflow_result(_ZERO_CASH)
+    assert zero_result.result["latest_cash_and_equivalents"] == 0
+    assert zero_result.result["cash_runway_months"] == 0
+
+    _ambiguous, ambiguous_result = _cashflow_result(_SIMPLIFIED_TABLE)
+    assert ambiguous_result.status == "insufficient_data"
+    assert "cash_runway_months" not in ambiguous_result.result
+
+    _conflict, conflict_result = _cashflow_result(_UNIT_CONFLICT)
+    assert conflict_result.status == "insufficient_data"
+    assert "cash_runway_months" not in conflict_result.result
+    assert conflict_result.evidence_refs == ["block_unit"]
+    assert any("单位" in item for item in conflict_result.limitations)
 
 
 def test_returns_empty_when_rows_are_in_different_blocks():

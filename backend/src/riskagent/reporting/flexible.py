@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from riskagent.provenance import format_evidence_location
+from riskagent.research.core import is_pre_cutoff_evidence
+
 
 def build_report_document(run: Any, integrated: Any) -> dict[str, Any]:
     evidence_by_id = {item.evidence_id: item for item in run.evidence}
@@ -88,8 +91,27 @@ def build_report_document(run: Any, integrated: Any) -> dict[str, Any]:
             "finding_id": item.finding_id,
             "document_block_id": item.document_block_id,
             "page_number": item.page_number,
+            "locator_kind": item.locator_kind,
+            "char_start": item.char_start,
+            "char_end": item.char_end,
             "section_path": item.section_path,
             "text": item.text,
+            "location": format_evidence_location(item),
+            **{
+                key: value
+                for key, value in {
+                    "table_header": item.table_header,
+                    "table_row": item.table_row,
+                    "table_column": item.table_column,
+                    "table_unit": item.table_unit,
+                }.items()
+                if value
+            },
+            **(
+                {"pdf_regions": [region.model_dump() for region in item.pdf_regions]}
+                if item.pdf_regions
+                else {}
+            ),
         }
         for item in run.evidence
     ]
@@ -103,6 +125,7 @@ def build_report_document(run: Any, integrated: Any) -> dict[str, Any]:
             "eligible_pre_cutoff": item.eligible_pre_cutoff,
         }
         for item in run.research_sources
+        if is_pre_cutoff_evidence(item)
     )
     limitations = list(
         dict.fromkeys(
@@ -178,9 +201,9 @@ def render_report_markdown(run: Any, document: dict[str, Any]) -> str:
     lines.extend(f"- {item}" for item in document["limitations"] or ["无额外限制。"])
     lines.extend(["", "## 证据索引", ""])
     for item in document["evidence_index"]:
-        if "page_number" in item:
+        if "page_number" in item or item.get("locator_kind"):
             lines.append(
-                f"- {item['evidence_id']} · {item['finding_id']} · P.{item['page_number']} · {item['section_path']}"
+                f"- {item['evidence_id']} · {item['finding_id']} · {item.get('location') or format_evidence_location(item)}"
             )
         else:
             lines.append(

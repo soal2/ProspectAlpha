@@ -104,16 +104,23 @@ class DocumentCreate(BaseModel):
 class DocumentBlock(BaseModel):
     block_id: str
     document_id: str
-    page_number: int
+    page_number: int | None = None
     section_path: str
     block_type: str = "text"
     text: str
-    bbox: list[float]
-    bbox_coordinate_space: Literal["pdf_points", "normalized_1000"] = "pdf_points"
+    bbox: list[float] = Field(default_factory=list)
+    bbox_coordinate_space: Literal["pdf_points", "normalized_1000"] | None = "pdf_points"
     char_start: int
     char_end: int
     source_hash: str
     parser_version: str = PARSER_VERSION
+    locator_kind: Literal["pdf_page", "text_offset", "legacy_unknown"] = "pdf_page"
+    coordinates_are_pdf: bool = True
+    table_header: str | None = None
+    table_row: str | None = None
+    table_column: str | None = None
+    table_unit: str | None = None
+    pdf_regions: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class DocumentAsset(BaseModel):
@@ -480,7 +487,7 @@ def parse_document_bytes(
 
 def _document_page_count(content: bytes, *, is_pdf: bool) -> int:
     if not is_pdf:
-        return 1
+        return 0
     with fitz.open(stream=content, filetype="pdf") as pdf:
         return pdf.page_count
 
@@ -511,6 +518,7 @@ def _parse_pdf(
                 char_start = char_cursor
                 char_end = char_start + len(text)
                 char_cursor = char_end + 1
+                bbox = [float(value) for value in raw_block.get("bbox", [0, 0, 0, 0])]
                 blocks.append(
                     DocumentBlock(
                         block_id=f"block_{document_id}_{page_index:04d}_{block_index:03d}",
@@ -518,10 +526,21 @@ def _parse_pdf(
                         page_number=page_index,
                         section_path=section_path,
                         text=text,
-                        bbox=[float(value) for value in raw_block.get("bbox", [0, 0, 0, 0])],
+                        bbox=bbox,
+                        bbox_coordinate_space="pdf_points",
                         char_start=char_start,
                         char_end=char_end,
                         source_hash=source_hash,
+                        parser_version=PARSER_VERSION,
+                        locator_kind="pdf_page",
+                        coordinates_are_pdf=True,
+                        pdf_regions=[
+                            {
+                                "page_number": page_index,
+                                "bbox": bbox,
+                                "bbox_coordinate_space": "pdf_points",
+                            }
+                        ],
                     )
                 )
             if on_progress is not None:
@@ -532,27 +551,30 @@ def _parse_pdf(
 
 
 def _parse_text(document_id: str, text: str, *, chunk_size: int = 900) -> list[DocumentBlock]:
+    from riskagent.provenance import TEXT_OFFSET_PARSER_VERSION, iter_text_chunks
+
     blocks: list[DocumentBlock] = []
-    cursor = 0
     section_path = "招股书正文"
-    chunks = [text[start : start + chunk_size].strip() for start in range(0, len(text), chunk_size)]
-    for idx, chunk in enumerate([item for item in chunks if item], start=1):
-        section_path = _detect_section(chunk, section_path)
-        source_hash = hashlib.sha256(f"{document_id}|{idx}|{chunk}".encode("utf-8")).hexdigest()
-        char_start = cursor
-        char_end = char_start + len(chunk)
-        cursor = char_end + 1
+    for idx, chunk in enumerate(iter_text_chunks(text, size=chunk_size), start=1):
+        section_path = _detect_section(chunk.text, section_path)
+        source_hash = hashlib.sha256(
+            f"{document_id}|{chunk.char_start}|{chunk.text}".encode("utf-8")
+        ).hexdigest()
         blocks.append(
             DocumentBlock(
                 block_id=f"block_{document_id}_{idx:04d}_001",
                 document_id=document_id,
-                page_number=idx,
+                page_number=None,
                 section_path=section_path,
-                text=chunk,
-                bbox=[0.0, 0.0, 595.0, 842.0],
-                char_start=char_start,
-                char_end=char_end,
+                text=chunk.text,
+                bbox=[],
+                bbox_coordinate_space=None,
+                char_start=chunk.char_start,
+                char_end=chunk.char_end,
                 source_hash=source_hash,
+                parser_version=TEXT_OFFSET_PARSER_VERSION,
+                locator_kind="text_offset",
+                coordinates_are_pdf=False,
             )
         )
     return blocks
@@ -885,35 +907,52 @@ def _document_chunks(
     asset: DocumentAsset,
     blocks: list[DocumentBlock],
 ) -> list[DocumentChunk]:
-    return [
-        DocumentChunk(
-            chunk_id=block.block_id,
-            document_id=block.document_id,
-            doc_key=asset.document_id,
-            chunk_type=block.block_type,
-            text=block.text,
-            page_idx=block.page_number,
-            source_file=asset.filename,
-            source_item_indices=[index],
-            bbox_refs=[
+    chunks: list[DocumentChunk] = []
+    for index, block in enumerate(blocks):
+        is_pdf = block.locator_kind == "pdf_page" and block.coordinates_are_pdf and block.page_number
+        page_idx = int(block.page_number or 0)
+        bbox_refs = []
+        merged = []
+        if is_pdf and len(block.bbox) == 4:
+            bbox_refs = [
                 BBoxRef(
-                    page_idx=block.page_number,
+                    page_idx=page_idx,
                     bbox=block.bbox,
                     source_item_index=index,
                 )
-            ],
-            merged_bboxes=[MergedBBox(page_idx=block.page_number, bbox=block.bbox)],
-            metadata={
-                "section_path": block.section_path,
-                "char_start": block.char_start,
-                "char_end": block.char_end,
-                "source_hash": block.source_hash,
-                "parser_version": block.parser_version,
-                "bbox_coordinate_space": "pdf_points",
-            },
+            ]
+            merged = [MergedBBox(page_idx=page_idx, bbox=block.bbox)]
+        metadata: dict[str, Any] = {
+            "section_path": block.section_path,
+            "char_start": block.char_start,
+            "char_end": block.char_end,
+            "source_hash": block.source_hash,
+            "parser_version": block.parser_version,
+            "locator_kind": block.locator_kind,
+            "coordinates_are_pdf": block.coordinates_are_pdf,
+        }
+        if block.bbox_coordinate_space and is_pdf:
+            metadata["bbox_coordinate_space"] = block.bbox_coordinate_space
+        for key in ("table_header", "table_row", "table_column", "table_unit"):
+            value = getattr(block, key)
+            if value:
+                metadata[key] = value
+        chunks.append(
+            DocumentChunk(
+                chunk_id=block.block_id,
+                document_id=block.document_id,
+                doc_key=asset.document_id,
+                chunk_type=block.block_type,
+                text=block.text,
+                page_idx=page_idx,
+                source_file=asset.filename,
+                source_item_indices=[index],
+                bbox_refs=bbox_refs,
+                merged_bboxes=merged,
+                metadata=metadata,
+            )
         )
-        for index, block in enumerate(blocks)
-    ]
+    return chunks
 
 
 def _upsert_asset(session: Session, asset: DocumentAsset) -> None:
@@ -937,11 +976,12 @@ def _upsert_asset(session: Session, asset: DocumentAsset) -> None:
         DocumentBlockRow(
             block_id=block.block_id,
             document_id=block.document_id,
-            page_number=block.page_number,
+            # The integer column cannot store "no page". Zero means text offset.
+            page_number=block.page_number if block.page_number and block.page_number > 0 else 0,
             section_path=block.section_path,
             block_type=block.block_type,
             text=block.text,
-            bbox=block.bbox,
+            bbox=list(block.bbox or []),
             char_start=block.char_start,
             char_end=block.char_end,
             source_hash=block.source_hash,
@@ -1033,46 +1073,111 @@ def _asset_from_registered_row(
 
 
 def _block_from_indexed_chunk(chunk: Any) -> DocumentBlock:
+    from riskagent.provenance import (
+        LEGACY_TEXT_PARSER_VERSION,
+        TEXT_OFFSET_PARSER_VERSION,
+        pdf_regions_from_refs,
+        table_fields_from_metadata,
+    )
+
     metadata = chunk.metadata if isinstance(chunk.metadata, dict) else {}
-    coordinate_space = str(metadata.get("bbox_coordinate_space") or "pdf_points")
+    parser_version = str(metadata.get("parser_version") or "postgres-index-v1")
+    locator_kind = str(metadata.get("locator_kind") or "")
+    legacy = locator_kind == "legacy_unknown" or parser_version == LEGACY_TEXT_PARSER_VERSION
+    text_offset = (not legacy) and (
+        locator_kind == "text_offset" or parser_version == TEXT_OFFSET_PARSER_VERSION
+    )
+    coordinate_space = str(metadata.get("bbox_coordinate_space") or "")
     if coordinate_space not in {"pdf_points", "normalized_1000"}:
-        coordinate_space = "pdf_points"
+        coordinate_space = "normalized_1000" if "_chunk_" in str(chunk.chunk_id) else "pdf_points"
+    group_refs = metadata.get("table_group_bbox_refs")
+    refs = group_refs if isinstance(group_refs, list) and group_refs else list(chunk.merged_bboxes or [])
+    regions = (
+        []
+        if text_offset or legacy
+        else pdf_regions_from_refs(refs, coordinate_space=coordinate_space)
+    )
     bbox = next(
         (
             item.get("bbox", [])
-            for item in chunk.merged_bboxes
+            for item in (chunk.merged_bboxes or [])
             if isinstance(item, dict) and int(item.get("page_idx", -1)) == chunk.page_idx
         ),
         [],
     )
     text = str(chunk.text)
+    page_number = None if text_offset or int(chunk.page_idx or 0) < 1 else int(chunk.page_idx)
+    table_fields = {} if text_offset else table_fields_from_metadata(metadata)
     return DocumentBlock(
         block_id=chunk.chunk_id,
         document_id=chunk.document_id,
-        page_number=chunk.page_idx,
+        page_number=page_number,
         section_path=str(metadata.get("section_path") or chunk.chunk_type),
         block_type=chunk.chunk_type,
         text=text,
-        bbox=[float(value) for value in bbox],
-        bbox_coordinate_space=coordinate_space,
+        bbox=[] if text_offset else [float(value) for value in bbox],
+        bbox_coordinate_space=None if text_offset else coordinate_space,
         char_start=int(metadata.get("char_start") or 0),
         char_end=int(metadata.get("char_end") or len(text)),
         source_hash=str(metadata.get("source_hash") or hashlib.sha256(text.encode()).hexdigest()),
-        parser_version=str(metadata.get("parser_version") or "postgres-index-v1"),
+        parser_version=parser_version,
+        locator_kind=(
+            "legacy_unknown" if legacy else "text_offset" if text_offset else "pdf_page"
+        ),
+        coordinates_are_pdf=(
+            not legacy
+            and not text_offset
+            and bool(metadata.get("coordinates_are_pdf", True))
+        ),
+        pdf_regions=[region.model_dump() for region in regions],
+        **table_fields,
     )
 
 
 def _block_from_row(row: DocumentBlockRow) -> DocumentBlock:
+    from riskagent.provenance import LEGACY_TEXT_PARSER_VERSION, TEXT_OFFSET_PARSER_VERSION
+
+    stored_page = int(row.page_number or 0)
+    stored_bbox = list(row.bbox or [])
+    if row.parser_version == TEXT_OFFSET_PARSER_VERSION:
+        kind = "text_offset"
+        page_number = None
+        bbox: list[float] = []
+        regions: list[dict[str, Any]] = []
+        coordinate_space = None
+    elif row.parser_version == LEGACY_TEXT_PARSER_VERSION or stored_page < 1:
+        # Stored numbers stay available for audit. They are not rewritten into offsets or PDF pages.
+        kind = "legacy_unknown"
+        page_number = stored_page if stored_page >= 1 else None
+        bbox = stored_bbox
+        regions = []
+        coordinate_space = None
+    else:
+        kind = "pdf_page"
+        page_number = stored_page
+        bbox = stored_bbox
+        coordinate_space = "pdf_points"
+        regions = [
+            {
+                "page_number": stored_page,
+                "bbox": bbox,
+                "bbox_coordinate_space": "pdf_points",
+            }
+        ]
     return DocumentBlock(
         block_id=row.block_id,
         document_id=row.document_id,
-        page_number=row.page_number,
+        page_number=page_number,
         section_path=row.section_path,
         block_type=row.block_type,
         text=row.text,
-        bbox=list(row.bbox or []),
+        bbox=bbox,
+        bbox_coordinate_space=coordinate_space,
         char_start=row.char_start,
         char_end=row.char_end,
         source_hash=row.source_hash,
         parser_version=row.parser_version,
+        locator_kind=kind,
+        coordinates_are_pdf=kind == "pdf_page",
+        pdf_regions=regions,
     )

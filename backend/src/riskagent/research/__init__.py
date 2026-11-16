@@ -16,6 +16,9 @@ from riskagent.research.core import (
     SearchResponse,
     SourceCard,
     ToolAuditRecord,
+    eligible_pre_cutoff,
+    is_pre_cutoff_evidence,
+    research_ids_for_scoring,
 )
 
 __all__ = [
@@ -34,4 +37,7 @@ __all__ = [
     "SearchResponse",
     "SourceCard",
     "ToolAuditRecord",
+    "eligible_pre_cutoff",
+    "is_pre_cutoff_evidence",
+    "research_ids_for_scoring",
 ]

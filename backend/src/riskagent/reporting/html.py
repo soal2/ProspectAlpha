@@ -7,6 +7,8 @@ from html import escape
 from typing import Any, Iterable
 from urllib.parse import urlparse
 
+from riskagent.provenance import format_evidence_location
+
 
 _STYLE = """
 body{margin:0;background:#f8fafc;color:#172033;font:15px/1.65 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}
@@ -175,9 +177,10 @@ def _counterevidence(items: list[dict[str, Any]]) -> str:
 def _evidence_index(items: list[dict[str, Any]]) -> str:
     rows = []
     for item in items:
-        if "page_number" in item:
+        if "page_number" in item or item.get("locator_kind"):
             text = str(item.get("text") or "")
-            rows.append([item.get("evidence_id"), item.get("finding_id"), f"P.{item.get('page_number') or '未提供'} · {item.get('section_path') or '未提供'}", hashlib.sha256(text.encode("utf-8")).hexdigest() if text else "未提供", text])
+            location = item.get("location") or format_evidence_location(item)
+            rows.append([item.get("evidence_id"), item.get("finding_id"), location, hashlib.sha256(text.encode("utf-8")).hexdigest() if text else "未提供", text])
         else:
             rows.append([item.get("evidence_id"), item.get("finding_id"), item.get("published_at") or "日期不明", "外部来源", _link(item.get("url"), item.get("title") or item.get("url"))])
     return _card("证据索引", _table(["证据 ID", "关联对象", "页码/日期", "文本哈希", "原文或来源"], rows, raw_columns={4}))

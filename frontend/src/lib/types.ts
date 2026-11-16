@@ -50,9 +50,13 @@ export interface BacktestSummary {
   model: string;
   modelVersion: string;
   samples: number;
-  auc: number;
-  ks: number;
-  lift10: number;
+  evaluationScope?: "single_company" | "cohort";
+  auc: number | null;
+  ks: number | null;
+  aucReason?: string | null;
+  ksReason?: string | null;
+  lift10: number | null;
+  liftTop20?: number | null;
   recall: number;
   createdAt: string;
   status: "完成" | "运行中" | "失败" | "构建候选中" | "待确认" | "待运行";
@@ -198,6 +202,7 @@ export interface EvidenceFeedItem {
   conf: number;
   time: string;
   page?: number | null;
+  location?: string | null;
   snippet?: string | null;
   document_id?: string | null;
   bbox?: number[];
@@ -214,7 +219,8 @@ export interface TraceData {
 export interface EvidenceDetailItem {
   id: string;
   section: string;
-  page: number;
+  page: number | null;
+  location: string;
   conf: number;
   scoreKind: "retrieval" | "relevance" | "unavailable";
   snippet: string;
@@ -228,7 +234,8 @@ export interface KnowledgePreview {
   evidenceId: string;
   code: string;
   section: string;
-  page: number;
+  page: number | null;
+  location: string;
   linkedConclusions: string[];
 }
 
@@ -247,7 +254,8 @@ export interface KnowledgeEvidence {
   code: string;
   name: string;
   section: string;
-  page: number;
+  page: number | null;
+  location: string;
   conf: number;
   scoreKind: "retrieval" | "relevance" | "unavailable";
   snippet: string;

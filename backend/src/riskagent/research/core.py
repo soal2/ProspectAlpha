@@ -163,6 +163,13 @@ class BochaConfig(BaseModel):
 
 
 def parse_published_date(raw: Any) -> str | None:
+    if raw is None:
+        return None
+    if hasattr(raw, "isoformat") and not isinstance(raw, str):
+        try:
+            return raw.date().isoformat() if hasattr(raw, "hour") else raw.isoformat()
+        except (TypeError, ValueError):
+            return None
     if not isinstance(raw, str) or not raw.strip():
         return None
     text = raw.strip()
@@ -170,12 +177,77 @@ def parse_published_date(raw: Any) -> str | None:
         return datetime.fromisoformat(text.replace("Z", "+00:00")).date().isoformat()
     except ValueError:
         pass
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y/%m/%d", "%Y年%m月%d日"):
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y/%m/%d", "%Y年%m月%d日", "%Y-%m-%d"):
         try:
             return datetime.strptime(text, fmt).date().isoformat()
         except ValueError:
             continue
     return None
+
+
+def eligible_pre_cutoff(
+    published_at: Any,
+    data_cutoff_date: Any,
+    *,
+    accessible: bool = True,
+) -> bool:
+    """Whether a source may enter pre-listing evidence or scoring.
+
+    Unknown, blank, and unparseable dates are not eligible. A missing cutoff
+    is also not eligible: the boundary cannot be proven. Post-listing
+    attribution must stay on its own path and must not call this helper to
+    admit those sources.
+    """
+
+    if not accessible:
+        return False
+    published = parse_published_date(published_at)
+    cutoff = parse_published_date(data_cutoff_date)
+    if not published or not cutoff:
+        return False
+    return published <= cutoff
+
+
+def is_pre_cutoff_evidence(item: Any) -> bool:
+    """True only for sources explicitly admitted before the cutoff.
+
+    Post-listing attribution records are never pre-cutoff evidence, even when
+    they carry a date.
+    """
+
+    if isinstance(item, dict):
+        eligible = item.get("eligible_pre_cutoff")
+        attribution = item.get("attribution")
+    else:
+        eligible = getattr(item, "eligible_pre_cutoff", False)
+        attribution = getattr(item, "attribution", None)
+    return eligible is True and attribution != "post_listing"
+
+
+def research_ids_for_scoring(items: Any) -> list[str]:
+    """Identifiers that may be frozen onto a score snapshot."""
+
+    identifiers: list[str] = []
+    for item in items or []:
+        if not is_pre_cutoff_evidence(item):
+            continue
+        if isinstance(item, dict):
+            ident = (
+                item.get("source_hash")
+                or item.get("artifact_id")
+                or item.get("content_hash")
+                or item.get("source_id")
+            )
+        else:
+            ident = (
+                getattr(item, "source_hash", None)
+                or getattr(item, "artifact_id", None)
+                or getattr(item, "content_hash", None)
+                or getattr(item, "source_id", None)
+            )
+        if ident:
+            identifiers.append(str(ident))
+    return identifiers
 
 
 class BochaAdapter:
@@ -589,7 +661,11 @@ class HypothesisResearchModule:
                     outcome = await self.fetcher.fetch(hit.url)
                     usage.pages_fetched += 1
                     published = outcome.published_at or hit.published_at
-                    eligible = bool(outcome.accessible and published and published <= data_cutoff_date)
+                    eligible = eligible_pre_cutoff(
+                        published,
+                        data_cutoff_date,
+                        accessible=outcome.accessible,
+                    )
                     card = SourceCard(
                         hypothesis_id=hypothesis.hypothesis_id,
                         query_kind=query_kind,
@@ -639,6 +715,11 @@ class HypothesisResearchModule:
                     f"{hypothesis.title} 连续一轮未获得新的相关正文证据，研究提前停止。"
                 )
                 break
+        excluded = sum(not item.eligible_pre_cutoff for item in sources)
+        if excluded:
+            limitations.append(
+                f"已排除 {excluded} 条发布日期晚于 data_cutoff_date 或日期不明的外部来源，未进入上市前证据与评分。"
+            )
         return ResearchResult(hypotheses=selected, sources=sources, audit=audit, usage=usage, limitations=list(dict.fromkeys(limitations)))
 
     async def research_retrospective(
@@ -687,6 +768,8 @@ class HypothesisResearchModule:
                         "published_at": published,
                         "content_hash": outcome.content_hash,
                         "classification": "counterevidence" if counter else "materialization",
+                        "attribution": "post_listing",
+                        "eligible_pre_cutoff": False,
                     }
                 )
         if any(item["classification"] == "materialization" for item in sources):
