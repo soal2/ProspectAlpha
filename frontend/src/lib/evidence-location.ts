@@ -1,4 +1,4 @@
-export type EvidenceLocatorKind = "pdf_page" | "text_offset";
+export type EvidenceLocatorKind = "pdf_page" | "text_offset" | "legacy_unknown";
 
 export type EvidenceRegion = {
   page_number?: number | null;
@@ -22,7 +22,7 @@ export function pdfPageNumber(
   page: number | null | undefined,
   locator?: string | null,
 ): number | null {
-  if (locator === "text_offset") return null;
+  if (locator === "text_offset" || locator === "legacy_unknown") return null;
   if (page == null || !Number.isFinite(page) || page < 1) return null;
   return page;
 }
@@ -33,6 +33,7 @@ export function evidenceLocationLabel(item: EvidenceLocationSource): string {
     .map((region) => pdfPageNumber(region.page_number, item.locator_kind))
     .filter((page): page is number => page != null);
   const pages = [...new Set(primary == null ? extra : [primary, ...extra])];
+  if (item.locator_kind === "legacy_unknown") return "历史定位未核实";
   const parts: string[] = [];
   if (item.locator_kind === "text_offset" || pages.length === 0) {
     parts.push("无 PDF 页");

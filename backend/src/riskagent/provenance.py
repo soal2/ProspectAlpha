@@ -13,9 +13,9 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
-LocatorKind = Literal["pdf_page", "text_offset"]
+LocatorKind = Literal["pdf_page", "text_offset", "legacy_unknown"]
 TEXT_OFFSET_PARSER_VERSION = "text-offset-v1"
-TEXT_OFFSET_PARSER_VERSIONS = {TEXT_OFFSET_PARSER_VERSION, "local-text-parser-v1"}
+LEGACY_TEXT_PARSER_VERSION = "local-text-parser-v1"
 # A4 points. Text ingestion used to stamp this box on every chunk.
 MANUFACTURED_FULL_PAGE_BBOX = (0.0, 0.0, 595.0, 842.0)
 
@@ -118,13 +118,16 @@ def passes_real_pdf_evidence(
 
     if locator_kind != "pdf_page" or not coordinates_are_pdf:
         return False
-    if parser_version in TEXT_OFFSET_PARSER_VERSIONS:
+    if parser_version in {TEXT_OFFSET_PARSER_VERSION, LEGACY_TEXT_PARSER_VERSION}:
         return False
     if page_number is None or page_number < 1 or not source_hash:
         return False
     if not is_real_pdf_bbox(bbox):
         return False
-    if is_manufactured_full_page_bbox(bbox) and parser_version in TEXT_OFFSET_PARSER_VERSIONS:
+    if is_manufactured_full_page_bbox(bbox) and parser_version in {
+        TEXT_OFFSET_PARSER_VERSION,
+        LEGACY_TEXT_PARSER_VERSION,
+    }:
         return False
     return True
 
@@ -204,14 +207,21 @@ def chunk_location_fields(chunk: Any) -> dict[str, Any]:
     metadata = chunk.metadata if isinstance(getattr(chunk, "metadata", None), dict) else {}
     parser_version = str(metadata.get("parser_version") or "")
     locator_kind = str(metadata.get("locator_kind") or "")
-    text_offset = locator_kind == "text_offset" or parser_version in TEXT_OFFSET_PARSER_VERSIONS
+    legacy = locator_kind == "legacy_unknown" or parser_version == LEGACY_TEXT_PARSER_VERSION
+    text_offset = (not legacy) and (
+        locator_kind == "text_offset" or parser_version == TEXT_OFFSET_PARSER_VERSION
+    )
     coordinate_space = str(metadata.get("bbox_coordinate_space") or "")
     if coordinate_space not in {"pdf_points", "normalized_1000"}:
         coordinate_space = None if text_offset else "pdf_points"
     group_refs = metadata.get("table_group_bbox_refs")
     merged = list(getattr(chunk, "merged_bboxes", None) or [])
     refs = group_refs if isinstance(group_refs, list) and group_refs else merged
-    regions = [] if text_offset else pdf_regions_from_refs(refs, coordinate_space=coordinate_space)
+    regions = (
+        []
+        if text_offset or legacy
+        else pdf_regions_from_refs(refs, coordinate_space=coordinate_space)
+    )
     page_idx = int(getattr(chunk, "page_idx", 0) or 0)
     region = next(
         (
@@ -231,8 +241,12 @@ def chunk_location_fields(chunk: Any) -> dict[str, Any]:
         "page_number": page_number,
         "bbox": bbox,
         "bbox_coordinate_space": None if text_offset else coordinate_space,
-        "locator_kind": "text_offset" if text_offset else "pdf_page",
-        "coordinates_are_pdf": not text_offset and bool(metadata.get("coordinates_are_pdf", True)),
+        "locator_kind": (
+            "legacy_unknown" if legacy else "text_offset" if text_offset else "pdf_page"
+        ),
+        "coordinates_are_pdf": not legacy
+        and not text_offset
+        and bool(metadata.get("coordinates_are_pdf", True)),
         "parser_version": parser_version,
         "char_start": int(metadata.get("char_start") or 0),
         "char_end": int(metadata.get("char_end") or 0),
@@ -249,6 +263,8 @@ def format_evidence_location(item: Any) -> str:
     locator_kind = getattr(item, "locator_kind", None)
     if locator_kind is None and isinstance(item, dict):
         locator_kind = item.get("locator_kind")
+    if locator_kind == "legacy_unknown":
+        return "历史定位未核实"
     page_number = _read(item, "page_number")
     char_start = _read(item, "char_start") or 0
     char_end = _read(item, "char_end") or 0

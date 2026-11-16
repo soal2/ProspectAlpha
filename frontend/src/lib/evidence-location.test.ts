@@ -32,6 +32,18 @@ describe("evidence location", () => {
     expect(label).not.toContain("单位");
   });
 
+  test("legacy rows stay unverified instead of becoming a page or an offset", () => {
+    expect(pdfPageNumber(4, "legacy_unknown")).toBeNull();
+    expect(
+      evidenceLocationLabel({
+        locator_kind: "legacy_unknown",
+        page_number: 4,
+        char_start: 0,
+        char_end: 900,
+      }),
+    ).toBe("历史定位未核实");
+  });
+
   test("a real PDF page is not rewritten", () => {
     expect(pdfPageNumber(7, "pdf_page")).toBe(7);
     expect(evidenceLocationLabel({ locator_kind: "pdf_page", page_number: 7 })).toBe("P.7");

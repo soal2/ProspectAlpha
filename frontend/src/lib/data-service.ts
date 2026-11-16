@@ -310,7 +310,7 @@ type BackendEvidence = {
   finding_id: string;
   document_block_id: string;
   document_id: string;
-  locator_kind?: "pdf_page" | "text_offset";
+  locator_kind?: "pdf_page" | "text_offset" | "legacy_unknown";
   page_number: number | null;
   section_path: string;
   text: string;

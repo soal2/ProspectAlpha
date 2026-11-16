@@ -73,8 +73,8 @@ from riskagent.reporting import (
 )
 from riskagent.providers.llm import get_default_llm_client
 from riskagent.provenance import (
+    LEGACY_TEXT_PARSER_VERSION,
     TEXT_OFFSET_PARSER_VERSION,
-    TEXT_OFFSET_PARSER_VERSIONS,
     PdfRegion,
     chunk_location_fields,
     format_evidence_location,
@@ -218,7 +218,7 @@ class DocumentBlock(BaseModel):
     char_end: int = 0
     source_hash: str
     parser_version: str = "pymupdf-v1"
-    locator_kind: Literal["pdf_page", "text_offset"] = "pdf_page"
+    locator_kind: Literal["pdf_page", "text_offset", "legacy_unknown"] = "pdf_page"
     coordinates_are_pdf: bool = True
     table_header: str | None = None
     table_row: str | None = None
@@ -228,7 +228,12 @@ class DocumentBlock(BaseModel):
 
     @model_validator(mode="after")
     def _clear_invented_pdf_location(self) -> "DocumentBlock":
-        if self.locator_kind == "text_offset" or self.parser_version in TEXT_OFFSET_PARSER_VERSIONS:
+        if self.parser_version == LEGACY_TEXT_PARSER_VERSION and self.locator_kind != "text_offset":
+            # Keep the stored page, box, and offsets. They are not a reconstructed location.
+            self.locator_kind = "legacy_unknown"
+            self.coordinates_are_pdf = False
+            return self
+        if self.locator_kind == "text_offset" or self.parser_version == TEXT_OFFSET_PARSER_VERSION:
             self.locator_kind = "text_offset"
             self.page_number = None
             self.bbox = []
@@ -255,7 +260,7 @@ class RunEvidence(BaseModel):
     retrieval_score: float = 0.0
     relevance_score: float = 0.0
     verifier_status: str
-    locator_kind: Literal["pdf_page", "text_offset"] = "pdf_page"
+    locator_kind: Literal["pdf_page", "text_offset", "legacy_unknown"] = "pdf_page"
     coordinates_are_pdf: bool = True
     parser_version: str = ""
     table_header: str | None = None
@@ -272,13 +277,18 @@ class RunEvidence(BaseModel):
             match = re.match(r"^block_(.+)_\d{4}_\d{3}$", self.document_block_id)
             if match:
                 self.document_id = match.group(1)
-        if self.locator_kind == "text_offset" or self.parser_version in TEXT_OFFSET_PARSER_VERSIONS:
+        if self.parser_version == LEGACY_TEXT_PARSER_VERSION and self.locator_kind != "text_offset":
+            self.locator_kind = "legacy_unknown"
+            self.coordinates_are_pdf = False
+            return self
+        if self.locator_kind == "text_offset" or self.parser_version == TEXT_OFFSET_PARSER_VERSION:
             self.locator_kind = "text_offset"
             self.page_number = None
             self.bbox = []
             self.bbox_coordinate_space = None
             self.coordinates_are_pdf = False
             self.pdf_regions = []
+            self.parser_version = TEXT_OFFSET_PARSER_VERSION
             return self
         if self.page_number is not None and self.page_number < 1:
             self.page_number = None
@@ -3494,8 +3504,8 @@ def _locator_from_block(block: DocumentBlock) -> dict[str, Any]:
 
 def _locator_from_mapping(candidate: dict[str, Any]) -> dict[str, Any]:
     locator_kind = candidate.get("locator_kind")
-    if locator_kind not in {"pdf_page", "text_offset"}:
-        locator_kind = "pdf_page" if candidate.get("coordinates_are_pdf", True) else "text_offset"
+    if locator_kind not in {"pdf_page", "text_offset", "legacy_unknown"}:
+        locator_kind = "pdf_page" if candidate.get("coordinates_are_pdf", True) else "legacy_unknown"
     regions = candidate.get("pdf_regions") or []
     return {
         "locator_kind": locator_kind,
@@ -3833,6 +3843,11 @@ def _quality_review(run: AnalysisRun) -> dict[str, Any]:
             issues.append(f"{finding.finding_id} / {finding.title} 缺少 PDF 原文证据。")
             continue
         for item in linked:
+            if item.locator_kind == "legacy_unknown":
+                issues.append(
+                    f"{finding.finding_id} / {finding.title} 的历史定位未核实，不能按真实 PDF 证据通过质检。"
+                )
+                continue
             if item.locator_kind == "text_offset" or not item.coordinates_are_pdf:
                 if item.page_number is not None or item.bbox:
                     issues.append(

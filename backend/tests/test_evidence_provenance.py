@@ -264,7 +264,7 @@ def test_cross_page_table_keeps_real_pages_header_and_does_not_invent_unit():
     assert "单位未提供" not in html
 
 
-def test_loaded_text_block_drops_historical_fake_page():
+def test_loaded_text_block_keeps_historical_values_as_unknown():
     block = DocumentBlock(
         block_id="block_old",
         document_id="doc_old",
@@ -272,12 +272,28 @@ def test_loaded_text_block_drops_historical_fake_page():
         section_path="正文",
         text="旧文本",
         bbox=list(MANUFACTURED_FULL_PAGE_BBOX),
+        char_start=0,
+        char_end=900,
         source_hash="old",
         parser_version="local-text-parser-v1",
     )
-    assert block.locator_kind == "text_offset"
-    assert block.page_number is None
-    assert block.bbox == []
+    assert block.locator_kind == "legacy_unknown"
+    assert block.page_number == 4
+    assert block.bbox == list(MANUFACTURED_FULL_PAGE_BBOX)
+    assert block.char_start == 0
+    assert block.char_end == 900
+    assert block.parser_version == "local-text-parser-v1"
+    assert block.coordinates_are_pdf is False
+    location = format_evidence_location(block)
+    assert location == "历史定位未核实"
+    assert not passes_real_pdf_evidence(
+        locator_kind=block.locator_kind,
+        page_number=block.page_number,
+        bbox=block.bbox,
+        source_hash=block.source_hash,
+        coordinates_are_pdf=block.coordinates_are_pdf,
+        parser_version=block.parser_version,
+    )
 
 
 def _run_with_evidence(evidence: RunEvidence) -> AnalysisRun:

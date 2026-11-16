@@ -256,14 +256,16 @@ Returns source-grounded evidence snippets for the run.
 
 Location fields:
 
-- `locator_kind`: `pdf_page` or `text_offset`
+- `locator_kind`: `pdf_page`, `text_offset`, or `legacy_unknown`
 - `page_number`: 1-based PDF page when `locator_kind` is `pdf_page`; `null` for plain text
 - `bbox`: parser-produced page box for a PDF block; `[]` for plain text
 - `pdf_regions[]`: real pages touched by the evidence. Cross-page tables list each page instead of one invented box
 - `char_start` / `char_end`: offsets into the original plain text when `locator_kind` is `text_offset`
 - `table_header`, `table_row`, `table_column`, `table_unit`: present only when the source table actually has that value
 
-Plain text does not receive a synthetic page number or a full-page bbox. Clients must not render `P.1` or open a PDF highlight when `page_number` is null.
+Plain text written by `text-offset-v1` does not receive a synthetic page number or a full-page bbox. Clients must not render `P.1` or open a PDF highlight when `page_number` is null.
+
+`legacy_unknown` means an older row, including `local-text-parser-v1`, whose stored page, bbox, and character offsets are kept for audit and are not converted into a PDF page or a reconstructed text offset. Render it as unverified history. `document_blocks.page_number` stays a non-null integer; new text rows store `0` there and return `null` from this API. Database upgrades must not rewrite those stored numbers.
 
 ### `GET /analysis-runs/{run_id}/findings`
 
