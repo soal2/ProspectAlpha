@@ -26,7 +26,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 from riskagent.common.risk_levels import RiskLevel as _RISK_LEVELS_ENUM
-from riskagent.database import Base, SessionLocal, init_db
+from riskagent.database import Base, SessionLocal, ensure_database_schema, init_db
 from riskagent.prediction import (  # aliases: implementation lives in prediction/
     EVIDENCE_FACTORS,
     SCORECARD_VERSION,
@@ -235,7 +235,7 @@ class BacktestService:
             if bind is None:
                 init_db()
             else:
-                Base.metadata.create_all(bind=bind)
+                ensure_database_schema(bind)
 
     def import_market_data(self, request: MarketImportRequest) -> dict[str, Any]:
         paths = [Path(request.security_csv), Path(request.company_csv), Path(request.prices_csv)]

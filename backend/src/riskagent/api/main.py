@@ -43,28 +43,27 @@ def _cors_origins() -> list[str]:
     ]
 
 
-def _run_rag_schema_migrations() -> None:
-    """Ensure RAG schema is up-to-date for existing databases.
+_migration_error: str | None = None
 
-    Covers columns added after the initial ``CREATE TABLE`` (e.g.
-    ``content_sha256``).  The helper function is idempotent and safe to call
-    on every startup.
-    """
+
+def migration_error() -> str | None:
+    return _migration_error
+
+
+def _apply_startup_migrations() -> None:
+    """Upgrade ORM and existing RAG tables. Failure is recorded for /ready."""
+
+    global _migration_error
+    from riskagent.migrations import upgrade_database
+
     try:
-        from riskagent.retrieval.index import (
-            DEFAULT_INDEX_SCHEMA,
-            connect_postgres,
-            ensure_content_sha256_column,
-        )
-
-        conn = connect_postgres()
-        try:
-            ensure_content_sha256_column(schema=DEFAULT_INDEX_SCHEMA, conn=conn)
-            logger.info("RAG schema migrations applied successfully.")
-        finally:
-            conn.close()
-    except Exception:
-        logger.exception("RAG schema migration failed")
+        upgrade_database()
+    except Exception as exc:
+        _migration_error = f"{type(exc).__name__}: {exc}"
+        logger.exception("Database migration failed")
+        return
+    _migration_error = None
+    logger.info("Database migrations applied successfully.")
 
 
 def create_app() -> FastAPI:
@@ -110,27 +109,44 @@ def create_app() -> FastAPI:
             )
         return {"status": "ok", "database": "ready"}
 
+    @app.get("/ready")
+    def ready():
+        """Schema and configured worker readiness.
+
+        ``/health`` stays the public minimal liveness probe. The auth stream
+        currently exempts only ``/health``. If that change merges, ``/ready``
+        will require the bearer token unless that stream also exempts it.
+        A deployment probe that cannot send the token needs that exemption;
+        this process does not change the auth rules.
+        """
+
+        from riskagent.readiness import readiness_report
+
+        report = readiness_report(migration_error=migration_error())
+        if not report["ready"]:
+            return JSONResponse(status_code=503, content=report)
+        return report
+
     @app.on_event("startup")
     def _probe_embedding_provider() -> None:
         load_dotenv()
-        from riskagent.database import init_db
         from riskagent.documents import recover_interrupted_prospectus_jobs
         from riskagent.parsing import mineru_runtime_health
         from riskagent.workers.documents import start_document_dispatcher
 
-        try:
-            init_db()
-            _run_rag_schema_migrations()
-            recovered = recover_interrupted_prospectus_jobs()
-            if recovered:
-                logger.warning(
-                    "Marked %d abandoned MinerU jobs as interrupted: %s",
-                    len(recovered),
-                    ", ".join(recovered),
-                )
-            start_document_dispatcher()
-        except Exception:
-            logger.exception("Document parsing recovery probe failed")
+        _apply_startup_migrations()
+        if migration_error() is None:
+            try:
+                recovered = recover_interrupted_prospectus_jobs()
+                if recovered:
+                    logger.warning(
+                        "Marked %d abandoned MinerU jobs as interrupted: %s",
+                        len(recovered),
+                        ", ".join(recovered),
+                    )
+                start_document_dispatcher()
+            except Exception:
+                logger.exception("Document parsing recovery probe failed")
 
         parser_health = mineru_runtime_health()
         log_method = logger.info if parser_health["status"] == "ready" else logger.warning

@@ -90,7 +90,7 @@ backend/
 | `RiskRuleDimensionRow` | `risk_rule_dimensions` | 风险规则维度汇总 |
 | `RiskRuleRow` | `risk_rules` | 可执行风险规则 |
 
-默认情况下数据库由 `database.py:init_db()` 调用 `Base.metadata.create_all` 初始化，落库到 `data/processed/prospect_alpha.db`（SQLite）；生产环境通过 `DATABASE_URL` 切到 PostgreSQL。
+数据库升级由 Alembic 负责，入口是 `python -m riskagent.migrations upgrade`，启动时 `init_db()` 也会调用它。未设置 `DATABASE_URL` 时落在 `data/processed/prospect_alpha.db`（SQLite）；生产环境通过 `DATABASE_URL` 使用 PostgreSQL。升级只补表和缺列，不删除已有库。部署顺序见 `docs/database_migrations.md`。
 
 ## 运行时架构
 
@@ -216,7 +216,8 @@ cd backend
 
 | 路径 | 模块 |
 | --- | --- |
-| `GET /health` | `api/main.py` |
+| `GET /health` | `api/main.py`，公开存活探针 |
+| `GET /ready` | `api/main.py`，修订版本与已配置 worker 心跳 |
 | `/agents` | `api/agents.py` |
 | `/analysis-options` | `api/analysis_options.py` |
 | `/documents`、`/documents/upload` | `api/documents.py` |
@@ -239,4 +240,4 @@ cd backend
 - **预测与评分卡**：`prediction/` 仍为占位。
 - **回测评估**：`backtesting/` 仍为占位。
 - **报告生成**：`reporting/` 仍为占位（Markdown / HTML / PDF）。
-- **数据库迁移**：当前依赖 `init_db()` 的 `create_all`，尚未引入 Alembic 迁移（`pyproject.toml` 已把 `alembic` 列入 `pipeline` 可选依赖）。
+- **数据库迁移**：已使用 Alembic。新的表结构写成 `migrations/versions` 里的下一份修订，不要在启动路径再加一套 `create_all` 或手工 `ALTER`。说明见 `docs/database_migrations.md`。

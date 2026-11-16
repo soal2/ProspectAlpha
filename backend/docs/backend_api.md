@@ -62,8 +62,18 @@ Returns runtime health.
 Response:
 
 ```json
-{ "status": "ok" }
+{ "status": "ok", "database": "ready" }
 ```
+
+`/health` is the public liveness probe. It checks that the process can run `SELECT 1`. It does not report schema revision or worker heartbeat.
+
+### `GET /ready`
+
+Readiness. Returns 200 only when the Alembic revision is head, an existing PostgreSQL RAG table has `content_sha256` when that table is present, and Redis plus `prospectalpha:worker:heartbeat` are fresh when `ANALYSIS_EXECUTION_MODE=rq` or `DOCUMENT_PARSING_EXECUTION_MODE=rq`.
+
+Inline, thread, and subprocess modes do not require Redis. A migration failure returns 503. The Render start script already starts the worker; a missing heartbeat means the key has not been written, not that the worker process is absent from the deployment.
+
+The auth change in the other stream exempts `/health` only. `/ready` is intentionally separate. If that auth change merges first, a probe that cannot send `Authorization` needs `/ready` exempted there as well. This endpoint does not change auth rules.
 
 ## Analysis Options
 

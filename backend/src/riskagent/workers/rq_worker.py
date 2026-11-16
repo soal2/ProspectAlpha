@@ -34,6 +34,9 @@ def make_worker():
 
 def main() -> None:
     check_redis_ready()
+    from riskagent.workers.heartbeat import start_heartbeat
+
+    start_heartbeat()
     worker = make_worker()
     worker.work(with_scheduler=True)
 
