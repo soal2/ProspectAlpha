@@ -150,8 +150,48 @@ EVALUATION_PROTOCOL = {
 }
 
 
+class _PinnedScore:
+    """Read-only view of a score copied onto a replay candidate."""
+
+    def __init__(self, payload: dict[str, Any]) -> None:
+        self.total_score = payload.get("total_score")
+        self.breakdown = payload.get("breakdown") or {}
+        self.finding_snapshot = payload.get("finding_snapshot") or []
+        self.industry_profile = payload.get("industry_profile") or {}
+        self.risk_level = payload.get("risk_level") or ""
+        self.score_id = payload.get("score_id") or ""
+        self.run_id = payload.get("run_id") or ""
+        self.analysis_as_of_date = payload.get("analysis_as_of_date") or ""
+
+
 def _stable_hash(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _immutable_score_id(run_id: str, content_hash: str) -> str:
+    """Content-addressed id. It never reuses the mutable ``score_{run_id}`` key."""
+
+    prefix = f"score_{run_id}_"
+    room = 96 - len(prefix)
+    if room >= 20:
+        return prefix + content_hash[:room]
+    return f"score_{content_hash[:40]}"
+
+
+def _pin_payload(row: RiskScoreSnapshotRow) -> dict[str, Any]:
+    return {
+        "score_id": row.score_id,
+        "run_id": row.run_id,
+        "content_hash": row.content_hash,
+        "total_score": row.total_score,
+        "risk_level": row.risk_level,
+        "breakdown": row.breakdown,
+        "analysis_as_of_date": row.analysis_as_of_date,
+        "finding_snapshot": row.finding_snapshot,
+        "industry_profile": row.industry_profile,
+        "input_hash": row.input_hash,
+        "evidence_hash": row.evidence_hash,
+    }
 
 
 def _csv_encoding(path: Path) -> str:
@@ -399,6 +439,9 @@ class BacktestService:
         industry_profile: dict[str, Any] | None = None,
         text_signal_snapshot: dict[str, Any] | None = None,
         research_snapshot_ids: list[str] | None = None,
+        analysis_as_of_date: str = "",
+        input_hash: str = "",
+        evidence_hash: str = "",
     ) -> dict[str, Any]:
         """Score admitted findings and persist the numeric snapshot.
 
@@ -415,30 +458,59 @@ class BacktestService:
             },
         )
         result = explained.as_legacy_dict()
+        industry_payload = industry_profile or {}
+        text_payload = text_signal_snapshot or {}
+        research_ids = list(research_snapshot_ids or [])
+        content_hash = _stable_hash(
+            {
+                "run_id": run_id,
+                "wind_code": _code(wind_code),
+                "scorecard_version": SCORECARD_VERSION,
+                "analysis_as_of_date": analysis_as_of_date,
+                "input_hash": input_hash,
+                "evidence_hash": evidence_hash,
+                "findings": findings,
+                "industry_profile": industry_payload,
+                "text_signal_snapshot": text_payload,
+                "research_snapshot_ids": research_ids,
+                "score": result["score"],
+                "risk_level": result["risk_level"],
+                "breakdown": result["breakdown"],
+            }
+        )
+        score_id = _immutable_score_id(run_id, content_hash)
         with self.session_factory() as session:
-            session.merge(
-                RiskScoreSnapshotRow(
-                    score_id=f"score_{run_id}",
-                    run_id=run_id,
-                    wind_code=_code(wind_code),
-                    scorecard_version=SCORECARD_VERSION,
-                    total_score=result["score"],
-                    risk_level=result["risk_level"],
-                    breakdown=result["breakdown"],
-                    limitations=result["limitations"],
-                    analysis_as_of_date="",
-                    input_hash="",
-                    evidence_hash="",
-                    finding_snapshot=findings,
-                    industry_profile=industry_profile or {},
-                    text_signal_snapshot=text_signal_snapshot or {},
-                    weight_profile=WEIGHT_PROFILE,
-                    research_snapshot_ids=research_snapshot_ids or [],
-                    created_at=_now(),
+            existing = session.get(RiskScoreSnapshotRow, score_id)
+            if existing is None:
+                session.add(
+                    RiskScoreSnapshotRow(
+                        score_id=score_id,
+                        run_id=run_id,
+                        wind_code=_code(wind_code),
+                        scorecard_version=SCORECARD_VERSION,
+                        total_score=result["score"],
+                        risk_level=result["risk_level"],
+                        breakdown=result["breakdown"],
+                        limitations=result["limitations"],
+                        analysis_as_of_date=analysis_as_of_date,
+                        input_hash=input_hash,
+                        evidence_hash=evidence_hash,
+                        finding_snapshot=findings,
+                        industry_profile=industry_payload,
+                        text_signal_snapshot=text_payload,
+                        weight_profile=dict(WEIGHT_PROFILE),
+                        research_snapshot_ids=research_ids,
+                        content_hash=content_hash,
+                        created_at=_now(),
+                    )
                 )
-            )
-            session.commit()
-        return explained.as_dict()
+                session.commit()
+            elif existing.content_hash != content_hash:
+                raise RuntimeError("评分内容哈希与已有快照冲突")
+        payload = explained.as_dict()
+        payload["score_id"] = score_id
+        payload["content_hash"] = content_hash
+        return payload
 
     def score_for_analysis_run(self, run: Any) -> dict[str, Any]:
         """Freeze a report's explainable score using only its frozen inputs/findings."""
@@ -463,24 +535,21 @@ class BacktestService:
             item.model_dump() if hasattr(item, "model_dump") else item
             for item in getattr(run, "research_sources", [])
         ]
-        result = self.score(
+        evidence_items = [
+            item.model_dump() if hasattr(item, "model_dump") else item
+            for item in getattr(run, "evidence", [])
+        ]
+        return self.score(
             run_id=str(getattr(run, "run_id")),
             wind_code=str(stock_code),
             findings=findings,
             industry_profile=industry.model_dump() if industry is not None else {},
             text_signal_snapshot=text_signals.model_dump() if text_signals is not None else {},
             research_snapshot_ids=research_ids_for_scoring([*artifacts, *research_sources]),
+            analysis_as_of_date=str(getattr(run, "data_cutoff_date", "") or ""),
+            input_hash=_stable_hash(getattr(run, "input_summary", {}) or {}),
+            evidence_hash=_stable_hash(evidence_items),
         )
-        with self.session_factory() as session:
-            frozen = session.get(RiskScoreSnapshotRow, f"score_{getattr(run, 'run_id')}")
-            if frozen is not None:
-                frozen.analysis_as_of_date = str(getattr(run, "data_cutoff_date", ""))
-                frozen.input_hash = _stable_hash(getattr(run, "input_summary", {}) or {})
-                frozen.evidence_hash = _stable_hash(
-                    [item.model_dump() if hasattr(item, "model_dump") else item for item in getattr(run, "evidence", [])]
-                )
-                session.commit()
-        return result
 
     def create_backtest(self, request: BacktestCreate) -> BacktestSummary:
         with self.session_factory() as session:
@@ -625,7 +694,12 @@ class BacktestService:
             session.add(BacktestRunRow(backtest_id=clone_id, snapshot_id=source.snapshot_id, name=f"{source.name}（严格复现）", test_start_date=source.test_start_date, test_end_date=source.test_end_date, status="running", metrics={}, protocol=source.protocol, candidate_set_id=clone_set_id, created_at=_now()))
             session.add(BacktestCandidateSetRow(candidate_set_id=clone_set_id, backtest_id=clone_id, snapshot_id=source.snapshot_id, status="confirmed", created_at=_now()))
             for item in source_candidates:
-                session.add(BacktestCandidateSampleRow(id=f"{clone_set_id}:{item.wind_code}", candidate_set_id=clone_set_id, wind_code=item.wind_code, listing_date=item.listing_date, label_id=item.label_id, score_id=item.score_id, source_run_id=item.source_run_id, inclusion_status=item.inclusion_status, exclusion_reason=item.exclusion_reason))
+                pinned = item.pinned_score if isinstance(item.pinned_score, dict) else None
+                if pinned is None and item.score_id:
+                    score_row = session.get(RiskScoreSnapshotRow, item.score_id)
+                    if score_row is not None:
+                        pinned = _pin_payload(score_row)
+                session.add(BacktestCandidateSampleRow(id=f"{clone_set_id}:{item.wind_code}", candidate_set_id=clone_set_id, wind_code=item.wind_code, listing_date=item.listing_date, label_id=item.label_id, score_id=item.score_id, source_run_id=item.source_run_id, inclusion_status=item.inclusion_status, exclusion_reason=item.exclusion_reason, pinned_score=pinned))
             job = self._new_job(session, clone_id, "reproduce", "严格复现")
             session.commit()
             return self._job(job)
@@ -712,7 +786,16 @@ class BacktestService:
             labels_by_code_horizon = {(item.wind_code, item.horizon): item for item in all_labels}
             scores = {item.score_id: item for item in session.scalars(select(RiskScoreSnapshotRow).where(RiskScoreSnapshotRow.scorecard_version == SCORECARD_VERSION)).all()}
             securities = {item.wind_code: item for item in session.scalars(select(SecurityMasterRow).where(SecurityMasterRow.snapshot_id == run.snapshot_id)).all()}
-            eligible = [(labels[item.label_id], scores[item.score_id], item) for item in candidates if item.label_id in labels and item.score_id in scores]
+            eligible = []
+            for item in candidates:
+                if item.label_id not in labels:
+                    continue
+                pinned = item.pinned_score if isinstance(item.pinned_score, dict) else None
+                if pinned is not None:
+                    eligible.append((labels[item.label_id], _PinnedScore(pinned), item))
+                    continue
+                if item.score_id in scores:
+                    eligible.append((labels[item.label_id], scores[item.score_id], item))
             if not eligible: raise ValueError("已确认样本没有可用的标签和评分快照")
             eligible.sort(key=lambda item: item[1].total_score, reverse=True)
             full = self._variant_metrics(eligible, lambda score: score.total_score)
