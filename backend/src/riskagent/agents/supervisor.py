@@ -23,6 +23,7 @@ from langgraph.types import Command, interrupt
 from pydantic import BaseModel, ConfigDict, Field
 
 from riskagent.a2a import MessageType, TeamRuntime
+from riskagent.provenance import chunk_location_fields
 from riskagent.a2a.runtime import STRATEGIC_AGENT
 from riskagent.a2a.storage import resolve_agent_runtime_root
 from riskagent.agent_experts import AgentSpec, AgentSpecRepository
@@ -158,6 +159,7 @@ class AgentState(TypedDict, total=False):
     text: str
     document_id: str
     stock_code: str
+    data_cutoff_date: str
     structured_inputs: dict[str, Any]
     skill_snapshot: dict[str, Any]
     document_block_ids: list[str]
@@ -228,6 +230,7 @@ class AgentTeamSupervisor:
         text: str,
         document_id: str = "",
         stock_code: str = "",
+        data_cutoff_date: str = "",
         structured_inputs: dict[str, Any] | None = None,
         skill_snapshot: dict[str, Any] | None = None,
         document_block_ids: list[str] | None = None,
@@ -244,6 +247,8 @@ class AgentTeamSupervisor:
             "text": text,
             "document_id": document_id,
             "stock_code": stock_code,
+            "data_cutoff_date": data_cutoff_date
+            or str((structured_inputs or {}).get("data_cutoff_date") or ""),
             "structured_inputs": structured_inputs or {},
             "skill_snapshot": skill_snapshot or {},
             "document_block_ids": document_block_ids or [],
@@ -562,6 +567,7 @@ class AgentTeamSupervisor:
                             text=state["text"],
                             document_id=state.get("document_id", ""),
                             stock_code=state.get("stock_code", ""),
+                            data_cutoff_date=str(state.get("data_cutoff_date") or ""),
                             structured_inputs=state.get("structured_inputs", {}),
                             skill_snapshot=state.get("skill_snapshot", {}),
                             document_block_ids=state.get("document_block_ids", []),
@@ -716,6 +722,7 @@ class AgentTeamSupervisor:
                                 text=state["text"],
                                 document_id=state.get("document_id", ""),
                                 stock_code=state.get("stock_code", ""),
+                                data_cutoff_date=str(state.get("data_cutoff_date") or ""),
                                 structured_inputs=state.get("structured_inputs", {}),
                                 skill_snapshot=state.get("skill_snapshot", {}),
                                 document_block_ids=state.get("document_block_ids", []),
@@ -957,6 +964,7 @@ class AgentTeamSupervisor:
         text: str,
         document_id: str = "",
         stock_code: str = "",
+        data_cutoff_date: str = "",
         structured_inputs: dict[str, Any] | None = None,
         skill_snapshot: dict[str, Any] | None = None,
         document_block_ids: list[str] | None = None,
@@ -1016,6 +1024,8 @@ class AgentTeamSupervisor:
                     skill_version=str(metadata.get("version") or "0.0.0"),
                     stock_code=stock_code or None,
                     company_name=str((structured_inputs or {}).get("company_name") or ""),
+                    data_cutoff_date=data_cutoff_date
+                    or str((structured_inputs or {}).get("data_cutoff_date") or ""),
                     document_id=document_id,
                     document_block_ids=document_block_ids or [],
                     structured_inputs=structured_inputs or {},
@@ -1095,22 +1105,13 @@ class AgentTeamSupervisor:
                                 {
                                     "chunk_id": chunk.chunk_id,
                                     "document_id": chunk.document_id,
-                                    "page_number": chunk.page_idx,
                                     "section_path": str(
                                         chunk.metadata.get("section_path")
                                         or chunk.chunk_type
                                     ),
                                     "text": chunk.text[:300],
-                                    "bbox": (
-                                        chunk.merged_bboxes[0].get("bbox", [])
-                                        if chunk.merged_bboxes
-                                        else []
-                                    ),
-                                    "bbox_coordinate_space": str(
-                                        chunk.metadata.get("bbox_coordinate_space")
-                                        or "pdf_points"
-                                    ),
                                     "retrieval_score": chunk.score,
+                                    **chunk_location_fields(chunk),
                                 }
                                 for chunk in sorted(
                                     chunks_by_id.values(),

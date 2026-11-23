@@ -128,32 +128,50 @@ def _local_keyword_search(
             scored.append((hits, block))
     scored.sort(key=lambda item: item[0], reverse=True)
     denominator = max(len(terms), 1)
-    return [
-        ChunkSearchResult(
-            chunk_id=str(block.block_id),
-            document_id=document_id,
-            doc_key="",
-            chunk_type=str(block.block_type or "text"),
-            text=str(block.text or ""),
-            page_idx=int(block.page_number or 1),
-            source_file="",
-            source_item_indices=[],
-            bbox_refs=[],
-            merged_bboxes=[{"page_idx": int(block.page_number or 1), "bbox": list(block.bbox or [])}]
-            if block.bbox
-            else [],
-            image_path=None,
-            mineru_img_path=None,
-            table_html=None,
-            metadata={
-                "section_path": str(block.section_path or "招股书原文"),
-                "degraded": True,
-                "retrieval_mode": "local_keyword",
-            },
-            score=round(hits / denominator, 4),
+    results: list[ChunkSearchResult] = []
+    for hits, block in scored[:limit]:
+        page = block.page_number
+        is_pdf = (
+            getattr(block, "locator_kind", "pdf_page") == "pdf_page"
+            and isinstance(page, int)
+            and page >= 1
         )
-        for hits, block in scored[:limit]
-    ]
+        page_idx = page if is_pdf else 0
+        bbox = list(block.bbox or [])
+        results.append(
+            ChunkSearchResult(
+                chunk_id=str(block.block_id),
+                document_id=document_id,
+                doc_key="",
+                chunk_type=str(block.block_type or "text"),
+                text=str(block.text or ""),
+                page_idx=page_idx,
+                source_file="",
+                source_item_indices=[],
+                bbox_refs=[],
+                merged_bboxes=[{"page_idx": page_idx, "bbox": bbox}] if is_pdf and len(bbox) == 4 else [],
+                image_path=None,
+                mineru_img_path=None,
+                table_html=None,
+                metadata={
+                    "section_path": str(block.section_path or "招股书原文"),
+                    "degraded": True,
+                    "retrieval_mode": "local_keyword",
+                    "locator_kind": "pdf_page" if is_pdf else "text_offset",
+                    "coordinates_are_pdf": is_pdf,
+                    "parser_version": str(getattr(block, "parser_version", "") or ""),
+                    "char_start": int(getattr(block, "char_start", 0) or 0),
+                    "char_end": int(getattr(block, "char_end", 0) or 0),
+                    **{
+                        key: getattr(block, key)
+                        for key in ("table_header", "table_row", "table_column", "table_unit")
+                        if getattr(block, key, None)
+                    },
+                },
+                score=round(hits / denominator, 4),
+            )
+        )
+    return results
 
 
 def prospectus_hybrid_search(

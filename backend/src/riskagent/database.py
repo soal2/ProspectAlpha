@@ -7,7 +7,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 
@@ -67,49 +67,25 @@ def check_database_connection(session_factory: sessionmaker = SessionLocal) -> b
 
 
 def init_db(database_url: str | None = None) -> None:
-    """Create all tables for the default engine (``database_url`` is None) or an
-    explicit URL. Returns nothing."""
-    from riskagent import models  # noqa: F401
+    """Upgrade the default engine, or an explicit URL, to the Alembic head.
 
-    active_engine = engine if database_url is None else make_engine(database_url)
-    ensure_database_schema(active_engine)
+    Existing rows are kept. This does not delete or recreate a database.
+    """
+
+    from riskagent.migrations import upgrade_database
+
+    if database_url is None:
+        upgrade_database(engine.url.render_as_string(hide_password=False))
+        return
+    upgrade_database(database_url)
 
 
 def ensure_database_schema(active_engine) -> None:
-    """Create current ORM tables and apply supported additive evolutions."""
+    """Upgrade one engine through Alembic. Missing tables and columns are added."""
 
-    Base.metadata.create_all(bind=active_engine)
-    _ensure_prospectus_processing_columns(active_engine)
+    from riskagent.migrations import upgrade_database
 
-
-def _ensure_prospectus_processing_columns(active_engine) -> None:
-    """Apply the small additive schema evolution used without Alembic today."""
-
-    inspector = inspect(active_engine)
-    if "prospectus_documents" not in inspector.get_table_names():
-        return
-    existing = {column["name"] for column in inspector.get_columns("prospectus_documents")}
-    additions = {
-        "processing_error_code": "VARCHAR(64)",
-        "processing_error_message": "TEXT",
-        "processing_attempts": "INTEGER NOT NULL DEFAULT 0",
-        "processing_started_at": "TIMESTAMP",
-        "processing_heartbeat_at": "TIMESTAMP",
-        "processing_finished_at": "TIMESTAMP",
-    }
-    with active_engine.begin() as connection:
-        for column, definition in additions.items():
-            if column not in existing:
-                if active_engine.dialect.name == "postgresql":
-                    statement = (
-                        f"ALTER TABLE prospectus_documents "
-                        f"ADD COLUMN IF NOT EXISTS {column} {definition}"
-                    )
-                else:
-                    statement = f"ALTER TABLE prospectus_documents ADD COLUMN {column} {definition}"
-                connection.execute(
-                    text(statement)
-                )
+    upgrade_database(active_engine.url.render_as_string(hide_password=False))
 
 
 def init_reference_data(session_factory: sessionmaker = SessionLocal) -> None:
@@ -119,7 +95,7 @@ def init_reference_data(session_factory: sessionmaker = SessionLocal) -> None:
     if bind is None:
         init_db()
     else:
-        Base.metadata.create_all(bind=bind)
+        ensure_database_schema(bind)
     from riskagent.seed_data import seed_reference_data
 
     seed_reference_data(session_factory)

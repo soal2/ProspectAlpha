@@ -5,6 +5,7 @@ import fitz
 import pytest
 import yaml
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
 from riskagent.analysis_runs import AnalysisRunCreate, AnalysisRunInputPatch, IndustryProfileConfirmation
@@ -69,7 +70,14 @@ def test_clarifying_patch_start_freezes_inputs_and_generates_artifacts(
     assert completed.findings
     assert completed.evidence
     assert completed.report is not None
-    assert completed.report.review_status == "draft"
+    assert completed.report.review_status == "needs_human_review"
+    assert all(item.locator_kind == "text_offset" for item in completed.evidence)
+    assert all(item.page_number is None and item.bbox == [] for item in completed.evidence)
+    assert any(
+        "不能按真实 PDF 证据通过质检" in event["summary"]
+        for event in completed.events
+        if event["event_type"] == "qa_issue_found"
+    )
     assert all(item.text for item in completed.evidence)
     evidence_library = yaml.safe_load((tmp_path / "evidence_library.yaml").read_text()) or []
     assert evidence_library
@@ -96,9 +104,15 @@ def test_completed_report_freezes_score_and_enters_t5_backtest(tmp_path, analysi
     assert completed.status == "completed"
     assert any(event["event_type"] == "risk_score_frozen" for event in completed.events)
     with repo.session_factory() as session:
-        score = session.get(RiskScoreSnapshotRow, f"score_{completed.run_id}")
-        assert score is not None
+        score = session.scalars(
+            select(RiskScoreSnapshotRow).where(RiskScoreSnapshotRow.run_id == completed.run_id)
+        ).one()
+        assert score.score_id != f"score_{completed.run_id}"
         assert score.wind_code == "0001.HK"
+        assert score.analysis_as_of_date == completed.data_cutoff_date
+        assert score.input_hash
+        assert score.evidence_hash
+        assert score.content_hash
 
     security = tmp_path / "security.csv"
     company = tmp_path / "company.csv"

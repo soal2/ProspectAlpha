@@ -19,7 +19,7 @@ from typing import Any, Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field
 
 from riskagent.research import BochaAdapter, SearchQuery
-from riskagent.research.core import SourceAdapter
+from riskagent.research.core import SourceAdapter, eligible_pre_cutoff, parse_published_date
 
 
 SkillStatus = Literal["completed", "partial", "insufficient_data", "failed"]
@@ -36,6 +36,7 @@ class SkillInvocation(BaseModel):
     skill_version: str
     stock_code: str | None = None
     company_name: str
+    data_cutoff_date: str = ""
     document_id: str = ""
     document_block_ids: list[str] = Field(default_factory=list)
     structured_inputs: dict[str, Any] = Field(default_factory=dict)
@@ -117,6 +118,8 @@ class ResearchArtifact(BaseModel):
     retrieved_at: str
     source_hash: str
     raw_response_ref: str = ""
+    eligible_pre_cutoff: bool = False
+    attribution: Literal["pre_listing", "post_listing"] = "pre_listing"
 
 
 class SkillHandler(Protocol):
@@ -125,6 +128,34 @@ class SkillHandler(Protocol):
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def invocation_cutoff(invocation: SkillInvocation) -> str:
+    """Cutoff carried by the invocation, otherwise an explicit structured copy."""
+
+    if invocation.data_cutoff_date.strip():
+        return invocation.data_cutoff_date.strip()
+    raw = invocation.structured_inputs.get("data_cutoff_date")
+    return str(raw).strip() if raw else ""
+
+
+_RUNWAY_DURATIONS = {3, 6, 9, 12}
+
+
+def _runway_months(cash: float, operating: float, duration_months: int) -> float | None:
+    """Cash runway in months for one unambiguous period.
+
+    Positive operating cashflow is not a burn, so the runway is absent.
+    Zero cash is kept and produces a zero runway. Negative cash is rejected.
+    """
+
+    if duration_months not in _RUNWAY_DURATIONS:
+        return None
+    if operating >= 0:
+        return None
+    if cash < 0:
+        return None
+    return round(cash / abs(operating) * duration_months, 2)
 
 
 def _result(
@@ -202,90 +233,310 @@ class CashflowAnalyzerHandler:
                 summary="招股书尚未抽取出可核验的多期现金流数据。",
                 limitations=["不得使用示例现金流或默认发行人数据。"],
             )
-        latest = periods[-1] if isinstance(periods[-1], dict) else {}
-        cash = latest.get("cash_and_equivalents")
-        operating = latest.get("operating_cashflow")
-        if not isinstance(cash, (int, float)) or not isinstance(operating, (int, float)):
+        rows = [item for item in periods if isinstance(item, dict)]
+        if len(rows) != len(periods):
             return _result(
                 invocation,
                 started_at=started,
                 status="insufficient_data",
-                summary="现金及经营现金流字段缺失或未完成单位归一。",
-                limitations=["需要带证据引用的 cash_and_equivalents 与 operating_cashflow。"],
+                summary="现金流期间记录格式不明确，未计算现金跑道。",
+                limitations=["含糊或非结构化期间不会被编造成数值。"],
             )
-        runway = None if operating >= 0 else round(float(cash) / abs(float(operating)) * 12, 2)
-        risk: RiskLevel = "low" if operating >= 0 else "high" if runway is not None and runway < 12 else "medium"
         refs = [str(item) for item in invocation.structured_inputs.get("cashflow_evidence_refs", [])]
-        limitations = [] if refs else ["计算字段尚未绑定原始 PDF 证据。"]
-        # Period order follows the printed column order of the source table and is
-        # not re-verified against period headers; disclose instead of guessing.
-        limitations.append("期数顺序按招股书表内列序，未按报告期标注复核；现金跑道为同表同单位的比值指标，不受单位未归一影响。")
+        limitations = [str(item) for item in invocation.structured_inputs.get("cashflow_limitations", []) if str(item).strip()]
+        if not refs:
+            limitations.append("计算字段尚未绑定原始 PDF 证据。")
+        if any(row.get("unit_consistent") is False or row.get("ambiguous") or not row.get("period_end") for row in rows):
+            limitations.append("存在无法解析的报告期、比较列或互相冲突的单位，已拒绝输出现金跑道。")
+            return _result(
+                invocation,
+                started_at=started,
+                status="insufficient_data",
+                summary="现金流期间或单位含糊，未计算现金跑道。",
+                result={
+                    "period_count": len(rows),
+                    "currency": rows[-1].get("currency"),
+                    "unit": rows[-1].get("unit"),
+                    "unit_consistent": all(row.get("unit_consistent", True) for row in rows),
+                },
+                evidence_refs=refs,
+                limitations=limitations,
+            )
+        dated = sorted(rows, key=lambda row: str(row.get("period_end")))
+        latest = dated[-1]
+        cash = latest.get("cash_and_equivalents")
+        operating = latest.get("operating_cashflow")
+        duration = latest.get("duration_months")
+        if (
+            not isinstance(cash, (int, float))
+            or isinstance(cash, bool)
+            or not isinstance(operating, (int, float))
+            or isinstance(operating, bool)
+            or not isinstance(duration, int)
+            or isinstance(duration, bool)
+        ):
+            return _result(
+                invocation,
+                started_at=started,
+                status="insufficient_data",
+                summary="现金、经营现金流或期间长度缺失，未计算现金跑道。",
+                limitations=["需要带证据引用的 cash_and_equivalents、operating_cashflow 与 duration_months。"],
+                evidence_refs=refs,
+            )
+        if cash < 0 or duration not in _RUNWAY_DURATIONS:
+            limitations.append("现金为负或期间长度不是年、半年、三季或季度，已拒绝输出现金跑道。")
+            return _result(
+                invocation,
+                started_at=started,
+                status="insufficient_data",
+                summary="最新报告期无法支持现金跑道计算。",
+                evidence_refs=refs,
+                limitations=limitations,
+            )
+        runway = _runway_months(float(cash), float(operating), duration)
+        risk: RiskLevel = "low" if operating >= 0 else "high" if runway is not None and runway < 12 else "medium"
         return _result(
             invocation,
             started_at=started,
             status="completed" if refs else "partial",
-            summary="已基于招股书结构化现金流数据完成可持续性分析。",
+            summary="已按报告期截止日期与期间长度计算现金跑道。",
             risk_level=risk,
-            result={"period_count": len(periods), "cash_runway_months": runway, "latest_operating_cashflow": operating},
+            result={
+                "period_count": len(dated),
+                "latest_period_end": latest.get("period_end"),
+                "duration_months": duration,
+                "cash_runway_months": runway,
+                "latest_operating_cashflow": operating,
+                "latest_cash_and_equivalents": cash,
+                "currency": latest.get("currency"),
+                "unit": latest.get("unit"),
+                "unit_consistent": True,
+                "periods": dated,
+            },
             evidence_refs=refs,
             limitations=limitations,
         )
 
 
+def _peer_rows(peers: list[dict[str, Any]], metric: str) -> list[dict[str, Any]]:
+    return [
+        {
+            "stock_code": item.get("stock_code"),
+            "as_of_date": item.get("as_of_date") or item.get("listing_date") or item.get("announcement_date"),
+            "valuation_basis": item.get("valuation_basis"),
+            metric: item.get(metric),
+        }
+        for item in peers
+        if isinstance(item, dict)
+        and isinstance(item.get(metric), (int, float))
+        and not isinstance(item.get(metric), bool)
+    ]
+
+
+def _peer_snapshot(peers: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """First-day peer levels without an issue-valuation premium."""
+
+    metric = next(
+        (
+            key
+            for key in ("pe", "ps", "ev_ebitda", "pb")
+            if any(
+                isinstance(item.get(key), (int, float)) and not isinstance(item.get(key), bool)
+                for item in peers
+                if isinstance(item, dict)
+            )
+        ),
+        None,
+    )
+    if metric is None:
+        return None
+    values = [float(item[metric]) for item in _peer_rows(peers, metric)]
+    if not values:
+        return None
+    return {
+        "valuation_basis": "first_day",
+        "metric": metric,
+        "peer_median": sorted(values)[len(values) // 2],
+        "premium_percent": None,
+        "peer_count": len(values),
+        "peers": _peer_rows(peers, metric),
+    }
+
+
+def _comparison(issuer: dict[str, Any], peers: list[dict[str, Any]]) -> dict[str, Any] | None:
+    metric = next(
+        (
+            key
+            for key in ("pe", "ps", "ev_ebitda", "pb")
+            if isinstance(issuer.get(key), (int, float)) and not isinstance(issuer.get(key), bool)
+        ),
+        None,
+    )
+    if metric is None:
+        return None
+    values = [
+        float(item[metric])
+        for item in peers
+        if isinstance(item, dict)
+        and isinstance(item.get(metric), (int, float))
+        and not isinstance(item.get(metric), bool)
+    ]
+    if not values:
+        return None
+    median = sorted(values)[len(values) // 2]
+    premium = None if median == 0 else round((float(issuer[metric]) / median - 1) * 100, 2)
+    return {
+        "metric": metric,
+        "issuer_multiple": issuer[metric],
+        "peer_median": median,
+        "premium_percent": premium,
+        "peer_count": len(values),
+        "peers": _peer_rows(peers, metric),
+    }
+
+
 class ValuationCheckerHandler:
     def invoke(self, invocation: SkillInvocation) -> SkillResult:
         started = _now()
-        issuer = invocation.structured_inputs.get("issuer_valuation")
-        peers = invocation.structured_inputs.get("peer_valuations")
-        peer_source = "invocation snapshot"
-        if not isinstance(peers, list) or not peers:
-            industry = str(invocation.structured_inputs.get("industry") or "").strip()
-            if industry:
-                from riskagent.dataset_registry import lookup_valuation_peers
+        from riskagent.dataset_registry import (
+            lookup_valuation_peers,
+            normalize_valuation_basis,
+            select_valuation_peers,
+        )
 
-                peers = list(
-                    lookup_valuation_peers(
-                        industry,
-                        exclude_stock_code=invocation.stock_code,
-                    )
-                )
-                peer_source = "hk-ipo-subscription-history@1.0.0"
-        if not isinstance(issuer, dict) or not isinstance(peers, list) or not peers:
+        cutoff = invocation_cutoff(invocation)
+        issuer = invocation.structured_inputs.get("issuer_valuation")
+        if not isinstance(issuer, dict):
             return _result(
                 invocation,
                 started_at=started,
                 status="insufficient_data",
-                summary="缺少发行人估值指标或版本化同行估值快照。",
+                summary="缺少发行人估值指标。",
                 limitations=["不会回退到硬编码同行倍数或默认股票代码。"],
             )
-        metric = next((key for key in ("pe", "ps", "ev_ebitda", "pb") if isinstance(issuer.get(key), (int, float))), None)
-        values = [float(item[metric]) for item in peers if metric and isinstance(item, dict) and isinstance(item.get(metric), (int, float))]
-        if metric is None or not values:
-            return _result(invocation, started_at=started, status="insufficient_data", summary="发行人与同行缺少可比估值口径。")
-        median = sorted(values)[len(values) // 2]
-        premium = None if median == 0 else round((float(issuer[metric]) / median - 1) * 100, 2)
-        risk: RiskLevel = "high" if premium is not None and premium > 30 else "medium" if premium is not None and premium > 10 else "low"
+        issuer_basis = normalize_valuation_basis(issuer.get("valuation_basis")) or "issue"
+        explicit = invocation.structured_inputs.get("peer_valuations")
+        industry = str(invocation.structured_inputs.get("industry") or "").strip()
+        peer_source = "invocation snapshot"
+        if isinstance(explicit, list) and explicit:
+            pool = [item for item in explicit if isinstance(item, dict)]
+            issue_peers = list(
+                select_valuation_peers(
+                    pool,
+                    industry=industry,
+                    data_cutoff_date=cutoff,
+                    basis="issue",
+                    exclude_stock_code=invocation.stock_code,
+                    limit=10,
+                    match_industry=False,
+                )
+            )
+            first_day_peers = list(
+                select_valuation_peers(
+                    pool,
+                    industry=industry,
+                    data_cutoff_date=cutoff,
+                    basis="first_day",
+                    exclude_stock_code=invocation.stock_code,
+                    limit=10,
+                    match_industry=False,
+                )
+            )
+        else:
+            issue_peers = []
+            first_day_peers = []
+            if industry:
+                issue_peers = list(
+                    lookup_valuation_peers(
+                        industry,
+                        exclude_stock_code=invocation.stock_code,
+                        data_cutoff_date=cutoff,
+                        basis="issue",
+                    )
+                )
+                first_day_peers = list(
+                    lookup_valuation_peers(
+                        industry,
+                        exclude_stock_code=invocation.stock_code,
+                        data_cutoff_date=cutoff,
+                        basis="first_day",
+                    )
+                )
+                peer_source = "hk-ipo-subscription-history@1.0.0"
+        supplied = explicit if isinstance(explicit, list) else []
+        excluded_count = max(len([item for item in supplied if isinstance(item, dict)]) - len(issue_peers) - len(first_day_peers), 0)
+        issue_view = _comparison(issuer, issue_peers) if issuer_basis == "issue" else None
+        first_day_view = _comparison(issuer, first_day_peers) if issuer_basis == "first_day" else _peer_snapshot(first_day_peers)
+        active = issue_view if issuer_basis == "issue" else first_day_view
+        limitations = [
+            "上市首日及上市后估值与发行估值分开保存，不进入发行估值溢价。"
+        ]
+        if excluded_count:
+            limitations.append(
+                f"已排除 {excluded_count} 条晚于 data_cutoff_date、日期不明或口径不明的同行，未进入上市前证据。"
+            )
+        if issuer_basis == "issue" and issue_view is None:
+            return _result(
+                invocation,
+                started_at=started,
+                status="insufficient_data",
+                summary="缺少截止日前可核验的发行估值同行，未用上市首日倍数代替。",
+                risk_level="unrated",
+                result={
+                    "valuation_basis": "issue",
+                    "issue_valuation": None,
+                    "first_day_valuation": first_day_view,
+                    "post_listing_valuation": first_day_view,
+                    "excluded_peer_count": excluded_count,
+                    "data_cutoff_date": cutoff or None,
+                    "peer_source": peer_source,
+                },
+                limitations=limitations + ["不会把上市首日市盈率或市净率计入发行估值比较。"],
+            )
+        if active is None:
+            return _result(
+                invocation,
+                started_at=started,
+                status="insufficient_data",
+                summary="发行人与同行缺少同一估值口径。",
+                limitations=limitations,
+            )
+        premium = active["premium_percent"]
+        risk: RiskLevel = "unrated"
+        evidence: list[str] = []
+        if issuer_basis == "issue":
+            risk = "high" if premium is not None and premium > 30 else "medium" if premium is not None and premium > 10 else "low"
+            evidence = [str(item) for item in invocation.structured_inputs.get("valuation_evidence_refs", [])]
+            if peer_source.startswith("hk-ipo") and issue_peers:
+                evidence.append("dataset:hk-ipo-subscription-history@1.0.0")
         return _result(
             invocation,
             started_at=started,
             status="completed",
-            summary=f"已按 {metric} 口径与 {len(values)} 家版本化同行完成比较。",
+            summary=(
+                f"已按发行估值 {active['metric']} 与 {active['peer_count']} 家截止日前同行完成比较。"
+                if issuer_basis == "issue"
+                else f"已单独整理上市首日 {active['metric']} 比较，未并入发行估值。"
+            ),
             risk_level=risk,
             result={
-                "metric": metric,
-                "issuer_multiple": issuer[metric],
-                "peer_median": median,
-                "premium_percent": premium,
-                "peer_selection_basis": invocation.structured_inputs.get("industry") or "显式同行快照",
+                "metric": active["metric"] if issuer_basis == "issue" else None,
+                "issuer_multiple": active["issuer_multiple"] if issuer_basis == "issue" else None,
+                "peer_median": active["peer_median"] if issuer_basis == "issue" else None,
+                "premium_percent": premium if issuer_basis == "issue" else None,
+                "peer_count": active["peer_count"] if issuer_basis == "issue" else 0,
+                "valuation_basis": issuer_basis,
+                "issue_valuation": issue_view,
+                "first_day_valuation": first_day_view,
+                "post_listing_valuation": first_day_view,
+                "peer_selection_basis": industry or "显式同行快照",
                 "peer_source": peer_source,
-                "peer_count": len(values),
-                "data_as_of_date": "2026-05-15" if peer_source.startswith("hk-ipo") else None,
-                "currency": "HKD" if peer_source.startswith("hk-ipo") else invocation.structured_inputs.get("currency"),
+                "excluded_peer_count": excluded_count,
+                "data_cutoff_date": cutoff or None,
+                "currency": issuer.get("currency") or ("HKD" if peer_source.startswith("hk-ipo") else None),
             },
-            evidence_refs=[
-                *[str(item) for item in invocation.structured_inputs.get("valuation_evidence_refs", [])],
-                *(["dataset:hk-ipo-subscription-history@1.0.0"] if peer_source.startswith("hk-ipo") else []),
-            ],
+            evidence_refs=evidence,
+            limitations=limitations,
         )
 
 
@@ -303,8 +554,10 @@ class SentimentScorerHandler:
                 summary="缺少股票代码，无法匹配认购历史或检索发行人舆情。",
             )
         query = f'"{invocation.company_name}" {invocation.stock_code} IPO 新闻 舆情 认购'
+        cutoff = invocation_cutoff(invocation)
         limitations: list[str] = []
         artifacts: list[ResearchArtifact] = []
+        excluded_sources = 0
         try:
             seen: set[str] = set()
             response = asyncio.run(self.client.search(SearchQuery(text=query, count=10)))
@@ -313,6 +566,10 @@ class SentimentScorerHandler:
                 if not url or url in seen:
                     continue
                 seen.add(url)
+                published = parse_published_date(item.published_at)
+                if not eligible_pre_cutoff(published, cutoff):
+                    excluded_sources += 1
+                    continue
                 title = str(item.title or url)
                 snippet = str(item.summary or item.snippet or "")
                 digest = hashlib.sha256(f"{url}\n{title}\n{snippet}".encode("utf-8")).hexdigest()
@@ -325,18 +582,31 @@ class SentimentScorerHandler:
                         url=url,
                         publisher=str(item.site_name or ""),
                         snippet=snippet,
-                        published_at=item.published_at,
+                        published_at=published,
                         retrieved_at=_now(),
                         source_hash=digest,
+                        eligible_pre_cutoff=True,
+                        attribution="pre_listing",
                     )
                 )
         except RuntimeError as exc:
             limitations.append(str(exc))
+        if excluded_sources:
+            limitations.append(
+                f"已排除 {excluded_sources} 条发布日期晚于 data_cutoff_date 或日期不明的新闻检索结果，未进入上市前证据与评分。"
+            )
         subscription = invocation.structured_inputs.get("subscription_history")
         if not isinstance(subscription, dict) or not subscription:
             from riskagent.dataset_registry import lookup_subscription_history
 
-            subscription = lookup_subscription_history(invocation.stock_code)
+            subscription = lookup_subscription_history(
+                invocation.stock_code,
+                data_cutoff_date=cutoff,
+            )
+        elif not eligible_pre_cutoff(subscription.get("announcement_date"), cutoff):
+            subscription = None
+        else:
+            subscription = {**subscription, "eligible_pre_cutoff": True, "attribution": "pre_listing"}
         has_subscription = isinstance(subscription, dict) and bool(subscription)
         if not artifacts and not has_subscription:
             status: SkillStatus = "insufficient_data"
@@ -348,15 +618,17 @@ class SentimentScorerHandler:
             invocation,
             started_at=started,
             status=status,
-            summary="已分别整理认购热度与冻结的新闻/社交舆情证据。" if status != "insufficient_data" else "认购历史和外部舆情均不足。",
+            summary="已分别整理认购热度与截止日前的新闻/社交舆情证据。" if status != "insufficient_data" else "认购历史和截止日前外部舆情均不足。",
             result={
+                "data_cutoff_date": cutoff or None,
                 "subscription_heat": subscription if has_subscription else None,
                 "research_artifacts": [item.model_dump() for item in artifacts],
                 "news_count": sum(item.source_type in {"news", "analyst", "official"} for item in artifacts),
                 "social_count": sum(item.source_type == "social" for item in artifacts),
+                "excluded_source_count": excluded_sources,
             },
             evidence_refs=[item.artifact_id for item in artifacts],
-            limitations=limitations + ([] if has_subscription else ["本地历史数据未匹配到该股票代码。"]),
+            limitations=limitations + ([] if has_subscription else ["截止日前没有可核验的认购记录。"]),
         )
 
 
@@ -374,23 +646,60 @@ def _source_type(url: str, title: str) -> Literal["news", "social", "analyst", "
 class LegalComplianceHandler:
     def invoke(self, invocation: SkillInvocation) -> SkillResult:
         started = _now()
-        refs = [str(item) for item in invocation.structured_inputs.get("legal_evidence_refs", [])]
-        issues = invocation.structured_inputs.get("legal_issues")
-        if not isinstance(issues, list) or not issues:
+        from riskagent.features.legal import extract_legal_disclosures
+        from riskagent.features.market import extract_pre_ipo_market_window
+
+        cutoff = invocation_cutoff(invocation)
+        blocks = invocation.structured_inputs.get("prospectus_blocks") or []
+        extraction = extract_legal_disclosures(
+            blocks if isinstance(blocks, list) else [],
+            data_cutoff_date=cutoff,
+        )
+        market_window = extract_pre_ipo_market_window(
+            invocation.structured_inputs.get("market_prices")
+            if isinstance(invocation.structured_inputs.get("market_prices"), list)
+            else None,
+            data_cutoff_date=cutoff,
+        )
+        supplied = invocation.structured_inputs.get("legal_issues")
+        supplied_issues = supplied if isinstance(supplied, list) else []
+        pre_cutoff = extraction["pre_cutoff_disclosures"]
+        undated = extraction["undated_disclosures"]
+        evidence = [str(item["evidence_block_id"]) for item in pre_cutoff if item.get("evidence_block_id")]
+        if not pre_cutoff and not undated and not supplied_issues:
             return _result(
                 invocation,
                 started_at=started,
                 status="insufficient_data",
-                summary="未取得可核验的法务条款或适用规则，不能推断违法。",
+                risk_level="unrated",
+                summary="招股书未抽到截止日前的诉讼、对赌赎回或关联交易披露；缺失不等于低风险。",
+                result={
+                    "disclosures": [],
+                    "missing_categories": extraction["missing_categories"],
+                    "missing_is_not_low_risk": True,
+                    "market_window": market_window,
+                    "data_cutoff_date": cutoff or None,
+                },
+                limitations=["未发现可核验披露时不输出低风险结论。"],
             )
         return _result(
             invocation,
             started_at=started,
-            status="completed" if refs else "partial",
-            summary=f"已对 {len(issues)} 项法务事项完成结构化核查。",
-            result={"issues": issues},
-            evidence_refs=refs,
-            limitations=[] if refs else ["法务事项尚未全部绑定招股书原文证据。"],
+            status="completed" if evidence else "partial",
+            risk_level="unrated",
+            summary=f"已抽取 {len(pre_cutoff)} 项有日期的截止日前法务披露；缺失类别不按低风险处理。",
+            result={
+                "disclosures": pre_cutoff,
+                "undated_disclosures": undated,
+                "post_cutoff_excluded_count": extraction["post_cutoff_excluded_count"],
+                "missing_categories": extraction["missing_categories"],
+                "missing_is_not_low_risk": True,
+                "supplied_issue_count": len(supplied_issues),
+                "market_window": market_window,
+                "data_cutoff_date": cutoff or None,
+            },
+            evidence_refs=evidence,
+            limitations=[] if evidence else ["外部传入的法务事项没有招股书块级证据。"],
         )
 
 

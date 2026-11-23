@@ -98,8 +98,19 @@ def _subscription_rows() -> tuple[dict[str, Any], ...]:
     return tuple(records_list)
 
 
-def lookup_subscription_history(stock_code: str) -> dict[str, Any] | None:
-    """Return a JSON-safe, versioned historical subscription record by HK code."""
+def lookup_subscription_history(
+    stock_code: str,
+    *,
+    data_cutoff_date: str | None = None,
+) -> dict[str, Any] | None:
+    """Return a JSON-safe subscription record.
+
+    Passing ``data_cutoff_date`` admits the record only when its announcement
+    date is known and on or before that cutoff. Omitting the cutoff returns the
+    raw record and does not mark it as pre-listing evidence.
+    """
+
+    from riskagent.research.core import eligible_pre_cutoff
 
     normalized = stock_code.strip().upper()
     if not normalized.endswith(".HK"):
@@ -117,18 +128,112 @@ def lookup_subscription_history(stock_code: str) -> dict[str, Any] | None:
             "allotment_rate_percent": row.get("中签率(%)"),
             "first_lot_success_rate_percent": row.get("申购一手中签率(%)"),
         }
-        return {key: _json_value(value) for key, value in selected.items()}
+        record = {key: _json_value(value) for key, value in selected.items()}
+        if data_cutoff_date is None:
+            return record
+        if not eligible_pre_cutoff(record.get("announcement_date"), data_cutoff_date):
+            return None
+        return {**record, "eligible_pre_cutoff": True, "attribution": "pre_listing"}
     return None
 
 
-@lru_cache(maxsize=32)
-def lookup_valuation_peers(
-    industry: str,
+def normalize_valuation_basis(value: Any) -> str | None:
+    """Map a valuation label onto ``issue`` or ``first_day``."""
+
+    text = str(value or "").strip().lower()
+    if not text:
+        return None
+    if text in {"issue", "发行", "发行估值", "招股价", "发行价"} or "发行" in text:
+        return "issue"
+    if (
+        text in {"first_day", "first-day", "post_listing", "上市首日", "上市首日估值口径"}
+        or "首日" in text
+        or "上市后" in text
+    ):
+        return "first_day"
+    return None
+
+
+def peer_as_of_date(peer: dict[str, Any], basis: str) -> Any:
+    """Date that must be known before the peer can enter a pre-cutoff set.
+
+    First-day and post-listing multiples are dated by the listing or first-day
+    date. The announcement date is not a substitute, because the first-day
+    price is not known at announcement.
+    """
+
+    if basis == "issue":
+        return peer.get("as_of_date") or peer.get("announcement_date")
+    if basis == "first_day":
+        return peer.get("as_of_date") or peer.get("listing_date") or peer.get("first_day_date")
+    return None
+
+
+def select_valuation_peers(
+    peers: tuple[dict[str, Any], ...] | list[dict[str, Any]],
     *,
+    industry: str,
+    data_cutoff_date: str | None,
+    basis: str,
     exclude_stock_code: str | None = None,
     limit: int = 10,
+    match_industry: bool = True,
 ) -> tuple[dict[str, Any], ...]:
-    """Select historical IPO peers from the same immutable workbook."""
+    """Keep same-basis peers whose valuation date is known and not after cutoff."""
+
+    from riskagent.research.core import eligible_pre_cutoff
+
+    normalized_basis = normalize_valuation_basis(basis) or basis
+    wanted_industry = industry.strip()
+    excluded = (exclude_stock_code or "").strip().upper()
+    if excluded and not excluded.endswith(".HK"):
+        excluded = f"{excluded}.HK"
+    selected: list[dict[str, Any]] = []
+    for peer in peers:
+        if not isinstance(peer, dict):
+            continue
+        code = str(peer.get("stock_code") or "").strip().upper()
+        if not code or code == excluded:
+            continue
+        if match_industry and str(peer.get("industry") or "").strip() != wanted_industry:
+            continue
+        peer_basis = normalize_valuation_basis(peer.get("valuation_basis"))
+        if peer_basis != normalized_basis:
+            continue
+        as_of = peer_as_of_date(peer, normalized_basis)
+        if not eligible_pre_cutoff(as_of, data_cutoff_date):
+            continue
+        selected.append(
+            {
+                **peer,
+                "valuation_basis": normalized_basis,
+                "as_of_date": as_of if isinstance(as_of, str) else _json_value(as_of),
+                "eligible_pre_cutoff": True,
+                "attribution": "pre_listing" if normalized_basis == "issue" else "post_listing",
+            }
+        )
+    selected.sort(key=lambda item: str(item.get("as_of_date") or ""))
+    if limit > 0:
+        selected = selected[-limit:]
+    return tuple(selected)
+
+
+def _header_index(headers: tuple[str, ...], names: tuple[str, ...]) -> int | None:
+    for index, header in enumerate(headers):
+        if any(name in header for name in names):
+            return index
+    return None
+
+
+def _positive_multiple(value: Any) -> Any:
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+        return _json_value(value)
+    return None
+
+
+@lru_cache(maxsize=1)
+def _valuation_peer_rows() -> tuple[dict[str, Any], ...]:
+    """Read workbook peers once, keeping issue and first-day bases apart."""
 
     from openpyxl import load_workbook
 
@@ -137,35 +242,88 @@ def lookup_valuation_peers(
     )
     workbook = load_workbook(definition.path, read_only=True, data_only=True)
     rows = workbook["IPO数据"].iter_rows(values_only=True)
-    next(rows)  # top-level headers
-    next(rows)  # grouped subheaders
-    excluded = (exclude_stock_code or "").upper()
-    if excluded and not excluded.endswith(".HK"):
-        excluded = f"{excluded}.HK"
-    matches: list[dict[str, Any]] = []
+    header_top = tuple(next(rows))
+    header_sub = tuple(next(rows))
+    filled: list[str] = []
+    last = ""
+    width = max(len(header_top), len(header_sub))
+    for index in range(width):
+        top = header_top[index] if index < len(header_top) else None
+        sub = header_sub[index] if index < len(header_sub) else None
+        if top not in (None, ""):
+            last = str(top).strip()
+        sub_text = "" if sub in (None, "") else str(sub).strip()
+        filled.append(f"{last} {sub_text}".strip())
+    headers = tuple(filled)
+    listing_idx = _header_index(headers, ("上市日期", "挂牌日期", "首日日期"))
+    issue_pe_idx = _header_index(headers, ("发行市盈率", "首发市盈率"))
+    issue_pb_idx = _header_index(headers, ("发行市净率", "首发市净率"))
+    records: list[dict[str, Any]] = []
     for values in rows:
         code = str(values[1] or "").strip().upper()
-        if not code or code == excluded or str(values[18] or "").strip() != industry:
+        industry = str(values[18] or "").strip()
+        if not code or not industry:
             continue
-        pe = values[30]
-        pb = values[31]
-        if not any(isinstance(value, (int, float)) and value > 0 for value in (pe, pb)):
-            continue
-        matches.append(
-            {
-                "stock_code": code,
-                "company_name": values[2],
-                "industry": values[18],
-                "announcement_date": _json_value(values[3]),
-                "pe": _json_value(pe) if isinstance(pe, (int, float)) and pe > 0 else None,
-                "pb": _json_value(pb) if isinstance(pb, (int, float)) and pb > 0 else None,
-                "currency": "HKD",
-                "valuation_basis": "上市首日估值口径",
-            }
-        )
+        announcement = _json_value(values[3])
+        listing = _json_value(values[listing_idx]) if listing_idx is not None and listing_idx < len(values) else None
+        base = {
+            "stock_code": code,
+            "company_name": values[2],
+            "industry": industry,
+            "announcement_date": announcement,
+            "listing_date": listing,
+            "currency": "HKD",
+        }
+        issue_pe = _positive_multiple(values[issue_pe_idx]) if issue_pe_idx is not None and issue_pe_idx < len(values) else None
+        issue_pb = _positive_multiple(values[issue_pb_idx]) if issue_pb_idx is not None and issue_pb_idx < len(values) else None
+        if issue_pe is not None or issue_pb is not None:
+            records.append(
+                {
+                    **base,
+                    "pe": issue_pe,
+                    "pb": issue_pb,
+                    "valuation_basis": "issue",
+                    "as_of_date": announcement,
+                }
+            )
+        first_pe = _positive_multiple(values[30]) if len(values) > 30 else None
+        first_pb = _positive_multiple(values[31]) if len(values) > 31 else None
+        if first_pe is not None or first_pb is not None:
+            records.append(
+                {
+                    **base,
+                    "pe": first_pe,
+                    "pb": first_pb,
+                    "valuation_basis": "first_day",
+                    "as_of_date": listing,
+                }
+            )
     workbook.close()
-    matches.sort(key=lambda item: str(item.get("announcement_date") or ""), reverse=True)
-    return tuple(matches[:limit])
+    return tuple(records)
+
+
+def lookup_valuation_peers(
+    industry: str,
+    *,
+    exclude_stock_code: str | None = None,
+    data_cutoff_date: str | None = None,
+    basis: str = "issue",
+    limit: int = 10,
+) -> tuple[dict[str, Any], ...]:
+    """Select same-basis IPO peers that are eligible at ``data_cutoff_date``.
+
+    The default basis is the issue valuation. First-day multiples stay on the
+    ``first_day`` basis and are not returned as issue comps.
+    """
+
+    return select_valuation_peers(
+        _valuation_peer_rows(),
+        industry=industry,
+        data_cutoff_date=data_cutoff_date,
+        basis=basis,
+        exclude_stock_code=exclude_stock_code,
+        limit=limit,
+    )
 
 
 def _json_value(value: Any) -> Any:

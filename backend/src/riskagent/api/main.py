@@ -21,6 +21,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
 
 from riskagent.a2a import build_dynamic_expert_a2a_routes
+from riskagent.api.auth import SingleUserAuthMiddleware, router as auth_router, validate_auth_config
 from riskagent.agent_experts import AgentSpec, AgentSpecRepository
 from riskagent.api import agents, analysis, analysis_options, backtests, chat, documents, knowledge, risk_rules, skills
 from riskagent.seed_data import AGENT_EXPERTS, AGENT_SPECS
@@ -43,44 +44,45 @@ def _cors_origins() -> list[str]:
     ]
 
 
-def _run_rag_schema_migrations() -> None:
-    """Ensure RAG schema is up-to-date for existing databases.
+_migration_error: str | None = None
 
-    Covers columns added after the initial ``CREATE TABLE`` (e.g.
-    ``content_sha256``).  The helper function is idempotent and safe to call
-    on every startup.
-    """
+
+def migration_error() -> str | None:
+    return _migration_error
+
+
+def _apply_startup_migrations() -> None:
+    """Upgrade ORM and existing RAG tables. Failure is recorded for /ready."""
+
+    global _migration_error
+    from riskagent.migrations import upgrade_database
+
     try:
-        from riskagent.retrieval.index import (
-            DEFAULT_INDEX_SCHEMA,
-            connect_postgres,
-            ensure_content_sha256_column,
-        )
-
-        conn = connect_postgres()
-        try:
-            ensure_content_sha256_column(schema=DEFAULT_INDEX_SCHEMA, conn=conn)
-            logger.info("RAG schema migrations applied successfully.")
-        finally:
-            conn.close()
-    except Exception:
-        logger.exception("RAG schema migration failed")
+        upgrade_database()
+    except Exception as exc:
+        _migration_error = f"{type(exc).__name__}: {exc}"
+        logger.exception("Database migration failed")
+        return
+    _migration_error = None
+    logger.info("Database migrations applied successfully.")
 
 
 def create_app() -> FastAPI:
     from riskagent.skill_docs import initialize_skill_catalog
 
+    # Missing auth settings refuse startup. Production cannot opt out.
+    validate_auth_config()
     # Skill metadata and executable handlers are a startup contract.  A broken
     # required Skill must fail before the application advertises readiness.
     initialize_skill_catalog()
     app = FastAPI(title="ProspectAlpha RiskAgent API", version="0.1.0")
+    app.add_middleware(SingleUserAuthMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=_cors_origins(),
-        # Vite can move to another port when 5173 is occupied, and developers
-        # commonly alternate between localhost and 127.0.0.1. Keep loopback
-        # origins usable without weakening the configured production allowlist.
-        allow_origin_regex=LOCAL_DEVELOPMENT_ORIGIN_REGEX,
+        # Vite can move to another port when 5173 is occupied. Loopback stays
+        # available outside production; production uses only CORS_ALLOW_ORIGINS.
+        allow_origin_regex=None if os.getenv("APP_ENV", "").strip().lower() == "production" else LOCAL_DEVELOPMENT_ORIGIN_REGEX,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -110,27 +112,46 @@ def create_app() -> FastAPI:
             )
         return {"status": "ok", "database": "ready"}
 
+    @app.get("/ready")
+    def ready():
+        """Schema and configured worker readiness.
+
+        The JSON body is only ``ready`` plus ``ok`` / ``failed`` /
+        ``not_required`` statuses. It is safe for an unauthenticated probe.
+        ``/health`` remains liveness and does not read Redis. This route does
+        not change auth rules; the other stream can exempt ``/ready`` the same
+        way as ``/health``.
+        """
+
+        from riskagent.readiness import public_readiness_body, readiness_report
+
+        report = readiness_report(migration_error=migration_error())
+        body = public_readiness_body(report)
+        if not report["ready"]:
+            logger.warning("Readiness check failed: %s", report)
+            return JSONResponse(status_code=503, content=body)
+        return body
+
     @app.on_event("startup")
     def _probe_embedding_provider() -> None:
         load_dotenv()
-        from riskagent.database import init_db
         from riskagent.documents import recover_interrupted_prospectus_jobs
         from riskagent.parsing import mineru_runtime_health
         from riskagent.workers.documents import start_document_dispatcher
 
-        try:
-            init_db()
-            _run_rag_schema_migrations()
-            recovered = recover_interrupted_prospectus_jobs()
-            if recovered:
-                logger.warning(
-                    "Marked %d abandoned MinerU jobs as interrupted: %s",
-                    len(recovered),
-                    ", ".join(recovered),
-                )
-            start_document_dispatcher()
-        except Exception:
-            logger.exception("Document parsing recovery probe failed")
+        _apply_startup_migrations()
+        if migration_error() is None:
+            try:
+                recovered = recover_interrupted_prospectus_jobs()
+                if recovered:
+                    logger.warning(
+                        "Marked %d abandoned MinerU jobs as interrupted: %s",
+                        len(recovered),
+                        ", ".join(recovered),
+                    )
+                start_document_dispatcher()
+            except Exception:
+                logger.exception("Document parsing recovery probe failed")
 
         parser_health = mineru_runtime_health()
         log_method = logger.info if parser_health["status"] == "ready" else logger.warning
@@ -167,6 +188,7 @@ def create_app() -> FastAPI:
         except Exception as exc:  # noqa: BLE001 - normalized startup failure
             raise RuntimeError(f"Embedding provider probe failed: {exc}") from exc
 
+    app.include_router(auth_router)
     app.include_router(risk_rules.router)
     app.include_router(agents.router)
     app.include_router(analysis_options.router)

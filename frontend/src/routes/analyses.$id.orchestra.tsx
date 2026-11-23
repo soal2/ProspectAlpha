@@ -29,6 +29,7 @@ import {
   type OrchestraStageStatus,
   type StrategyPlan,
 } from "@/lib/data-service";
+import { isRetryableApiError } from "@/lib/api-error";
 import type { Agent } from "@/lib/types";
 import {
   AlertDialog,
@@ -126,7 +127,9 @@ function OrchestraPage() {
             (fresh.events?.length ?? 0) >= current.length ? (fresh.events ?? []) : current,
           );
         })
-        .catch(() => undefined);
+        .catch((error: unknown) => {
+          if (isRetryableApiError(error)) setStreamError(error.message);
+        });
     }, 1500);
     return () => clearInterval(timer);
   }, [id, run.status]);
