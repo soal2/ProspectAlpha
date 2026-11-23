@@ -4,9 +4,25 @@ ProspectAlpha 是一个面向港股 IPO 的可解释 RiskAgent 系统，用于�
 
 > 当前状态：FastAPI 服务、SQLAlchemy 持久化、文档入库、风险规则体系、分析运行编排与 RQ worker 已可本地启动（详见 `START.md` 与 `backend/README.md`）。战略层动态选人、LangGraph 中断/恢复、A2A 1.0 与 JSON 邮箱生命周期已实现；真实模型下的专家领域行为、生产多进程验证、评分卡、回测和完整报告渲染仍待补齐。
 
+## CI 验证
+
+面向任意基分支的 PR、推送到 `master` 和手动运行都会触发 [CI verification](.github/workflows/ci.yml)。后端锁定依赖测试、前端 Bun 测试与 lint/build、PostgreSQL 迁移保留旧数据测试、后端 Docker 构建并行运行，四项全部成功后 `CI gate` 才会通过。失败日志和 pytest JUnit 报告可在对应运行中下载。
+
+合并包含 PR 20 和锁文件修复的改动后，验证工作流自动生效，无需配置新密钥。合并前的 `master` 缺少 Alembic 修订与 PostgreSQL 迁移测试、`/ready` 与 Redis/worker 就绪测试，以及前端 Bun 测试。请在集成分支或合并后的代码上运行完整验证。后端本地运行方式与跳过规则见 [Backend Tests](backend/tests/README.md)。前端在 `frontend/` 使用 Node 24 与 Bun 1.3.4：
+
+```bash
+export PROSPECTALPHA_SKIP_DOTENV=1
+bun install --frozen-lockfile
+bun test
+bun run lint
+bun run build
+```
+
+Docker 验证在仓库根目录运行 `docker build ./backend --file ./backend/Dockerfile --tag prospectalpha-backend:local`。GitHub Actions 只构建本地镜像，不发布镜像，也不部署生产后端。Render Blueprint 的 `checksPass` 自动部署由 Render 管理。
+
 ## GitHub Pages 前端部署
 
-推送到 `master` 后，`.github/workflows/deploy-frontend-pages.yml` 会将前端发布到 GitHub Pages。首次使用前，请在仓库 **Settings → Pages** 将 Source 设为 **GitHub Actions**。后端 Render 服务完成首个部署后，在 **Settings → Secrets and variables → Actions → Variables** 新建仓库变量 `VITE_API_BASE_URL`，值为 Render API 的公开 HTTPS 地址（不要以 `/` 结尾），然后手动运行一次 `Deploy frontend to GitHub Pages` 工作流。
+前端发布改为手动运行。在 **Actions → Deploy frontend to GitHub Pages → Run workflow** 选择 `master`，沿用现有的 `VITE_API_BASE_URL` 仓库变量和 `github-pages` 环境保护。推送到 `master` 不再自动发布前端，CI 验证也不会触发发布。
 
 后端由根目录 [`render.yaml`](render.yaml) 定义：Render 会创建 FastAPI 与 RQ Worker 共用的 Web Service、启用 pgvector 的 Postgres、Redis 兼容 Key Value 和私有 MinIO。招股书向量写入该 Postgres 的 pgvector 扩展。创建 Blueprint 时，Render 会要求填写 OpenAI 兼容模型与嵌入服务的地址、模型名和密钥；这些机密不提交到仓库。部署完成后的访问地址为 `https://soal2.github.io/ProspectAlpha/`。GitHub Pages/Actions 只能托管静态前端，不能运行 FastAPI、RQ、Redis 或数据库。
 

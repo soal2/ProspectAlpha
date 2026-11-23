@@ -1,17 +1,10 @@
 name: Deploy frontend to GitHub Pages
 
 on:
-  push:
-    branches: [master]
-    paths:
-      - "frontend/**"
-      - ".github/workflows/deploy-frontend-pages.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
   group: "pages"
@@ -19,13 +12,19 @@ concurrency:
 
 jobs:
   build:
-    if: ${{ vars.VITE_API_BASE_URL != '' }}
+    if: ${{ github.ref == 'refs/heads/master' && vars.VITE_API_BASE_URL != '' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     env:
       GITHUB_PAGES_DEPLOY: "true"
       VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.3.4"
@@ -53,9 +52,13 @@ jobs:
           path: frontend/.output/public
 
   deploy:
-    if: ${{ vars.VITE_API_BASE_URL != '' }}
+    if: ${{ github.ref == 'refs/heads/master' && vars.VITE_API_BASE_URL != '' }}
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
