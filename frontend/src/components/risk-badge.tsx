@@ -44,13 +44,7 @@ export function RiskBadge({
   );
 }
 
-export function RiskDot({
-  level,
-  className,
-}: {
-  level: RiskLevel;
-  className?: string;
-}) {
+export function RiskDot({ level, className }: { level: RiskLevel; className?: string }) {
   const colors: Record<RiskLevel, string> = {
     very_high: "bg-[color:var(--risk-very-high)]",
     high: "bg-[color:var(--risk-high)]",

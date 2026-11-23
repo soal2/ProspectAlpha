@@ -12,9 +12,10 @@ export default defineConfig({
   },
   // The Lovable preset targets Cloudflare by default. Allow an explicit Node build
   // for local acceptance testing without changing the deployment target.
-  nitro: process.env.GITHUB_PAGES_DEPLOY === "true" || process.env.LOCAL_NODE_PREVIEW === "true"
-    ? { preset: "node-server" }
-    : undefined,
+  nitro:
+    process.env.GITHUB_PAGES_DEPLOY === "true" || process.env.LOCAL_NODE_PREVIEW === "true"
+      ? { preset: "node-server" }
+      : undefined,
   vite: {
     base: process.env.GITHUB_PAGES_DEPLOY === "true" ? "/ProspectAlpha/" : "/",
     resolve: { dedupe: ["react", "react-dom"] },
