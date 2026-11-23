@@ -1,6 +1,9 @@
 import json
 import os
+from importlib.machinery import ModuleSpec
 from pathlib import Path
+
+import pytest
 
 from riskagent.parsing import (
     ChunkRequest,
@@ -494,7 +497,19 @@ def test_legacy_miner_model_source_alias_is_promoted(monkeypatch):
     assert os.environ["MINERU_MODEL_SOURCE"] == "modelscope"
 
 
-def test_mineru_health_detects_modelscope_models_directory(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("installed", "status"),
+    [(True, "ready"), (False, "unavailable")],
+    ids=["mineru-installed", "mineru-absent"],
+)
+def test_mineru_health_detects_modelscope_models_directory(
+    tmp_path, monkeypatch, installed, status
+):
+    mineru_spec = ModuleSpec("mineru", loader=None) if installed else None
+    monkeypatch.setattr(
+        "riskagent.parsing.pdf_parser.find_spec",
+        {"mineru": mineru_spec}.__getitem__,
+    )
     cache_root = tmp_path / "modelscope"
     (cache_root / "OpenDataLab--PDF-Extract-Kit-1.0").mkdir(parents=True)
     monkeypatch.setenv("MODELSCOPE_CACHE", str(cache_root))
@@ -503,7 +518,7 @@ def test_mineru_health_detects_modelscope_models_directory(tmp_path, monkeypatch
 
     health = mineru_runtime_health()
 
-    assert health["installed"] is True
+    assert health["installed"] is installed
     assert health["model_cache_present"] is True
     assert health["device_ready"] is True
-    assert health["status"] == "ready"
+    assert health["status"] == status

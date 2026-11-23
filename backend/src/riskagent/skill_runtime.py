@@ -13,7 +13,7 @@ import json
 import os
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -244,9 +244,9 @@ class CashflowAnalyzerHandler:
             )
         refs = [str(item) for item in invocation.structured_inputs.get("cashflow_evidence_refs", [])]
         limitations = [str(item) for item in invocation.structured_inputs.get("cashflow_limitations", []) if str(item).strip()]
-        if not refs:
-            limitations.append("计算字段尚未绑定原始 PDF 证据。")
         if any(row.get("unit_consistent") is False or row.get("ambiguous") or not row.get("period_end") for row in rows):
+            if not refs:
+                limitations.append("计算字段尚未绑定原始 PDF 证据。")
             limitations.append("存在无法解析的报告期、比较列或互相冲突的单位，已拒绝输出现金跑道。")
             return _result(
                 invocation,
@@ -262,7 +262,34 @@ class CashflowAnalyzerHandler:
                 evidence_refs=refs,
                 limitations=limitations,
             )
-        dated = sorted(rows, key=lambda row: str(row.get("period_end")))
+        cutoff = invocation_cutoff(invocation)
+        try:
+            cutoff_date = date.fromisoformat(cutoff) if cutoff else None
+            dated_rows = [(date.fromisoformat(row["period_end"]), row) for row in rows]
+        except (TypeError, ValueError):
+            return _result(
+                invocation,
+                started_at=started,
+                status="insufficient_data",
+                summary="报告期截止日期或分析截止日期无效，未计算现金跑道。",
+                limitations=limitations,
+            )
+        dated_rows.sort(key=lambda item: item[0])
+        dated = [row for period_end, row in dated_rows if cutoff_date is None or period_end <= cutoff_date]
+        if len(dated) < len(rows):
+            retained_refs = {row.get("evidence_block_id") for row in dated}
+            refs = [ref for ref in refs if ref in retained_refs]
+            limitations.append("已排除分析截止日期之后的现金流报告期。")
+        if not dated:
+            return _result(
+                invocation,
+                started_at=started,
+                status="insufficient_data",
+                summary="分析截止日期及之前没有可用的现金流报告期。",
+                limitations=limitations,
+            )
+        if not refs:
+            limitations.append("计算字段尚未绑定原始 PDF 证据。")
         latest = dated[-1]
         cash = latest.get("cash_and_equivalents")
         operating = latest.get("operating_cashflow")
@@ -275,12 +302,13 @@ class CashflowAnalyzerHandler:
             or not isinstance(duration, int)
             or isinstance(duration, bool)
         ):
+            missing_fields = "需要带证据引用的 cash_and_equivalents、operating_cashflow 与 duration_months。"
             return _result(
                 invocation,
                 started_at=started,
                 status="insufficient_data",
                 summary="现金、经营现金流或期间长度缺失，未计算现金跑道。",
-                limitations=["需要带证据引用的 cash_and_equivalents、operating_cashflow 与 duration_months。"],
+                limitations=[*limitations, missing_fields] if cutoff_date is not None else [missing_fields],
                 evidence_refs=refs,
             )
         if cash < 0 or duration not in _RUNWAY_DURATIONS:
