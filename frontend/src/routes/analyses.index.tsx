@@ -29,7 +29,17 @@ export const Route = createFileRoute("/analyses/")({
   component: AnalysesIndex,
 });
 
-const filters = ["全部", "极高风险", "高风险", "中风险", "低风险", "极低风险", "未评级", "专家级", "近 7 天"] as const;
+const filters = [
+  "全部",
+  "极高风险",
+  "高风险",
+  "中风险",
+  "低风险",
+  "极低风险",
+  "未评级",
+  "专家级",
+  "近 7 天",
+] as const;
 type AnalysisFilter = (typeof filters)[number];
 type AnalysisSort = "newest" | "oldest" | "evidence";
 

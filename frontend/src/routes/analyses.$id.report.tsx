@@ -43,8 +43,18 @@ function ReportPage() {
         external_evidence_ids?: string[];
         counter_evidence_ids?: string[];
       }[];
-      counterevidence: { hypothesis_id?: string; title?: string; status?: string; source_ids?: string[] }[];
-      evidenceIndex: { evidence_id?: string; title?: string; url?: string; published_at?: string }[];
+      counterevidence: {
+        hypothesis_id?: string;
+        title?: string;
+        status?: string;
+        source_ids?: string[];
+      }[];
+      evidenceIndex: {
+        evidence_id?: string;
+        title?: string;
+        url?: string;
+        published_at?: string;
+      }[];
     } | null;
   };
   const sections = splitMarkdown(report?.markdown ?? "报告尚未生成。");
@@ -156,7 +166,11 @@ function ReportPage() {
                 href={report ? `${reportArtifactUrl(analysis.id)}?download=1` : undefined}
                 onClick={(event) => {
                   event.preventDefault();
-                  if (report) void downloadHtml(reportArtifactUrl(analysis.id), `${analysis.name}-港股IPO风险报告-${analysis.id}.html`);
+                  if (report)
+                    void downloadHtml(
+                      reportArtifactUrl(analysis.id),
+                      `${analysis.name}-港股IPO风险报告-${analysis.id}.html`,
+                    );
                 }}
                 aria-disabled={!report}
                 className="inline-flex h-9 items-center gap-1.5 rounded-full border border-border bg-card px-3 text-xs text-muted-foreground hover:bg-accent aria-disabled:pointer-events-none aria-disabled:opacity-50"
@@ -181,25 +195,60 @@ function ReportPage() {
           {(report?.exploratoryFindings.length ?? 0) > 0 && (
             <section className="mb-8">
               <h2 className="font-serif text-xl font-semibold">探索性隐性风险</h2>
-              <p className="mt-1 text-xs text-muted-foreground">低置信度和线索级证据仍展示；置信度只用于说明，不决定准入或评分。</p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                低置信度和线索级证据仍展示；置信度只用于说明，不决定准入或评分。
+              </p>
               <div className="mt-4 grid gap-3">
                 {report!.exploratoryFindings.map((finding, index) => (
-                  <div key={finding.finding_id ?? index} className="rounded-xl border border-border bg-card p-4">
+                  <div
+                    key={finding.finding_id ?? index}
+                    className="rounded-xl border border-border bg-card p-4"
+                  >
                     <div className="flex flex-wrap items-center gap-2">
                       <h3 className="font-medium">{finding.title ?? "未命名风险"}</h3>
-                      <span className="rounded-full bg-muted px-2 py-0.5 text-[11px]">{finding.risk_type ?? "自由风险"}</span>
-                      <span className="rounded-full bg-amber-500/10 px-2 py-0.5 text-[11px] text-amber-800">{finding.evidence_grade ?? "lead"}</span>
-                      <span className="ml-auto text-[11px] text-muted-foreground">置信度 {Number(finding.confidence ?? 0).toFixed(2)} · {finding.hypothesis_status ?? "reported"}</span>
+                      <span className="rounded-full bg-muted px-2 py-0.5 text-[11px]">
+                        {finding.risk_type ?? "自由风险"}
+                      </span>
+                      <span className="rounded-full bg-amber-500/10 px-2 py-0.5 text-[11px] text-amber-800">
+                        {finding.evidence_grade ?? "lead"}
+                      </span>
+                      <span className="ml-auto text-[11px] text-muted-foreground">
+                        置信度 {Number(finding.confidence ?? 0).toFixed(2)} ·{" "}
+                        {finding.hypothesis_status ?? "reported"}
+                      </span>
                     </div>
                     <p className="mt-3 text-sm leading-6">{finding.reasoning_summary}</p>
-                    <p className="mt-2 text-xs text-muted-foreground">因果链：{finding.causal_chain || "未展开"}</p>
-                    <p className="mt-1 text-xs text-muted-foreground">公司特异性：{finding.company_specificity || "未说明"} · 行业关联：{finding.industry_relevance || "未说明"}</p>
-                    <p className="mt-2 text-[11px] text-muted-foreground">招股书证据：{finding.evidence_ids?.join("、") || "无"} · 外部来源：{finding.external_evidence_ids?.join("、") || "未取得"} · 反证：{finding.counter_evidence_ids?.join("、") || "无"}</p>
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      因果链：{finding.causal_chain || "未展开"}
+                    </p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      公司特异性：{finding.company_specificity || "未说明"} · 行业关联：
+                      {finding.industry_relevance || "未说明"}
+                    </p>
+                    <p className="mt-2 text-[11px] text-muted-foreground">
+                      招股书证据：{finding.evidence_ids?.join("、") || "无"} · 外部来源：
+                      {finding.external_evidence_ids?.join("、") || "未取得"} · 反证：
+                      {finding.counter_evidence_ids?.join("、") || "无"}
+                    </p>
                     {(finding.external_evidence_ids?.length ?? 0) > 0 && (
                       <div className="mt-2 flex flex-wrap gap-2 text-[11px]">
                         {finding.external_evidence_ids!.map((sourceId) => {
-                          const source = report!.evidenceIndex.find((item) => item.evidence_id === sourceId);
-                          return source?.url ? <a key={sourceId} href={source.url} target="_blank" rel="noreferrer" className="text-primary underline underline-offset-2">{source.title || sourceId} · {source.published_at || "日期不明"}</a> : <span key={sourceId}>{sourceId}</span>;
+                          const source = report!.evidenceIndex.find(
+                            (item) => item.evidence_id === sourceId,
+                          );
+                          return source?.url ? (
+                            <a
+                              key={sourceId}
+                              href={source.url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="text-primary underline underline-offset-2"
+                            >
+                              {source.title || sourceId} · {source.published_at || "日期不明"}
+                            </a>
+                          ) : (
+                            <span key={sourceId}>{sourceId}</span>
+                          );
                         })}
                       </div>
                     )}
@@ -212,7 +261,12 @@ function ReportPage() {
             <section className="mb-8 rounded-xl border border-border bg-muted/30 p-4">
               <h2 className="font-serif text-lg font-semibold">反证与争议</h2>
               <ul className="mt-3 space-y-2 text-xs text-muted-foreground">
-                {report!.counterevidence.map((item, index) => <li key={item.hypothesis_id ?? index}>{item.title ?? "风险假设"} · {item.status ?? "disputed"} · 来源 {item.source_ids?.join("、") || "无"}</li>)}
+                {report!.counterevidence.map((item, index) => (
+                  <li key={item.hypothesis_id ?? index}>
+                    {item.title ?? "风险假设"} · {item.status ?? "disputed"} · 来源{" "}
+                    {item.source_ids?.join("、") || "无"}
+                  </li>
+                ))}
               </ul>
             </section>
           )}

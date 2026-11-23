@@ -1,0 +1,220 @@
+name: CI verification
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  PROSPECTALPHA_SKIP_DOTENV: "1"
+
+jobs:
+  backend:
+    name: Backend tests
+    runs-on: ubuntu-latest
+    # The prior full suite took 868.92 seconds locally, before dependency setup.
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.13.9"
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - name: Install locked dependencies
+        timeout-minutes: 8
+        run: |
+          uv lock --check
+          # The pipeline extra includes torch and MinerU and is unnecessary here.
+          uv sync --locked --extra dev 2>&1 | tee "$RUNNER_TEMP/backend-install.log"
+      - name: Run backend tests
+        timeout-minutes: 30
+        run: |
+          # Exclude the paid DashScope call. The live database test runs in postgres.
+          .venv/bin/python ../.github/scripts/check-pytest-skips.py -q --tb=short \
+            -k 'not test_dashscope_embedding_client_real_call' \
+            --deselect tests/test_database_migrations.py::test_postgres_upgrade_preserves_rows \
+            --junitxml="$RUNNER_TEMP/backend-junit.xml" 2>&1 | tee "$RUNNER_TEMP/backend-pytest.log"
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: backend-diagnostics
+          path: |
+            ${{ runner.temp }}/backend-install.log
+            ${{ runner.temp }}/backend-pytest.log
+            ${{ runner.temp }}/backend-junit.xml
+          retention-days: 7
+
+  frontend:
+    name: Frontend tests, lint, and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.4"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-1.3.4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/pnpm-lock.yaml') }}
+      - name: Install frontend dependencies
+        id: install
+        timeout-minutes: 5
+        run: bun install --frozen-lockfile 2>&1 | tee "$RUNNER_TEMP/frontend-install.log"
+      - name: Test frontend
+        timeout-minutes: 3
+        run: bun test 2>&1 | tee "$RUNNER_TEMP/frontend-test.log"
+      - name: Lint frontend
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        timeout-minutes: 3
+        run: bun run lint 2>&1 | tee "$RUNNER_TEMP/frontend-lint.log"
+      - name: Build frontend
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        timeout-minutes: 5
+        run: bun run build 2>&1 | tee "$RUNNER_TEMP/frontend-build.log"
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: frontend-diagnostics
+          path: ${{ runner.temp }}/frontend-*.log
+          retention-days: 7
+
+  postgres:
+    name: PostgreSQL row preservation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.2-pg16
+        env:
+          # Only this disposable database name enables the test's schema reset and row checks.
+          POSTGRES_DB: prospectalpha_ephemeral
+          # The service lives on a disposable runner and holds only synthetic rows.
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd "pg_isready -U postgres -d prospectalpha_ephemeral"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.13.9"
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - name: Install locked dependencies and PostgreSQL driver
+        timeout-minutes: 8
+        run: |
+          {
+            uv sync --locked --extra dev
+            # Extract the two hashed driver requirements without installing the pipeline stack.
+            uv export --locked --extra pipeline --no-emit-project --no-annotate |
+              awk '/^[[:alnum:]]/ { driver = /^psycopg(-binary)?==/ } driver && NF' \
+              > "$RUNNER_TEMP/postgres-driver.txt"
+            uv pip install --python .venv/bin/python --no-deps --require-hashes \
+              -r "$RUNNER_TEMP/postgres-driver.txt"
+          } 2>&1 | tee "$RUNNER_TEMP/postgres-install.log"
+      - name: Verify rows survive migration
+        timeout-minutes: 5
+        env:
+          PROSPECTALPHA_TEST_POSTGRES_URL: postgresql+psycopg://postgres@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/prospectalpha_ephemeral
+        run: |
+          .venv/bin/python ../.github/scripts/check-pytest-skips.py -q --tb=short \
+            tests/test_database_migrations.py::test_postgres_upgrade_preserves_rows \
+            --junitxml="$RUNNER_TEMP/postgres-junit.xml" 2>&1 | tee "$RUNNER_TEMP/postgres-pytest.log"
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: postgres-diagnostics
+          path: |
+            ${{ runner.temp }}/postgres-*.log
+            ${{ runner.temp }}/postgres-junit.xml
+          retention-days: 7
+
+  docker:
+    name: Backend Docker build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build backend image locally
+        timeout-minutes: 40
+        run: |
+          # The pipeline stack needs substantial disk. This image is only a build check.
+          {
+            df -h .
+            docker build --progress=plain ./backend --file ./backend/Dockerfile \
+              --tag "prospectalpha-backend:$GITHUB_SHA"
+          } 2>&1 | tee "$RUNNER_TEMP/docker-build.log"
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: docker-diagnostics
+          path: ${{ runner.temp }}/docker-build.log
+          retention-days: 7
+
+  gate:
+    name: CI gate
+    needs: [backend, frontend, postgres, docker]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      BACKEND_RESULT: ${{ needs.backend.result }}
+      FRONTEND_RESULT: ${{ needs.frontend.result }}
+      POSTGRES_RESULT: ${{ needs.postgres.result }}
+      DOCKER_RESULT: ${{ needs.docker.result }}
+    steps:
+      - name: Require all verification jobs to succeed
+        run: |
+          {
+            printf '| Job | Result |\n| --- | --- |\n'
+            printf '| Backend | %s |\n' "$BACKEND_RESULT"
+            printf '| Frontend | %s |\n' "$FRONTEND_RESULT"
+            printf '| PostgreSQL | %s |\n' "$POSTGRES_RESULT"
+            printf '| Docker | %s |\n' "$DOCKER_RESULT"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          [[ "$BACKEND_RESULT" == success && "$FRONTEND_RESULT" == success &&
+             "$POSTGRES_RESULT" == success && "$DOCKER_RESULT" == success ]]

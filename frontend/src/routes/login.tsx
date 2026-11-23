@@ -30,7 +30,10 @@ function LoginPage() {
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-background px-4">
-      <form onSubmit={onSubmit} className="w-full max-w-sm rounded-2xl border border-border bg-card p-6">
+      <form
+        onSubmit={onSubmit}
+        className="w-full max-w-sm rounded-2xl border border-border bg-card p-6"
+      >
         <h1 className="font-serif text-2xl font-semibold">登录</h1>
         <p className="mt-2 text-sm text-muted-foreground">
           这是本部署的单一操作者入口。密码只提交给后端，不会写入前端构建产物。

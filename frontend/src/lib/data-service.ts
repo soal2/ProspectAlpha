@@ -239,7 +239,11 @@ export interface AnalysisRun {
   } | null;
   hypotheses?: Record<string, unknown>[];
   research_budget?: { hypothesis_limit: number; search_limit: number } | null;
-  research_usage?: { hypotheses_researched: number; searches_used: number; pages_fetched: number } | null;
+  research_usage?: {
+    hypotheses_researched: number;
+    searches_used: number;
+    pages_fetched: number;
+  } | null;
   /** Read-only compatibility shape for runs created before dynamic strategy planning. */
   orchestra_plan?: OrchestraPlan | StrategyPlan;
 }
@@ -743,7 +747,13 @@ export async function getBacktests() {
   return fetchBacktests();
 }
 
-export async function createBacktest(payload: { snapshot_id: string; wind_code: string; name?: string; test_start_date?: string; test_end_date?: string }) {
+export async function createBacktest(payload: {
+  snapshot_id: string;
+  wind_code: string;
+  name?: string;
+  test_start_date?: string;
+  test_end_date?: string;
+}) {
   return apiRequest<BacktestSummary>("/backtests", {
     method: "POST",
     body: JSON.stringify(payload),
@@ -754,8 +764,19 @@ export async function getBacktestCandidates(snapshotId: string) {
   return apiRequest<BacktestCandidatePreview[]>(`/backtests/market-data/${snapshotId}/candidates`);
 }
 
-export async function confirmBacktestCandidates(id: string, decisions: { wind_code: string; score_id?: string | null; include: boolean; exclusion_reason?: string | null }[]) {
-  return apiRequest<BacktestSummary>(`/backtests/${id}/candidates`, { method: "POST", body: JSON.stringify({ decisions }) });
+export async function confirmBacktestCandidates(
+  id: string,
+  decisions: {
+    wind_code: string;
+    score_id?: string | null;
+    include: boolean;
+    exclusion_reason?: string | null;
+  }[],
+) {
+  return apiRequest<BacktestSummary>(`/backtests/${id}/candidates`, {
+    method: "POST",
+    body: JSON.stringify({ decisions }),
+  });
 }
 
 export async function startBacktest(id: string) {
@@ -767,7 +788,9 @@ export async function reproduceBacktest(id: string) {
 }
 
 export async function publishMarketSnapshot(id: string) {
-  return apiRequest<MarketSnapshotOption>(`/backtests/market-data/${id}/publish`, { method: "POST" });
+  return apiRequest<MarketSnapshotOption>(`/backtests/market-data/${id}/publish`, {
+    method: "POST",
+  });
 }
 
 export async function uploadMarketData(files: { security: File; company: File; prices: File }) {

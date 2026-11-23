@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import pytest
+
 from riskagent.features.financial import extract_cashflow_periods
 from riskagent.skill_runtime import CashflowAnalyzerHandler, SkillInvocation
 
@@ -193,8 +195,12 @@ def test_conflicting_units_are_rejected_with_provenance():
     assert result.matched_rows[0]["page_number"] == 22
 
 
-def _cashflow_result(block):
+def _cashflow_result(block, *, cutoff=""):
     extraction = extract_cashflow_periods([block])
+    return extraction, _invoke_cashflow(extraction, cutoff=cutoff)
+
+
+def _invoke_cashflow(extraction, *, cutoff=""):
     invocation = SkillInvocation.model_validate(
         {
             "run_id": "run_cash",
@@ -203,6 +209,7 @@ def _cashflow_result(block):
             "skill_id": "cashflow-analyzer",
             "skill_version": "1.0.0",
             "company_name": "测试公司",
+            "data_cutoff_date": cutoff,
             "structured_inputs": {
                 "cashflow_periods": extraction.periods,
                 "cashflow_evidence_refs": extraction.evidence_refs,
@@ -210,7 +217,69 @@ def _cashflow_result(block):
             },
         }
     )
-    return extraction, CashflowAnalyzerHandler().invoke(invocation)
+    return CashflowAnalyzerHandler().invoke(invocation)
+
+
+def test_runway_keeps_cutoff_day_and_excludes_later_columns():
+    _, result = _cashflow_result(_REVERSED_ANNUAL, cutoff="2023-12-31")
+
+    assert result.status == "completed"
+    assert result.result["latest_period_end"] == "2023-12-31"
+    assert result.result["cash_runway_months"] == 120
+    assert [row["period_end"] for row in result.result["periods"]] == ["2022-12-31", "2023-12-31"]
+    assert result.evidence_refs == ["block_reversed"]
+
+
+def test_runway_requires_at_least_one_period_by_cutoff():
+    _, result = _cashflow_result(_INTERIM_COMPARATIVE, cutoff="2023-12-30")
+
+    assert result.status == "insufficient_data"
+    assert "cash_runway_months" not in result.result
+    assert result.evidence_refs == []
+
+
+@pytest.mark.parametrize("invalid_field", ["reporting_date", "cutoff_date"])
+def test_runway_rejects_invalid_calendar_dates(invalid_field):
+    extraction = extract_cashflow_periods([_REVERSED_ANNUAL])
+    cutoff = "2024-12-31"
+    if invalid_field == "reporting_date":
+        extraction.periods[0]["period_end"] = "2024-02-30"
+    else:
+        cutoff = "2024-02-30"
+
+    result = _invoke_cashflow(extraction, cutoff=cutoff)
+
+    assert result.status == "insufficient_data"
+    assert "cash_runway_months" not in result.result
+
+
+@pytest.mark.parametrize(
+    ("cutoff", "latest_period", "expected_refs", "expected_period_refs"),
+    [
+        pytest.param(
+            "2023-12-31", "2023-12-31", ["block_reversed"],
+            ["block_reversed", "block_reversed"], id="exclude-future-citation",
+        ),
+        pytest.param(
+            "", "2024-12-31", ["block_reversed", "block_future"],
+            ["block_reversed", "block_reversed", "block_future"], id="preserve-no-cutoff",
+        ),
+    ],
+)
+def test_runway_citations_follow_cutoff(cutoff, latest_period, expected_refs, expected_period_refs):
+    # The extractor uses one table per extraction. Model rows from distinct
+    # evidence blocks at the skill boundary.
+    extraction = extract_cashflow_periods([_REVERSED_ANNUAL])
+    extraction.periods[0]["evidence_block_id"] = "block_future"
+    extraction.evidence_refs.append("block_future")
+
+    result = _invoke_cashflow(extraction, cutoff=cutoff)
+
+    assert result.status == "completed"
+    assert result.evidence_refs == expected_refs
+    assert result.result["latest_period_end"] == latest_period
+    assert result.result["period_count"] == len(expected_period_refs)
+    assert [row["evidence_block_id"] for row in result.result["periods"]] == expected_period_refs
 
 
 def test_runway_uses_latest_dated_period_and_its_duration():

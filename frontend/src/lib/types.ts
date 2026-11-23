@@ -103,8 +103,33 @@ export interface BacktestDetailResponse {
   visuals?: BacktestDetailData;
   weightComparison?: Record<string, Record<string, number>>;
   ablationResults?: Record<string, Record<string, number>>;
-  industryCohorts?: { code: string; name: string; samples: number; status: string; auc?: number; ks?: number; lift_top20?: number; recall?: number }[];
-  samples?: { code: string; name: string; score: number; risk: RiskLevel; actualDecline: boolean; breaking: boolean; returnPct: number; maxDrawdownPct: number; reason: string; analysisRunId?: string; analysisAsOfDate?: string; industryProfile?: Record<string, unknown>; specificRisks?: Record<string, unknown>[]; outcomeProfile?: Record<string, unknown>; retrospectiveAttribution?: Record<string, unknown> }[];
+  industryCohorts?: {
+    code: string;
+    name: string;
+    samples: number;
+    status: string;
+    auc?: number;
+    ks?: number;
+    lift_top20?: number;
+    recall?: number;
+  }[];
+  samples?: {
+    code: string;
+    name: string;
+    score: number;
+    risk: RiskLevel;
+    actualDecline: boolean;
+    breaking: boolean;
+    returnPct: number;
+    maxDrawdownPct: number;
+    reason: string;
+    analysisRunId?: string;
+    analysisAsOfDate?: string;
+    industryProfile?: Record<string, unknown>;
+    specificRisks?: Record<string, unknown>[];
+    outcomeProfile?: Record<string, unknown>;
+    retrospectiveAttribution?: Record<string, unknown>;
+  }[];
   artifact?: string | null;
 }
 

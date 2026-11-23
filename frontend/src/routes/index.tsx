@@ -55,14 +55,46 @@ export const Route = createFileRoute("/")({
 
 /** Common HK IPO company names for autocomplete suggestions */
 const COMPANY_SUGGESTIONS = [
-  "腾讯控股", "阿里巴巴", "美团", "小米集团", "京东集团",
-  "百度集团", "网易", "哔哩哔哩", "快手", "商汤科技",
-  "理想汽车", "蔚来汽车", "小鹏汽车", "华为技术", "比亚迪",
-  "中国平安", "招商银行", "建设银行", "工商银行", "中国银行",
-  "中国人寿", "太平洋保险", "恒大集团", "碧桂园", "万科企业",
-  "联想集团", "中兴通讯", "海尔智家", "格力电器", "蒙牛乳业",
-  "农夫山泉", "海底捞", "安踏体育", "李宁", "申洲国际",
-  "药明生物", "百济神州", "信达生物", "君实生物", "金蝶国际",
+  "腾讯控股",
+  "阿里巴巴",
+  "美团",
+  "小米集团",
+  "京东集团",
+  "百度集团",
+  "网易",
+  "哔哩哔哩",
+  "快手",
+  "商汤科技",
+  "理想汽车",
+  "蔚来汽车",
+  "小鹏汽车",
+  "华为技术",
+  "比亚迪",
+  "中国平安",
+  "招商银行",
+  "建设银行",
+  "工商银行",
+  "中国银行",
+  "中国人寿",
+  "太平洋保险",
+  "恒大集团",
+  "碧桂园",
+  "万科企业",
+  "联想集团",
+  "中兴通讯",
+  "海尔智家",
+  "格力电器",
+  "蒙牛乳业",
+  "农夫山泉",
+  "海底捞",
+  "安踏体育",
+  "李宁",
+  "申洲国际",
+  "药明生物",
+  "百济神州",
+  "信达生物",
+  "君实生物",
+  "金蝶国际",
 ];
 
 function inferCompanyName(text: string, document?: UploadedDocument | null) {
@@ -188,7 +220,9 @@ function WorkspacePage() {
     [companyNameOverride, requestText, uploadedDocument],
   );
   const filteredCompanySuggestions = useMemo(() => {
-    const query = (companyNameOverride || inferCompanyName(requestText, uploadedDocument)).toLowerCase();
+    const query = (
+      companyNameOverride || inferCompanyName(requestText, uploadedDocument)
+    ).toLowerCase();
     if (!query) return COMPANY_SUGGESTIONS.slice(0, 8);
     return COMPANY_SUGGESTIONS.filter((name) => name.toLowerCase().includes(query)).slice(0, 8);
   }, [companyNameOverride, requestText, uploadedDocument]);
@@ -273,65 +307,68 @@ function WorkspacePage() {
               </span>
             </div>
 
-          {/* Company name autocomplete */}
-          <div className="relative border-b border-border/80 px-5 py-3">
-            <label className="mb-1 block text-[11px] font-medium text-muted-foreground">
-              分析对象（公司名）
-            </label>
-            <div className="relative">
-              <input
-                ref={companyInputRef}
-                type="text"
-                value={companyNameOverride}
-                onChange={(e) => {
-                  setCompanyNameOverride(e.target.value);
-                  setShowCompanySuggestions(true);
-                }}
-                onFocus={() => setShowCompanySuggestions(true)}
-                onBlur={() => setTimeout(() => setShowCompanySuggestions(false), 200)}
-                placeholder={companyName || "输入公司名，自动补全建议…"}
-                className="h-9 w-full rounded-sm border border-border bg-background px-3 pr-8 text-[13px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-              />
-              {companyNameOverride && (
-                <button
-                  type="button"
-                  onClick={() => { setCompanyNameOverride(""); companyInputRef.current?.focus(); }}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                >
-                  <X className="size-3.5" />
-                </button>
-              )}
-            </div>
-            {showCompanySuggestions && filteredCompanySuggestions.length > 0 && (
-              <div className="absolute left-5 right-5 top-full z-20 mt-1 max-h-48 overflow-auto rounded-md border border-border bg-white shadow-lg">
-                {filteredCompanySuggestions.map((name) => (
+            {/* Company name autocomplete */}
+            <div className="relative border-b border-border/80 px-5 py-3">
+              <label className="mb-1 block text-[11px] font-medium text-muted-foreground">
+                分析对象（公司名）
+              </label>
+              <div className="relative">
+                <input
+                  ref={companyInputRef}
+                  type="text"
+                  value={companyNameOverride}
+                  onChange={(e) => {
+                    setCompanyNameOverride(e.target.value);
+                    setShowCompanySuggestions(true);
+                  }}
+                  onFocus={() => setShowCompanySuggestions(true)}
+                  onBlur={() => setTimeout(() => setShowCompanySuggestions(false), 200)}
+                  placeholder={companyName || "输入公司名，自动补全建议…"}
+                  className="h-9 w-full rounded-sm border border-border bg-background px-3 pr-8 text-[13px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                />
+                {companyNameOverride && (
                   <button
-                    key={name}
                     type="button"
-                    onMouseDown={(e) => {
-                      e.preventDefault();
-                      setCompanyNameOverride(name);
-                      setShowCompanySuggestions(false);
+                    onClick={() => {
+                      setCompanyNameOverride("");
+                      companyInputRef.current?.focus();
                     }}
-                    className="block w-full px-3 py-1.5 text-left text-[12.5px] text-foreground hover:bg-muted"
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
                   >
-                    {name}
+                    <X className="size-3.5" />
                   </button>
-                ))}
+                )}
               </div>
-            )}
-            <label className="mb-1 mt-3 block text-[11px] font-medium text-muted-foreground">
-              港股代码（必填）
-            </label>
-            <input
-              type="text"
-              value={stockCode}
-              onChange={(event) => setStockCode(event.target.value.toUpperCase())}
-              placeholder="例如 0700.HK"
-              pattern="[0-9]{4,5}(\\.HK)?"
-              className="h-9 w-full rounded-sm border border-border bg-background px-3 text-[13px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-            />
-          </div>
+              {showCompanySuggestions && filteredCompanySuggestions.length > 0 && (
+                <div className="absolute left-5 right-5 top-full z-20 mt-1 max-h-48 overflow-auto rounded-md border border-border bg-white shadow-lg">
+                  {filteredCompanySuggestions.map((name) => (
+                    <button
+                      key={name}
+                      type="button"
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        setCompanyNameOverride(name);
+                        setShowCompanySuggestions(false);
+                      }}
+                      className="block w-full px-3 py-1.5 text-left text-[12.5px] text-foreground hover:bg-muted"
+                    >
+                      {name}
+                    </button>
+                  ))}
+                </div>
+              )}
+              <label className="mb-1 mt-3 block text-[11px] font-medium text-muted-foreground">
+                港股代码（必填）
+              </label>
+              <input
+                type="text"
+                value={stockCode}
+                onChange={(event) => setStockCode(event.target.value.toUpperCase())}
+                placeholder="例如 0700.HK"
+                pattern="[0-9]{4,5}(\\.HK)?"
+                className="h-9 w-full rounded-sm border border-border bg-background px-3 text-[13px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+              />
+            </div>
 
             <textarea
               value={requestText}
@@ -674,7 +711,8 @@ function WorkspacePage() {
               </div>
               <p className="text-[11px] text-muted-foreground">
                 {/* TODO: 深度解析质量预览（如章节覆盖率、表格识别率、图表 OCR 准确度）需要后端提供 /documents/{id}/parse-quality API 支持 */}
-                以上为基于已解析元数据的快速评估。如需更详细的章节覆盖率或表格识别率分析，可在启动分析后由 Agent 专家团进行深度审核。
+                以上为基于已解析元数据的快速评估。如需更详细的章节覆盖率或表格识别率分析，可在启动分析后由
+                Agent 专家团进行深度审核。
               </p>
             </div>
           )}

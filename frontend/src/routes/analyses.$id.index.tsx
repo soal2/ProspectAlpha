@@ -457,13 +457,26 @@ function RealtimeStream() {
           </div>
           <label className="grid gap-1">
             <span className="text-muted-foreground">行业代码</span>
-            <input className="h-8 rounded-md border border-border bg-background px-2" value={industryCode} onChange={(event) => setIndustryCode(event.target.value)} required />
+            <input
+              className="h-8 rounded-md border border-border bg-background px-2"
+              value={industryCode}
+              onChange={(event) => setIndustryCode(event.target.value)}
+              required
+            />
           </label>
           <label className="grid gap-1">
             <span className="text-muted-foreground">行业名称</span>
-            <input className="h-8 rounded-md border border-border bg-background px-2" value={industryName} onChange={(event) => setIndustryName(event.target.value)} required />
+            <input
+              className="h-8 rounded-md border border-border bg-background px-2"
+              value={industryName}
+              onChange={(event) => setIndustryName(event.target.value)}
+              required
+            />
           </label>
-          <button disabled={confirmingIndustry} className="rounded-full bg-primary px-3 py-1.5 font-medium text-primary-foreground disabled:opacity-50">
+          <button
+            disabled={confirmingIndustry}
+            className="rounded-full bg-primary px-3 py-1.5 font-medium text-primary-foreground disabled:opacity-50"
+          >
             {confirmingIndustry ? "确认中" : "确认并继续"}
           </button>
         </form>

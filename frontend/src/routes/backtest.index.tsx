@@ -43,8 +43,18 @@ function BacktestIndex() {
           </p>
         </div>
         <div className="flex gap-2">
-          <Link to="/backtest/admin" className="inline-flex items-center rounded-full border border-border px-4 py-2 text-sm hover:bg-accent">市场数据管理</Link>
-          <Link to="/backtest/new" className="inline-flex items-center gap-1.5 rounded-full bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow-sm hover:bg-primary/90"><Plus className="size-4" /> 发起新回测</Link>
+          <Link
+            to="/backtest/admin"
+            className="inline-flex items-center rounded-full border border-border px-4 py-2 text-sm hover:bg-accent"
+          >
+            市场数据管理
+          </Link>
+          <Link
+            to="/backtest/new"
+            className="inline-flex items-center gap-1.5 rounded-full bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow-sm hover:bg-primary/90"
+          >
+            <Plus className="size-4" /> 发起新回测
+          </Link>
         </div>
       </div>
 
